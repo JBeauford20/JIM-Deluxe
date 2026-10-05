@@ -206,117 +206,113 @@ body { background:var(--paper); color:var(--ink); font-size:14px; font-family:'S
     <div class="card h-100">
       <div class="card-header"><i class="bi bi-box-seam me-2"></i>Availability</div>
       <div class="card-body">
-        <div class="d-flex align-items-center gap-3 p-3 rounded mb-3"
-             style="background:#f0f9f0;border:1px solid var(--moss-pale)">
-          <i class="bi bi-file-earmark-excel" style="font-size:28px;color:var(--fern)"></i>
-          <div>
-            <div class="fw-bold">Sandbox Availability.xlsx</div>
-            <div style="font-size:12px;color:var(--ink-soft)">Uploaded Oct 3, 2026 · Shipping week Oct 5 – 11</div>
-          </div>
-          <span class="badge ms-auto" style="background:var(--fern)">Active</span>
+
+        <!-- Upload zone (shown when no batch loaded) -->
+        <div id="upload-zone"
+             class="rounded-3 p-4 text-center mb-3"
+             style="border:2px dashed var(--moss-pale);background:#fafcfa;cursor:pointer;transition:.2s"
+             onmouseover="this.style.background='#f0f9f0';this.style.borderColor='var(--fern)'"
+             onmouseout="this.style.background='#fafcfa';this.style.borderColor='var(--moss-pale)'"
+             ondragover="event.preventDefault();this.style.background='#e8f5ee'"
+             ondragleave="this.style.background='#fafcfa'"
+             ondrop="handleAvailDrop(event)"
+             onclick="document.getElementById('avail-input').click()">
+          <input type="file" id="avail-input" accept=".xlsx,.xls,.csv"
+                 style="display:none" onchange="handleAvailFileInput(this)">
+          <i class="bi bi-cloud-upload" style="font-size:32px;color:var(--moss);opacity:.6"></i>
+          <p class="mb-1 mt-2 fw-semibold" style="color:var(--fern-dark)">Drop availability file here</p>
+          <p class="mb-0 text-muted" style="font-size:12px">or click to browse &mdash; Excel &middot; CSV &middot; Aster code + quantity</p>
         </div>
-        <div class="row g-2 mb-3 text-center">
-          <div class="col-4">
-            <div class="stat-card py-2">
-              <div class="num" style="font-size:1.4rem">18</div>
-              <div class="lbl">SKUs</div>
+
+        <!-- Loaded state (hidden until upload) -->
+        <div id="avail-loaded-panel" style="display:none">
+          <div class="d-flex align-items-center gap-3 p-3 rounded mb-3"
+               style="background:#f0f9f0;border:1px solid var(--moss-pale)">
+            <i class="bi bi-file-earmark-excel" style="font-size:28px;color:var(--fern)"></i>
+            <div>
+              <div class="fw-bold" id="avail-fname">&mdash;</div>
+              <div style="font-size:12px;color:var(--ink-soft)" id="avail-fmeta">&mdash;</div>
+            </div>
+            <div class="ms-auto d-flex align-items-center gap-2">
+              <span class="badge" style="background:var(--fern)">Active</span>
+              <button class="btn btn-sm btn-outline-secondary py-0"
+                      style="font-size:11px" onclick="clearAvailability()">&#x2715; Clear</button>
             </div>
           </div>
-          <div class="col-4">
-            <div class="stat-card py-2">
-              <div class="num" style="font-size:1.4rem">117,445</div>
-              <div class="lbl">Total Units</div>
-            </div>
+          <div class="row g-2 mb-3 text-center">
+            <div class="col-4"><div class="stat-card py-2">
+              <div class="num" id="avail-sku-n" style="font-size:1.4rem">&mdash;</div>
+              <div class="lbl">SKUs</div></div></div>
+            <div class="col-4"><div class="stat-card py-2">
+              <div class="num" id="avail-units-n" style="font-size:1.4rem">&mdash;</div>
+              <div class="lbl">Total Units</div></div></div>
+            <div class="col-4"><div class="stat-card ok py-2">
+              <div class="num" id="avail-map-n" style="font-size:1.4rem">&mdash;</div>
+              <div class="lbl">Mapped</div></div></div>
           </div>
-          <div class="col-4">
-            <div class="stat-card ok py-2">
-              <div class="num" style="font-size:1.4rem">18/18</div>
-              <div class="lbl">Mapped</div>
-            </div>
-          </div>
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin-bottom:6px">Available This Week</div>
+          <div style="max-height:200px;overflow-y:auto" id="avail-sku-list"></div>
         </div>
-        <!-- SKU list preview -->
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin-bottom:6px">Available This Week</div>
-        <div style="max-height:220px;overflow-y:auto">
-          <div id="week-avail-list"></div>
-        </div>
+
       </div>
     </div>
   </div>
 
-  <!-- Playbook + Generate -->
+  <!-- Playbook + Generate card -->
   <div class="col-12 col-lg-6">
     <div class="playbook mb-3">
-      <div class="playbook-hdr"><i class="bi bi-book me-2"></i>Weekly Playbook — WK41</div>
+      <div class="playbook-hdr"><i class="bi bi-book me-2"></i>Weekly Playbook</div>
       <div class="p-3">
         <div class="d-flex gap-2 mb-3">
-          <button class="btn btn-sm btn-outline-primary flex-fill" onclick="toast('Cleared to Business as Usual','ok')">
+          <button class="btn btn-sm btn-outline-primary flex-fill"
+                  onclick="toast('Business as Usual mode set','ok')">
             <i class="bi bi-arrow-repeat me-1"></i>Business as Usual
           </button>
-          <button class="btn btn-sm btn-primary flex-fill" onclick="toast('Add Scenario panel coming in v1.1','warn')">
+          <button class="btn btn-sm btn-primary flex-fill"
+                  onclick="toast('Scenario builder coming in next release','warn')">
             <i class="bi bi-plus-circle me-1"></i>Add Scenario
           </button>
         </div>
-        <!-- Active adjustments -->
-        <div class="adj-pill d-flex align-items-start gap-2 mb-2">
-          <span class="adj-type mt-1">demand ×2</span>
-          <div>
-            <div class="fw-semibold" style="font-size:12.5px">H2O demand boost — Arnie Sherman territory</div>
-            <div style="font-size:11px;color:var(--ink-soft)">115 stores · H2O Bowl · Oct 5–11 · pushes H2O to front of allocation</div>
-          </div>
-        </div>
-        <div class="adj-pill d-flex align-items-start gap-2">
-          <span class="adj-type mt-1">sku push</span>
-          <div>
-            <div class="fw-semibold" style="font-size:12.5px">H2O availability push — global</div>
-            <div style="font-size:11px;color:var(--ink-soft)">All stores · H2O Bowl · +0.25 avail weight</div>
-          </div>
-        </div>
+        <p class="text-muted mb-0" style="font-size:12.5px">
+          No adjustments active. Engine will run on standard velocity + recency weights.
+          Add a scenario to override &mdash; e.g. &ldquo;Collectors push to West&rdquo; or
+          &ldquo;H2O sale in Arnie&rsquo;s territory.&rdquo;
+        </p>
       </div>
     </div>
 
     <div class="card">
       <div class="card-header light"><i class="bi bi-lightning me-2"></i>Generate Recommendations</div>
       <div class="card-body">
-        <!-- Settings summary -->
-        <div class="row g-2 text-center mb-3">
-          <div class="col-4">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Velocity</div>
-            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">45%</div>
-          </div>
-          <div class="col-4">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Recency</div>
-            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">40%</div>
-          </div>
-          <div class="col-4">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Breadth</div>
-            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">15%</div>
-          </div>
-          <div class="col-4">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Min Carts</div>
-            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">2</div>
-          </div>
-          <div class="col-4">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Truck Cap</div>
-            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">45</div>
-          </div>
-          <div class="col-4">
-            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Hard Good</div>
-            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">50/50</div>
-          </div>
+        <div class="row g-2 mb-3 text-center">
+          <div class="col-4"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Velocity</div>
+            <div style="font-size:15px;font-weight:700;color:var(--fern-dark)">45%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Recency</div>
+            <div style="font-size:15px;font-weight:700;color:var(--fern-dark)">40%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Breadth</div>
+            <div style="font-size:15px;font-weight:700;color:var(--fern-dark)">15%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Min Carts</div>
+            <div style="font-size:15px;font-weight:700;color:var(--fern-dark)">2</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Truck Cap</div>
+            <div style="font-size:15px;font-weight:700;color:var(--fern-dark)">45</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Hard Good</div>
+            <div style="font-size:15px;font-weight:700;color:var(--fern-dark)">50/50</div></div>
         </div>
-        <!-- Already generated banner -->
-        <div class="alert py-2 mb-3 d-flex align-items-center gap-2"
-             style="background:#d4edda;border:1px solid #b8d4c2;color:#155724;font-size:13px">
-          <i class="bi bi-check-circle-fill"></i>
-          <div><strong>Plan generated</strong> — 223 stores, 470 carts, 97.5% clearance. Head to Review Plan.</div>
-        </div>
+
+        <div id="gen-status-bar" style="display:none"></div>
+
         <div class="d-grid gap-2">
-          <button class="btn btn-cta py-2" onclick="showScreen('plan');toast('Opening plan review…','ok')">
-            <i class="bi bi-clipboard-check me-2"></i>Review Recommendations
+          <button class="btn btn-cta py-2" id="gen-btn"
+                  onclick="runGenerate()" disabled>
+            <i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders
           </button>
-          <button class="btn btn-outline-secondary py-2" onclick="toast('Generating fresh plan…','ok');setTimeout(()=>toast('Plan ready — 223 stores, 470 carts','ok'),2000)">
-            <i class="bi bi-arrow-clockwise me-2"></i>Re-generate
+          <button class="btn btn-outline-secondary py-2" id="review-plan-btn"
+                  onclick="showScreen('plan',this)" style="display:none">
+            <i class="bi bi-clipboard-check me-2"></i>Review Plan
+          </button>
+          <button class="btn btn-outline-secondary py-2" id="empty-plan-btn"
+                  onclick="startEmptyPlan()" disabled>
+            <i class="bi bi-pencil-square me-2"></i>Start Empty Plan
           </button>
         </div>
       </div>
@@ -327,9 +323,6 @@ body { background:var(--paper); color:var(--ink); font-size:14px; font-family:'S
 </div>
 </div>
 
-<!-- ══════════════════════════════════════════════════════════════ -->
-<!-- SCREEN 2: PLAN REVIEW                                         -->
-<!-- ══════════════════════════════════════════════════════════════ -->
 <div id="screen-plan" class="screen">
 <div class="container-fluid p-4">
 
