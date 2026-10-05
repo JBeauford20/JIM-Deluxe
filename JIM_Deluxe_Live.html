@@ -188,10 +188,10 @@ body { background:var(--paper); color:var(--ink); font-size:14px; font-family:'S
 
 <!-- ═══ WEEK STRIP ════════════════════════════════════════════════ -->
 <div class="week-strip">
-  <span><i class="bi bi-calendar-week me-1"></i><strong>Shipping Week:</strong> Oct 5 – 11, 2026</span>
-  <span><i class="bi bi-box-seam me-1"></i>Sandbox Availability.xlsx</span>
+  <span><i class="bi bi-calendar-week me-1"></i><strong>Shipping Week:</strong> <span id="week-strip-week">&mdash;</span></span>
+  <span id="week-strip-batch" style="display:none"><i class="bi bi-box-seam me-1"></i><span id="week-strip-filename"></span></span>
   <span id="plan-status-chip" style="display:none" class="wchip orange"></span>
-  <span style="margin-left:auto;opacity:.6;font-size:11px">JIM Deluxe v1.0 · The Plant Company</span>
+  <span style="margin-left:auto;opacity:.6;font-size:11px">JIM Deluxe v1.0 &middot; The Plant Company</span>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════ -->
@@ -274,9 +274,9 @@ body { background:var(--paper); color:var(--ink); font-size:14px; font-family:'S
           </button>
         </div>
         <p class="text-muted mb-0" style="font-size:12.5px">
-          No adjustments active. Engine will run on standard velocity + recency weights.
-          Add a scenario to override &mdash; e.g. &ldquo;Collectors push to West&rdquo; or
-          &ldquo;H2O sale in Arnie&rsquo;s territory.&rdquo;
+          No adjustments active this week. Engine will run on standard velocity + recency weights.
+          Use <strong>Add Scenario</strong> to override before generating &mdash; e.g. a promotion
+          in a specific market or a product push to a region.
         </p>
       </div>
     </div>
@@ -560,8 +560,15 @@ function showScreen(name, clickedEl) {
 }
 
 function updateWeekStrip() {
-  var strip = document.getElementById('week-strip-week');
-  if (strip && activeWeek) strip.textContent = 'Week of ' + activeWeek;
+  var weekEl = document.getElementById('week-strip-week');
+  if (weekEl && activeWeek) weekEl.textContent = activeWeek;
+}
+
+function updateWeekStripBatch(filename) {
+  var batchEl   = document.getElementById('week-strip-batch');
+  var filenameEl = document.getElementById('week-strip-filename');
+  if (batchEl)    batchEl.style.display  = filename ? 'inline' : 'none';
+  if (filenameEl) filenameEl.textContent = filename || '';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -652,6 +659,8 @@ async function doUploadAvail(file) {
     // Load batch detail
     const batch = await api('/api/availability/batches/' + activeBatchId);
     showBatchLoaded(file.name, week);
+    updateWeekStrip();
+    updateWeekStripBatch(file.name);
 
     // Populate SKU list
     var skuList = document.getElementById('avail-sku-list');
