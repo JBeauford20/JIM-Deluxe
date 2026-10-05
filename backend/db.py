@@ -9,9 +9,11 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 
 def init_pool():
     global _pool
-    dsn = os.environ["SUPABASE_DB_URL"]
-    # Supabase connection pooler (port 6543) requires sslmode and
-    # fewer connections than direct (port 5432)
+    dsn = os.environ.get("SUPABASE_DB_URL", "NOT SET")
+    # Log enough to debug without exposing the full password
+    safe = dsn[:30] + "..." + dsn[-30:] if len(dsn) > 60 else dsn
+    print(f"[DB] Connecting to: {safe}", flush=True)
+    print(f"[DB] Using pooler: {'pooler.supabase.com' in dsn}", flush=True)
     extras = "?sslmode=require" if "pooler.supabase.com" in dsn and "sslmode" not in dsn else ""
     _pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=1,
