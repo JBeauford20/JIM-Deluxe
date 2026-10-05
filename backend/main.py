@@ -51,5 +51,12 @@ HTML_FILE = Path(__file__).parent.parent / "JIM_Deluxe_Live.html"
 @app.get("/")
 def serve_frontend():
     if HTML_FILE.exists():
-        return FileResponse(str(HTML_FILE), media_type="text/html")
+        return FileResponse(
+            str(HTML_FILE),
+            media_type="text/html",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+            }
+        )
     return {"error": "Frontend not found — ensure JIM_Deluxe_Live.html is in the project root"}
