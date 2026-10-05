@@ -660,7 +660,7 @@ def run(batch_id: str, shipping_week: date = None,
 
         for cart in data['carts']:
             cart_seq += 1
-            cart_key = f"WK{week_num:02d}-C{cart_seq:04d}"   # e.g. WK41-C0001
+            cart_key = f"WK{week_num:02d}-C{cart_seq:04d}"   # display label, not unique across runs
             cart_id = str(uuid.uuid4())
             cart_id_map[(store_id, cart['cart_number'])] = cart_id
             # Effective max shelves = physical cart capacity (5 for CC).
