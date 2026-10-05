@@ -1,0 +1,41 @@
+# Credentials — NEVER commit these
+*.env
+jim.env
+
+# Large data files — stay local
+*.xlsx
+*.xls
+*.zip
+*.csv
+*.json
+JIM Deluxe/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node (frontend build artifacts if added later)
+node_modules/
+dist/
+frontend/node_modules/
+
+# Patch/utility scripts — local only
+fix_*.py
+patch_*.py
+build_*.py
+check_*.py
+seed_*.py
+load_*.py
+run_*.py
+tag_*.py
+check_structure.py
+audit_js.txt
+prototype_data.json
+all_orders.json
+
+# Old prototype files
+JIM_Deluxe_Prototype.html
+html_structure.txt

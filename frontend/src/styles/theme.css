@@ -1,0 +1,372 @@
+/* =====================================================
+   JIM DELUXE — TPC Brand Theme
+   Green & white palette derived from the TPC logo
+   Overrides Bootstrap 5 primary color system
+   ===================================================== */
+
+/* ── TPC Brand Variables ─────────────────────────── */
+:root {
+  --tpc-fern:        #2F4A3E;   /* primary green */
+  --tpc-fern-dark:   #213631;   /* nav + header bg */
+  --tpc-fern-light:  #3d6150;   /* hover state */
+  --tpc-moss:        #6B7D52;   /* secondary green */
+  --tpc-moss-pale:   #DCE3CC;   /* light green tint */
+  --tpc-paper:       #F5F7F4;   /* page background */
+  --tpc-card:        #FFFFFF;   /* card background */
+  --tpc-ink:         #232A20;   /* body text */
+  --tpc-ink-soft:    #5B6152;   /* muted text */
+  --tpc-line:        #E2E6DF;   /* borders */
+  --tpc-orange:      #B5502D;   /* CTA accent — logo checkmark color */
+  --tpc-orange-dark: #9A3F20;   /* CTA hover */
+  --tpc-success:     #3F7A4F;   /* on-track green */
+  --tpc-warning:     #B9821F;   /* amber/due */
+  --tpc-danger:      #B5502D;   /* same as orange for consistency */
+
+  /* Tier colors */
+  --tier-aa:    #1a3a2a;
+  --tier-aa-bg: #d4edda;
+  --tier-a:     #155724;
+  --tier-a-bg:  #d4edda;
+  --tier-b:     #856404;
+  --tier-b-bg:  #fff3cd;
+  --tier-c:     #842029;
+  --tier-c-bg:  #f8d7da;
+  --tier-d:     #6c757d;
+  --tier-d-bg:  #e9ecef;
+  --tier-p:     #495057;
+  --tier-p-bg:  #f8f9fa;
+
+  /* Bootstrap overrides */
+  --bs-primary:            #2F4A3E;
+  --bs-primary-rgb:        47, 74, 62;
+  --bs-link-color:         #2F4A3E;
+  --bs-link-hover-color:   #213631;
+  --bs-font-sans-serif:    'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif;
+  --bs-body-bg:            var(--tpc-paper);
+  --bs-body-color:         var(--tpc-ink);
+  --bs-border-color:       var(--tpc-line);
+  --bs-card-border-radius: 10px;
+  --bs-card-box-shadow:    0 2px 8px rgba(35, 42, 32, 0.08);
+}
+
+/* ── Base ─────────────────────────────────────────── */
+body {
+  background: var(--tpc-paper);
+  color: var(--tpc-ink);
+  font-size: 14px;
+}
+
+/* ── Bootstrap Primary Color Override ────────────── */
+.btn-primary {
+  background-color: var(--tpc-fern) !important;
+  border-color:     var(--tpc-fern) !important;
+  color: #fff !important;
+}
+.btn-primary:hover, .btn-primary:focus {
+  background-color: var(--tpc-fern-light) !important;
+  border-color:     var(--tpc-fern-light) !important;
+}
+
+/* CTA / action button — orange accent (approve, export, generate) */
+.btn-cta {
+  background-color: var(--tpc-orange);
+  border-color:     var(--tpc-orange);
+  color: #fff;
+  font-weight: 600;
+}
+.btn-cta:hover, .btn-cta:focus {
+  background-color: var(--tpc-orange-dark);
+  border-color:     var(--tpc-orange-dark);
+  color: #fff;
+}
+
+.btn-outline-primary {
+  color: var(--tpc-fern) !important;
+  border-color: var(--tpc-fern) !important;
+}
+.btn-outline-primary:hover {
+  background-color: var(--tpc-fern) !important;
+  color: #fff !important;
+}
+
+/* ── Top Navbar ───────────────────────────────────── */
+.jim-navbar {
+  background: var(--tpc-fern-dark);
+  border-bottom: 2px solid var(--tpc-fern);
+  padding: 0 1.5rem;
+  height: 58px;
+}
+.jim-navbar .navbar-brand img {
+  height: 38px;
+  width: auto;
+}
+.jim-navbar .nav-link {
+  color: #c9d4c6 !important;
+  font-weight: 500;
+  font-size: 13.5px;
+  padding: 0 14px !important;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  border-bottom: 3px solid transparent;
+  transition: color .15s, border-color .15s;
+}
+.jim-navbar .nav-link:hover  { color: #fff !important; }
+.jim-navbar .nav-link.active {
+  color: #fff !important;
+  border-bottom-color: var(--tpc-orange);
+}
+.jim-navbar .user-chip {
+  color: #c9d4c6;
+  font-size: 12.5px;
+}
+
+/* ── Week Banner ──────────────────────────────────── */
+.week-banner {
+  background: var(--tpc-fern);
+  color: #fff;
+  padding: 8px 1.5rem;
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+.week-banner .banner-chip {
+  background: rgba(255,255,255,.15);
+  border-radius: 20px;
+  padding: 3px 12px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+.week-banner .banner-chip.status-draft    { background: rgba(181,80,45,.35); }
+.week-banner .banner-chip.status-approved { background: rgba(63,122,79,.45); }
+
+/* ── Cards ────────────────────────────────────────── */
+.card {
+  border: 1px solid var(--tpc-line);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(35, 42, 32, 0.07);
+}
+.card-header {
+  background: var(--tpc-fern-dark);
+  color: #fff;
+  border-radius: 9px 9px 0 0 !important;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding: 10px 16px;
+}
+.card-header.light {
+  background: #f0f4f0;
+  color: var(--tpc-fern-dark);
+}
+
+/* ── Stat Cards (summary metrics) ─────────────────── */
+.stat-card {
+  background: #fff;
+  border: 1px solid var(--tpc-line);
+  border-radius: 10px;
+  padding: 18px 20px;
+  box-shadow: 0 2px 6px rgba(35,42,32,.06);
+}
+.stat-card .stat-num {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--tpc-fern-dark);
+  line-height: 1;
+}
+.stat-card .stat-label {
+  font-size: 11px;
+  color: var(--tpc-ink-soft);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-top: 4px;
+}
+.stat-card.warn .stat-num { color: var(--tpc-orange); }
+.stat-card.ok   .stat-num { color: var(--tpc-success); }
+
+/* ── Tier Badges ──────────────────────────────────── */
+.tier-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.tier-badge.tier-AA { background: var(--tier-aa-bg); color: var(--tier-aa); border: 1.5px solid #a3cfb8; }
+.tier-badge.tier-A  { background: var(--tier-a-bg);  color: var(--tier-a);  border: 1.5px solid #b8d4c2; }
+.tier-badge.tier-B  { background: var(--tier-b-bg);  color: var(--tier-b);  border: 1.5px solid #e8d27c; }
+.tier-badge.tier-C  { background: var(--tier-c-bg);  color: var(--tier-c);  border: 1.5px solid #f1a1a8; }
+.tier-badge.tier-D  { background: var(--tier-d-bg);  color: var(--tier-d);  border: 1.5px solid #ced4da; }
+.tier-badge.tier-P  { background: var(--tier-p-bg);  color: var(--tier-p);  border: 1.5px solid #dee2e6; }
+
+/* ── Tables ───────────────────────────────────────── */
+.jim-table {
+  font-size: 13px;
+}
+.jim-table thead th {
+  background: #f0f4f0;
+  color: var(--tpc-fern-dark);
+  font-weight: 700;
+  font-size: 11.5px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  border-bottom: 2px solid var(--tpc-moss-pale);
+  white-space: nowrap;
+}
+.jim-table tbody tr {
+  cursor: pointer;
+  transition: background .1s;
+}
+.jim-table tbody tr:hover { background: #f5f9f5; }
+.jim-table tbody tr.flagged { background: #fff8f5; }
+.jim-table tbody tr.approved { background: #f5fbf6; }
+
+/* ── Order Status Badges ──────────────────────────── */
+.status-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 20px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.status-badge.draft     { background: #e9ecef; color: #495057; }
+.status-badge.adjusted  { background: #fff3cd; color: #856404; }
+.status-badge.approved  { background: #d4edda; color: #155724; }
+.status-badge.exported  { background: #cce5ff; color: #004085; }
+
+/* ── Cart Shelf Row ───────────────────────────────── */
+.shelf-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--tpc-line);
+  border-radius: 7px;
+  margin-bottom: 6px;
+  background: #fff;
+  transition: box-shadow .15s;
+}
+.shelf-row:hover { box-shadow: 0 2px 8px rgba(47,74,62,.12); }
+.shelf-row .shelf-num {
+  width: 24px;
+  height: 24px;
+  background: var(--tpc-fern);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.shelf-row .shelf-empty {
+  border: 2px dashed var(--tpc-line);
+  color: var(--tpc-ink-soft);
+  font-size: 12px;
+}
+.shelf-row .kit-pill {
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-weight: 600;
+  background: #f0f4f0;
+  color: var(--tpc-fern);
+}
+
+/* ── Availability Ticker ──────────────────────────── */
+.avail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--tpc-line);
+  font-size: 12.5px;
+}
+.avail-row .avail-bar-wrap {
+  flex: 1;
+  height: 6px;
+  background: var(--tpc-line);
+  border-radius: 3px;
+  margin: 0 10px;
+}
+.avail-bar-wrap .avail-bar {
+  height: 6px;
+  background: var(--tpc-fern);
+  border-radius: 3px;
+  transition: width .3s;
+}
+.avail-bar-wrap .avail-bar.low { background: var(--tpc-orange); }
+
+/* ── Playbook Panel ───────────────────────────────── */
+.playbook-card {
+  border: 2px solid var(--tpc-fern);
+  border-radius: 10px;
+  background: #f5f9f5;
+}
+.playbook-card .playbook-header {
+  background: var(--tpc-fern);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px 8px 0 0;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: .04em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.adjustment-pill {
+  background: #fff;
+  border: 1px solid var(--tpc-moss-pale);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+.adjustment-pill .adj-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--tpc-fern);
+  background: var(--tpc-moss-pale);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+/* ── Modals ───────────────────────────────────────── */
+.modal-header {
+  background: var(--tpc-fern-dark);
+  color: #fff;
+}
+.modal-header .btn-close { filter: invert(1); }
+
+/* ── Toast Overrides ──────────────────────────────── */
+.Toastify__toast--success {
+  background: var(--tpc-success) !important;
+}
+.Toastify__toast--error {
+  background: var(--tpc-danger) !important;
+}
+
+/* ── Scrollbar ────────────────────────────────────── */
+::-webkit-scrollbar       { width: 7px; height: 7px; }
+::-webkit-scrollbar-track { background: #f0f4f0; }
+::-webkit-scrollbar-thumb { background: var(--tpc-moss-pale); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--tpc-moss); }
+
+/* ── Utilities ────────────────────────────────────── */
+.text-fern     { color: var(--tpc-fern) !important; }
+.text-fern-dark{ color: var(--tpc-fern-dark) !important; }
+.bg-fern       { background: var(--tpc-fern) !important; color: #fff; }
+.bg-fern-dark  { background: var(--tpc-fern-dark) !important; color: #fff; }
+.border-fern   { border-color: var(--tpc-fern) !important; }
+.text-orange   { color: var(--tpc-orange) !important; }

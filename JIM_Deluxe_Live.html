@@ -1,0 +1,1266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JIM Deluxe — TPC Home Depot Order Writer</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+:root {
+  --fern:#2F4A3E; --fern-dark:#213631; --fern-light:#3d6150;
+  --moss:#6B7D52; --moss-pale:#DCE3CC;
+  --paper:#F5F7F4; --card:#fff;
+  --ink:#232A20; --ink-soft:#5B6152; --line:#E2E6DF;
+  --orange:#B5502D; --orange-dark:#9A3F20;
+  --success:#3F7A4F; --warning:#B9821F;
+}
+body { background:var(--paper); color:var(--ink); font-size:14px; font-family:'Segoe UI',system-ui,sans-serif; }
+
+/* ── Navbar ── */
+.jim-nav { background:var(--fern-dark); height:56px; padding:0 1.25rem; display:flex; align-items:center; gap:0; }
+.jim-nav .brand { display:flex; align-items:center; gap:10px; color:#fff; font-weight:800; font-size:15px; letter-spacing:.02em; margin-right:24px; text-decoration:none; }
+.jim-nav .brand .leaf { font-size:22px; }
+.jim-nav .nav-link { color:#b8c9b4 !important; font-size:13px; font-weight:600; padding:0 14px; height:56px; display:flex; align-items:center; border-bottom:3px solid transparent; transition:.15s; cursor:pointer; }
+.jim-nav .nav-link:hover { color:#fff !important; }
+.jim-nav .nav-link.active { color:#fff !important; border-bottom-color:var(--orange); }
+.jim-nav .ms-auto { margin-left:auto; color:#8fa88a; font-size:12px; display:flex; align-items:center; gap:16px; }
+
+/* ── Week banner ── */
+.week-strip { background:var(--fern); color:#fff; padding:6px 1.25rem; font-size:12.5px; display:flex; align-items:center; gap:14px; }
+.wchip { background:rgba(255,255,255,.15); border-radius:20px; padding:2px 12px; font-weight:700; }
+.wchip.orange { background:rgba(181,80,45,.4); }
+.wchip.green  { background:rgba(63,122,79,.5); }
+
+/* ── Screens ── */
+.screen { display:none; } .screen.active { display:block; }
+
+/* ── Stat cards ── */
+.stat-card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px 18px; box-shadow:0 2px 6px rgba(35,42,32,.06); }
+.stat-card .num { font-size:1.9rem; font-weight:700; color:var(--fern-dark); line-height:1; }
+.stat-card .lbl { font-size:11px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.06em; margin-top:4px; }
+.stat-card.warn .num { color:var(--orange); }
+.stat-card.ok .num   { color:var(--success); }
+
+/* ── Tier badges ── */
+.tb { display:inline-flex; align-items:center; justify-content:center; min-width:30px; height:20px; border-radius:5px; font-size:11px; font-weight:800; padding:0 5px; }
+.tb-AA { background:#d4edda; color:#1a3a2a; border:1.5px solid #a3cfb8; }
+.tb-A  { background:#d4edda; color:#155724; border:1.5px solid #b8d4c2; }
+.tb-B  { background:#fff3cd; color:#856404; border:1.5px solid #e8d27c; }
+.tb-C  { background:#f8d7da; color:#842029; border:1.5px solid #f1a1a8; }
+.tb-D  { background:#e9ecef; color:#6c757d; border:1.5px solid #ced4da; }
+.tb-P  { background:#f8f9fa; color:#495057; border:1.5px solid #dee2e6; }
+
+/* ── Buttons ── */
+.btn-primary { background:var(--fern) !important; border-color:var(--fern) !important; }
+.btn-primary:hover { background:var(--fern-light) !important; border-color:var(--fern-light) !important; }
+.btn-cta { background:var(--orange); border-color:var(--orange); color:#fff; font-weight:600; }
+.btn-cta:hover { background:var(--orange-dark); border-color:var(--orange-dark); color:#fff; }
+.btn-outline-primary { color:var(--fern) !important; border-color:var(--fern) !important; }
+.btn-outline-primary:hover { background:var(--fern) !important; color:#fff !important; }
+
+/* ── Tables ── */
+.jim-table { font-size:13px; }
+.jim-table thead th { background:#f0f4f0; color:var(--fern-dark); font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; border-bottom:2px solid var(--moss-pale); white-space:nowrap; }
+.jim-table tbody tr { cursor:pointer; transition:background .1s; }
+.jim-table tbody tr:hover { background:#f5f9f5; }
+.jim-table tbody tr.selected { background:#e8f2ec !important; }
+
+/* ── Status pills ── */
+.sp { font-size:10.5px; font-weight:700; padding:2px 9px; border-radius:20px; text-transform:uppercase; letter-spacing:.04em; }
+.sp-draft    { background:#e9ecef; color:#495057; }
+.sp-approved { background:#d4edda; color:#155724; }
+
+/* ── Cards ── */
+.card { border:1px solid var(--line); border-radius:10px; box-shadow:0 2px 8px rgba(35,42,32,.07); }
+.card-header { background:var(--fern-dark); color:#fff; border-radius:9px 9px 0 0 !important; font-size:12px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:9px 14px; }
+.card-header.light { background:#f0f4f0; color:var(--fern-dark); }
+
+/* ── Playbook ── */
+.playbook { border:2px solid var(--fern); border-radius:10px; }
+.playbook-hdr { background:var(--fern); color:#fff; padding:9px 14px; border-radius:8px 8px 0 0; font-weight:700; font-size:12px; letter-spacing:.04em; }
+.adj-pill { background:#fff; border:1px solid var(--moss-pale); border-radius:8px; padding:7px 12px; margin-bottom:5px; font-size:12.5px; }
+.adj-type { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; background:var(--moss-pale); color:var(--fern); padding:1px 7px; border-radius:10px; }
+
+/* ── Cart editor ── */
+.editor-layout { display:grid; grid-template-columns:280px 1fr 280px; gap:0; height:calc(100vh - 114px); overflow:hidden; }
+.editor-col { overflow-y:auto; border-right:1px solid var(--line); }
+.editor-col:last-child { border-right:none; border-left:1px solid var(--line); }
+.store-row { padding:9px 14px; border-bottom:1px solid var(--line); cursor:pointer; transition:background .1s; }
+.store-row:hover { background:#f5f9f5; }
+.store-row.active { background:#e8f2ec; border-left:3px solid var(--fern); }
+.store-row .sname { font-weight:700; font-size:13px; }
+.store-row .smeta { font-size:11px; color:var(--ink-soft); }
+
+/* Cart display */
+.cart-panel { padding:14px; }
+.cart-card { background:#fff; border:1px solid var(--line); border-radius:9px; margin-bottom:12px; overflow:hidden; }
+.cart-hdr { background:var(--fern); color:#fff; padding:8px 12px; display:flex; align-items:center; justify-content:space-between; font-weight:700; font-size:13px; }
+.cart-hdr .util { font-size:11px; font-weight:400; opacity:.8; }
+.shelf-row { display:flex; align-items:center; padding:7px 12px; border-bottom:1px solid #f0f4f0; gap:10px; }
+.shelf-row:last-child { border-bottom:none; }
+.shelf-num { width:22px; height:22px; background:var(--fern); color:#fff; border-radius:50%; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.shelf-empty { width:22px; height:22px; border:2px dashed var(--line); border-radius:50%; font-size:10px; display:flex; align-items:center; justify-content:center; color:var(--ink-soft); flex-shrink:0; }
+.shelf-content { flex:1; min-width:0; }
+.shelf-name { font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.shelf-detail { font-size:11px; color:var(--ink-soft); }
+.shelf-add { font-size:11px; padding:2px 8px; }
+.kit-pill { font-size:10px; padding:1px 7px; border-radius:10px; font-weight:600; background:#f0f4f0; color:var(--fern); }
+
+/* Availability picker */
+.picker-col { background:#fafcfa; }
+.picker-hdr { padding:10px 14px; border-bottom:1px solid var(--line); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--fern-dark); }
+.sku-row { padding:8px 14px; border-bottom:1px solid var(--line); cursor:pointer; transition:background .12s; }
+.sku-row:hover { background:#edf5ee; }
+.sku-row.selected { background:#d4edda; }
+.sku-row.depleted { opacity:.45; pointer-events:none; }
+.sku-name { font-size:12.5px; font-weight:600; line-height:1.3; }
+.sku-meta { font-size:11px; color:var(--ink-soft); }
+.avail-bar { height:5px; background:var(--line); border-radius:3px; margin-top:4px; }
+.avail-fill { height:5px; background:var(--fern); border-radius:3px; transition:width .3s; }
+.avail-fill.low { background:var(--orange); }
+.sku-units { font-size:12px; font-weight:700; color:var(--fern-dark); float:right; }
+
+/* ── Avail tiers ── */
+.tier-premium   { color:#2F4A3E; }
+.tier-collectors { color:#856404; }
+.tier-specialty  { color:#6f42c1; }
+.tier-rare       { color:#842029; }
+.tier-boutique   { color:#842029; }
+
+/* ── Store explorer ── */
+.explorer-layout { display:grid; grid-template-columns:340px 1fr; height:calc(100vh - 114px); overflow:hidden; }
+.profile-panel { overflow-y:auto; padding:16px; }
+.velocity-bar-wrap { background:var(--line); border-radius:4px; height:8px; margin-top:4px; }
+.velocity-bar { height:8px; background:var(--fern); border-radius:4px; }
+.group-chip { background:#f0f9f0; border:1px solid var(--moss-pale); border-radius:8px; padding:5px 10px; display:inline-flex; align-items:center; gap:5px; font-size:12px; margin:3px; }
+
+/* ── Toast ── */
+#toast-container { position:fixed; bottom:24px; right:24px; z-index:9999; display:flex; flex-direction:column; gap:8px; }
+.jim-toast { background:#fff; border-left:4px solid var(--fern); border-radius:8px; padding:10px 16px 10px 14px; box-shadow:0 4px 16px rgba(0,0,0,.15); display:flex; align-items:center; gap:10px; font-size:13px; min-width:280px; max-width:380px; animation:slidein .25s ease; }
+.jim-toast.ok   { border-left-color:var(--success); }
+.jim-toast.warn { border-left-color:var(--orange); }
+.jim-toast.err  { border-left-color:#dc3545; }
+@keyframes slidein { from { transform:translateX(40px); opacity:0; } to { transform:none; opacity:1; } }
+
+/* ── Modal ── */
+.modal-header { background:var(--fern-dark); color:#fff; }
+.modal-header .btn-close { filter:invert(1); }
+
+.cart-key{font-family:monospace;font-size:10.5px;background:rgba(255,255,255,.2);border-radius:4px;padding:1px 7px;letter-spacing:.04em;}
+/* ── Load bars ── */
+.load-util { height:6px; background:var(--line); border-radius:3px; }
+.load-fill { height:6px; border-radius:3px; background:var(--fern); }
+.load-fill.warn { background:var(--orange); }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:#f0f4f0; }
+::-webkit-scrollbar-thumb { background:var(--moss-pale); border-radius:3px; }
+</style>
+</head>
+<body>
+
+<!-- ═══ NAVBAR ═══════════════════════════════════════════════════ -->
+<nav class="jim-nav">
+  <a class="brand" href="#" onclick="return false">
+    <span class="leaf">🌿</span>
+    <span>JIM <span style="font-weight:400;opacity:.7">Deluxe</span></span>
+  </a>
+  <span class="nav-link active" onclick="showScreen('week',this)">
+    <i class="bi bi-house me-1"></i> Week
+  </span>
+  <span class="nav-link" onclick="showScreen('plan',this)">
+    <i class="bi bi-clipboard-check me-1"></i> Review Plan
+  </span>
+  <span class="nav-link" onclick="showScreen('editor',this)">
+    <i class="bi bi-cart3 me-1"></i> Order Editor
+  </span>
+  <span class="nav-link" onclick="showScreen('stores',this)">
+    <i class="bi bi-shop me-1"></i> Stores
+  </span>
+  <div class="ms-auto">
+    <span><i class="bi bi-calendar3 me-1"></i>Week of Oct 5, 2026</span>
+    <span style="opacity:.5">|</span>
+    <span>Josh Beauford &nbsp;<i class="bi bi-box-arrow-right" style="cursor:pointer" onclick="toast('Signed out','ok')"></i></span>
+  </div>
+</nav>
+
+<!-- ═══ WEEK STRIP ════════════════════════════════════════════════ -->
+<div class="week-strip">
+  <span><i class="bi bi-calendar-week me-1"></i><strong>Shipping Week:</strong> Oct 5 – 11, 2026</span>
+  <span><i class="bi bi-box-seam me-1"></i>Sandbox Availability.xlsx</span>
+  <span id="plan-status-chip" style="display:none" class="wchip orange"></span>
+  <span style="margin-left:auto;opacity:.6;font-size:11px">JIM Deluxe v1.0 · The Plant Company</span>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 1: WEEK                                                -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div id="screen-week" class="screen active">
+<div class="container-fluid p-4">
+<div class="row g-4">
+
+  <!-- Availability card -->
+  <div class="col-12 col-lg-6">
+    <div class="card h-100">
+      <div class="card-header"><i class="bi bi-box-seam me-2"></i>Availability</div>
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-3 p-3 rounded mb-3"
+             style="background:#f0f9f0;border:1px solid var(--moss-pale)">
+          <i class="bi bi-file-earmark-excel" style="font-size:28px;color:var(--fern)"></i>
+          <div>
+            <div class="fw-bold">Sandbox Availability.xlsx</div>
+            <div style="font-size:12px;color:var(--ink-soft)">Uploaded Oct 3, 2026 · Shipping week Oct 5 – 11</div>
+          </div>
+          <span class="badge ms-auto" style="background:var(--fern)">Active</span>
+        </div>
+        <div class="row g-2 mb-3 text-center">
+          <div class="col-4">
+            <div class="stat-card py-2">
+              <div class="num" style="font-size:1.4rem">18</div>
+              <div class="lbl">SKUs</div>
+            </div>
+          </div>
+          <div class="col-4">
+            <div class="stat-card py-2">
+              <div class="num" style="font-size:1.4rem">117,445</div>
+              <div class="lbl">Total Units</div>
+            </div>
+          </div>
+          <div class="col-4">
+            <div class="stat-card ok py-2">
+              <div class="num" style="font-size:1.4rem">18/18</div>
+              <div class="lbl">Mapped</div>
+            </div>
+          </div>
+        </div>
+        <!-- SKU list preview -->
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);margin-bottom:6px">Available This Week</div>
+        <div style="max-height:220px;overflow-y:auto">
+          <div id="week-avail-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Playbook + Generate -->
+  <div class="col-12 col-lg-6">
+    <div class="playbook mb-3">
+      <div class="playbook-hdr"><i class="bi bi-book me-2"></i>Weekly Playbook — WK41</div>
+      <div class="p-3">
+        <div class="d-flex gap-2 mb-3">
+          <button class="btn btn-sm btn-outline-primary flex-fill" onclick="toast('Cleared to Business as Usual','ok')">
+            <i class="bi bi-arrow-repeat me-1"></i>Business as Usual
+          </button>
+          <button class="btn btn-sm btn-primary flex-fill" onclick="toast('Add Scenario panel coming in v1.1','warn')">
+            <i class="bi bi-plus-circle me-1"></i>Add Scenario
+          </button>
+        </div>
+        <!-- Active adjustments -->
+        <div class="adj-pill d-flex align-items-start gap-2 mb-2">
+          <span class="adj-type mt-1">demand ×2</span>
+          <div>
+            <div class="fw-semibold" style="font-size:12.5px">H2O demand boost — Arnie Sherman territory</div>
+            <div style="font-size:11px;color:var(--ink-soft)">115 stores · H2O Bowl · Oct 5–11 · pushes H2O to front of allocation</div>
+          </div>
+        </div>
+        <div class="adj-pill d-flex align-items-start gap-2">
+          <span class="adj-type mt-1">sku push</span>
+          <div>
+            <div class="fw-semibold" style="font-size:12.5px">H2O availability push — global</div>
+            <div style="font-size:11px;color:var(--ink-soft)">All stores · H2O Bowl · +0.25 avail weight</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header light"><i class="bi bi-lightning me-2"></i>Generate Recommendations</div>
+      <div class="card-body">
+        <!-- Settings summary -->
+        <div class="row g-2 text-center mb-3">
+          <div class="col-4">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Velocity</div>
+            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">45%</div>
+          </div>
+          <div class="col-4">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Recency</div>
+            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">40%</div>
+          </div>
+          <div class="col-4">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Breadth</div>
+            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">15%</div>
+          </div>
+          <div class="col-4">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Min Carts</div>
+            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">2</div>
+          </div>
+          <div class="col-4">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Truck Cap</div>
+            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">45</div>
+          </div>
+          <div class="col-4">
+            <div style="font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em">Hard Good</div>
+            <div style="font-size:16px;font-weight:700;color:var(--fern-dark)">50/50</div>
+          </div>
+        </div>
+        <!-- Already generated banner -->
+        <div class="alert py-2 mb-3 d-flex align-items-center gap-2"
+             style="background:#d4edda;border:1px solid #b8d4c2;color:#155724;font-size:13px">
+          <i class="bi bi-check-circle-fill"></i>
+          <div><strong>Plan generated</strong> — 223 stores, 470 carts, 97.5% clearance. Head to Review Plan.</div>
+        </div>
+        <div class="d-grid gap-2">
+          <button class="btn btn-cta py-2" onclick="showScreen('plan');toast('Opening plan review…','ok')">
+            <i class="bi bi-clipboard-check me-2"></i>Review Recommendations
+          </button>
+          <button class="btn btn-outline-secondary py-2" onclick="toast('Generating fresh plan…','ok');setTimeout(()=>toast('Plan ready — 223 stores, 470 carts','ok'),2000)">
+            <i class="bi bi-arrow-clockwise me-2"></i>Re-generate
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 2: PLAN REVIEW                                         -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div id="screen-plan" class="screen">
+<div class="container-fluid p-4">
+
+  <!-- Stat cards -->
+  <div class="row g-3 mb-4" id="plan-stats"></div>
+
+  <!-- Actions bar -->
+  <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
+    <input class="form-control form-control-sm" style="max-width:240px"
+           placeholder="Search store, city…" id="plan-search"
+           oninput="filterPlanTable()">
+    <select class="form-select form-select-sm" style="max-width:90px" id="plan-tier-filter" onchange="filterPlanTable()">
+      <option value="">All tiers</option>
+      <option>AA</option><option>A</option><option>B</option><option>C</option><option>D</option>
+    </select>
+    <span class="text-muted" style="font-size:13px" id="plan-count"></span>
+    <div class="ms-auto d-flex gap-2">
+      <button class="btn btn-sm btn-outline-primary" onclick="approveAll()">
+        <i class="bi bi-check-all me-1"></i>Approve All
+      </button>
+      <button class="btn btn-sm btn-cta" id="export-btn" onclick="doExport()" disabled>
+        <i class="bi bi-download me-1"></i>Export to Aster
+      </button>
+    </div>
+  </div>
+
+  <!-- Order table -->
+  <div class="card">
+    <div class="table-responsive">
+      <table class="table jim-table mb-0">
+        <thead>
+          <tr>
+            <th>Store</th><th>Location</th><th>Tier</th>
+            <th>Last Delivery</th><th class="text-center">Carts</th>
+            <th class="text-center">Units</th><th>Load</th>
+            <th>Status</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="plan-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Loads summary -->
+  <div class="mt-4">
+    <h6 class="text-fern-dark mb-3"><i class="bi bi-truck me-2"></i>Truck Loads</h6>
+    <div class="row g-3" id="loads-grid"></div>
+  </div>
+
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 3: ORDER EDITOR                                        -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div id="screen-editor" class="screen">
+<div class="editor-layout">
+
+  <!-- Left: Store list -->
+  <div class="editor-col">
+    <div style="padding:10px 14px;border-bottom:1px solid var(--line);background:#f8faf8">
+      <input class="form-control form-control-sm" placeholder="Search store…"
+             oninput="filterEditorStores(this.value)" id="editor-search">
+    </div>
+    <div id="editor-store-list"></div>
+  </div>
+
+  <!-- Center: Cart editor -->
+  <div class="editor-col" id="cart-editor-panel">
+    <div class="d-flex align-items-center justify-content-center h-100 text-muted">
+      <div class="text-center">
+        <i class="bi bi-cursor-fill" style="font-size:36px;opacity:.2"></i>
+        <p class="mt-2">Select a store on the left to view its order</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: Availability picker -->
+  <div class="editor-col picker-col">
+    <div class="picker-hdr"><i class="bi bi-box-seam me-2"></i>Available Products</div>
+    <div style="padding:8px 14px;border-bottom:1px solid var(--line)">
+      <div style="font-size:11px;color:var(--ink-soft);margin-bottom:4px">
+        Click a product to add to the next open shelf
+      </div>
+      <div style="font-size:12px;font-weight:600;color:var(--fern-dark)">
+        <i class="bi bi-info-circle me-1"></i>
+        <span id="picker-hint">Select a store first</span>
+      </div>
+    </div>
+    <div id="picker-list"></div>
+  </div>
+
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 4: STORE EXPLORER                                      -->
+<!-- ══════════════════════════════════════════════════════════════ -->
+<div id="screen-stores" class="screen">
+<div class="explorer-layout">
+
+  <!-- Left: store list -->
+  <div class="editor-col">
+    <div style="padding:10px 14px;border-bottom:1px solid var(--line);background:#f8faf8">
+      <div class="d-flex gap-2">
+        <input class="form-control form-control-sm flex-grow-1" placeholder="Search…"
+               oninput="filterExplorerStores(this.value)">
+        <select class="form-select form-select-sm" style="width:80px" onchange="filterExplorerByTier(this.value)">
+          <option value="">All</option>
+          <option>AA</option><option>A</option><option>B</option><option>C</option><option>D</option>
+        </select>
+      </div>
+    </div>
+    <div id="explorer-list"></div>
+  </div>
+
+  <!-- Right: Store profile -->
+  <div class="profile-panel" id="profile-panel">
+    <div class="d-flex align-items-center justify-content-center h-100 text-muted">
+      <div class="text-center">
+        <i class="bi bi-shop" style="font-size:40px;opacity:.2"></i>
+        <p class="mt-3">Select a store to see its full profile</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+
+<!-- Load detail modal -->
+<div class="modal fade" id="loadModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="load-modal-title"><i class="bi bi-truck me-2"></i>Load Detail</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="load-modal-body"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-cta" id="approve-load-btn">
+          <i class="bi bi-check-all me-1"></i>Approve All Stores on This Load
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- Approve confirm modal -->
+<div class="modal fade" id="approveModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-check-circle me-2"></i>Approve Order</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="approve-modal-body"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-cta" id="approve-confirm-btn">
+          <i class="bi bi-check-circle me-1"></i>Yes, Approve
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ══════════════════════════════════════════════════════════════
+// JIM DELUXE — Live API-Connected Version
+// Backend: http://localhost:8000  (run: python backend/start.py)
+// Auth:    X-Dev-Key: jim-dev-2026
+// ══════════════════════════════════════════════════════════════
+
+const API   = '';  // relative: works on localhost AND Railway
+const HDRS  = {'X-Dev-Key': 'jim-dev-2026', 'Content-Type': 'application/json'};
+
+// ── State ──────────────────────────────────────────────────────
+let activeBatchId  = null;
+let activeRunId    = null;
+let activeWeek     = null;
+let orders         = [];
+let loads          = [];
+let avail          = [];
+let approveModal, loadModal, activeLoadName, approveTarget;
+
+// ── API helpers ────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, HDRS, opts.headers || {});
+  const res = await fetch(API + path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+}
+
+async function apiBlob(path) {
+  const res = await fetch(API + path, { headers: {'X-Dev-Key': 'jim-dev-2026'} });
+  if (!res.ok) throw new Error('Download failed: ' + res.statusText);
+  return res.blob();
+}
+
+// ── Init ───────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function () {
+  approveModal = new bootstrap.Modal('#approveModal');
+  loadModal    = new bootstrap.Modal('#loadModal');
+  document.getElementById('approve-confirm-btn').onclick = confirmApprove;
+  document.getElementById('approve-load-btn').onclick    = approveLoad;
+  bootApp();
+});
+
+async function bootApp() {
+  try {
+    // Check if there's already a recent run to resume
+    const recent = await api('/api/availability/recent-run').catch(() => null);
+    if (recent && recent.run_id) {
+      activeBatchId = recent.batch_id;
+      activeRunId   = recent.run_id;
+      activeWeek    = recent.shipping_week_start;
+      showBatchLoaded(recent.source_filename, recent.shipping_week_start);
+      await loadPlan();
+      updateWeekStrip();
+      toast('Resumed: ' + recent.source_filename + ' — ' + recent.stores_served + ' stores', 'ok');
+    }
+  } catch(e) {
+    console.log('No recent run to resume:', e.message);
+  }
+  buildExplorerList();
+}
+
+// ══════════════════════════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════════════════════════
+function showScreen(name, clickedEl) {
+  document.querySelectorAll('.screen').forEach(function(s) { s.classList.remove('active'); });
+  document.querySelectorAll('.nav-link').forEach(function(l) { l.classList.remove('active'); });
+  var screen = document.getElementById('screen-' + name);
+  if (screen) screen.classList.add('active');
+  var navEl = clickedEl ? (clickedEl.closest('.nav-link') || clickedEl) : null;
+  if (navEl) navEl.classList.add('active');
+}
+
+function updateWeekStrip() {
+  var strip = document.getElementById('week-strip-week');
+  if (strip && activeWeek) strip.textContent = 'Week of ' + activeWeek;
+}
+
+// ══════════════════════════════════════════════════════════════
+// TOAST
+// ══════════════════════════════════════════════════════════════
+function toast(msg, type) {
+  type = type || 'ok';
+  var icons = { ok:'bi-check-circle-fill', warn:'bi-exclamation-triangle-fill', err:'bi-x-circle-fill' };
+  var el = document.createElement('div');
+  el.className = 'jim-toast ' + type;
+  el.innerHTML = '<i class="bi ' + (icons[type]||icons.ok) + '" style="font-size:16px;flex-shrink:0"></i><span>' + msg + '</span>';
+  var tc = document.getElementById('toast-container');
+  if (tc) tc.appendChild(el);
+  setTimeout(function() {
+    el.style.opacity = '0'; el.style.transform = 'translateX(40px)'; el.style.transition = '.25s';
+    setTimeout(function() { el.remove(); }, 260);
+  }, 3800);
+}
+
+// ══════════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════════
+function tierBadge(t) {
+  var tier = (t||'').trim();
+  return '<span class="tb tb-' + tier + '">' + (tier||'?') + '</span>';
+}
+function statusPill(s) {
+  return '<span class="sp sp-' + s + '">' + s + '</span>';
+}
+function shortDesc(d) {
+  return (d||'').replace(/^PW /,'').replace(/ TPC$/,'').replace(/ - \d+cm$/,'');
+}
+function tierColor(t) {
+  var m = {Premium:'tier-premium',Collectors:'tier-collectors',Specialty:'tier-specialty',
+           'Rare Collectors':'tier-rare',Boutique:'tier-boutique'};
+  return m[t] || '';
+}
+function fmtNum(n) { return (n||0).toLocaleString(); }
+
+// ══════════════════════════════════════════════════════════════
+// WEEK SCREEN
+// ══════════════════════════════════════════════════════════════
+function showBatchLoaded(filename, week) {
+  var zone   = document.getElementById('upload-zone');
+  var loaded = document.getElementById('avail-loaded-panel');
+  if (zone)   zone.style.display   = 'none';
+  if (loaded) loaded.style.display = 'block';
+  var fname = document.getElementById('avail-fname');
+  var fmeta = document.getElementById('avail-fmeta');
+  if (fname) fname.textContent = filename || 'Availability file';
+  if (fmeta) fmeta.textContent = 'Shipping week: ' + (week || activeWeek || '—');
+  var genBtn = document.getElementById('gen-btn');
+  if (genBtn) genBtn.disabled = false;
+  var empBtn = document.getElementById('empty-plan-btn');
+  if (empBtn) empBtn.disabled = false;
+}
+
+function handleAvailDrop(e) {
+  e.preventDefault();
+  var file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) doUploadAvail(file);
+}
+function handleAvailFileInput(input) {
+  var file = input.files && input.files[0];
+  if (file) doUploadAvail(file);
+}
+
+async function doUploadAvail(file) {
+  var zone = document.getElementById('upload-zone');
+  if (zone) zone.innerHTML = '<div class="py-3"><span class="spinner-border spinner-border-sm me-2"></span>Uploading ' + file.name + '…</div>';
+
+  try {
+    const week = document.getElementById('week-input') ?
+      document.getElementById('week-input').value : '2026-10-05';
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('shipping_week', week || '2026-10-05');
+    const res = await fetch(API + '/api/availability/upload', {
+      method: 'POST',
+      headers: {'X-Dev-Key': 'jim-dev-2026'},
+      body: fd
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    activeBatchId = data.batch_id;
+    activeWeek    = week;
+
+    // Load batch detail
+    const batch = await api('/api/availability/batches/' + activeBatchId);
+    showBatchLoaded(file.name, week);
+
+    // Populate SKU list
+    var skuList = document.getElementById('avail-sku-list');
+    if (skuList && batch.lines) {
+      var lines = batch.lines;
+      document.getElementById('avail-sku-n') && (document.getElementById('avail-sku-n').textContent = lines.length);
+      var total = lines.reduce(function(s,l){ return s+(l.units_available||0); }, 0);
+      document.getElementById('avail-units-n') && (document.getElementById('avail-units-n').textContent = fmtNum(total));
+      document.getElementById('avail-map-n')   && (document.getElementById('avail-map-n').textContent   = lines.length+'/'+lines.length);
+      skuList.innerHTML = lines.map(function(l) {
+        return '<div class="d-flex justify-content-between py-1 px-2 rounded mb-1"'
+          + ' style="background:#fafcfa;border:1px solid var(--line);font-size:12.5px">'
+          + '<span class="fw-semibold">' + shortDesc(l.sku_description||l.description||'SKU '+l.sku_id) + '</span>'
+          + '<span class="fw-bold" style="color:var(--fern-dark)">' + fmtNum(l.units_available) + '</span>'
+          + '</div>';
+      }).join('');
+    }
+    toast(file.name + ' uploaded — batch ' + activeBatchId.slice(0,8) + '…', 'ok');
+  } catch(e) {
+    if (zone) zone.innerHTML = '<div class="py-3 text-danger"><i class="bi bi-exclamation-triangle me-2"></i>' + e.message + '</div>';
+    toast('Upload failed: ' + e.message, 'err');
+  }
+}
+
+function clearAvailability() {
+  activeBatchId = null; activeRunId = null;
+  orders = []; loads = [];
+  var zone = document.getElementById('upload-zone');
+  if (zone) {
+    zone.style.display = 'block';
+    zone.innerHTML = [
+      '<input type="file" id="avail-input" accept=".xlsx,.xls,.csv"',
+      '       style="display:none" onchange="handleAvailFileInput(this)">',
+      '<i class="bi bi-cloud-upload" style="font-size:32px;color:var(--moss);opacity:.6"></i>',
+      '<p class="mb-1 mt-2 fw-semibold" style="color:var(--fern-dark)">Drop availability file here</p>',
+      '<p class="mb-0 text-muted" style="font-size:12px">or click to browse — Excel · CSV</p>'
+    ].join('\n');
+  }
+  var loaded = document.getElementById('avail-loaded-panel');
+  if (loaded) loaded.style.display = 'none';
+  var genBtn = document.getElementById('gen-btn');
+  if (genBtn) genBtn.disabled = true;
+  buildPlanStats(); buildPlanTable(); buildLoadsGrid();
+  toast('Availability cleared', 'warn');
+}
+
+async function runGenerate() {
+  if (!activeBatchId) { toast('Upload an availability file first', 'warn'); return; }
+  var genBtn    = document.getElementById('gen-btn');
+  var statusBar = document.getElementById('gen-status-bar');
+  if (genBtn) { genBtn.disabled = true; genBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Running engine…'; }
+  if (statusBar) {
+    statusBar.style.cssText = 'display:flex;align-items:center;gap:.5rem;background:#fff3cd;border:1px solid #e8d27c;color:#856404;font-size:13px;padding:.5rem 1rem;border-radius:.375rem;margin-bottom:.75rem';
+    statusBar.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Scoring 2,000 stores · allocating inventory · building carts…';
+  }
+  try {
+    const job = await api('/api/engine/generate', {
+      method: 'POST',
+      body: JSON.stringify({ batch_id: activeBatchId, shipping_week: activeWeek || '2026-10-05' })
+    });
+    pollJob(job.job_id, genBtn, statusBar);
+  } catch(e) {
+    toast('Generate failed: ' + e.message, 'err');
+    if (genBtn) { genBtn.disabled = false; genBtn.innerHTML = '<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders'; }
+    if (statusBar) statusBar.style.display = 'none';
+  }
+}
+
+function pollJob(jobId, genBtn, statusBar) {
+  setTimeout(async function() {
+    try {
+      const job = await api('/api/engine/jobs/' + jobId);
+      if (job.status === 'complete') {
+        activeRunId = job.run_id;
+        await loadPlan();
+        if (statusBar) {
+          statusBar.style.background = '#d4edda';
+          statusBar.style.border = '1px solid #b8d4c2';
+          statusBar.style.color = '#155724';
+          statusBar.innerHTML = '<i class="bi bi-check-circle-fill me-2"></i>'
+            + '<strong>Plan generated</strong> — '
+            + orders.length + ' stores, '
+            + orders.reduce(function(s,o){ return s+(o.cart_count||0); },0) + ' carts';
+        }
+        if (genBtn) { genBtn.disabled = false; genBtn.innerHTML = '<i class="bi bi-arrow-clockwise me-2"></i>Re-generate'; }
+        var reviewBtn = document.getElementById('review-plan-btn');
+        if (reviewBtn) reviewBtn.style.display = 'block';
+        updateWeekStrip();
+        toast('Plan ready — ' + orders.length + ' stores across ' + loads.length + ' loads', 'ok');
+      } else if (job.status === 'failed') {
+        toast('Engine error: ' + (job.error_text || 'unknown'), 'err');
+        if (genBtn) { genBtn.disabled = false; genBtn.innerHTML = '<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders'; }
+      } else {
+        if (statusBar && job.progress_msg) statusBar.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>' + job.progress_msg;
+        pollJob(jobId, genBtn, statusBar);
+      }
+    } catch(e) { pollJob(jobId, genBtn, statusBar); }
+  }, 2500);
+}
+
+async function loadPlan() {
+  if (!activeRunId) return;
+  try {
+    const [ordersData, loadsData] = await Promise.all([
+      api('/api/orders/runs/' + activeRunId),
+      api('/api/orders/runs/' + activeRunId + '/loads')
+    ]);
+    orders = Array.isArray(ordersData) ? ordersData : [];
+    loads  = Array.isArray(loadsData)  ? loadsData  : [];
+    buildPlanStats(); buildPlanTable(); buildLoadsGrid(); buildEditorStoreList();
+  } catch(e) {
+    toast('Failed to load plan: ' + e.message, 'err');
+  }
+}
+
+function startEmptyPlan() {
+  orders = []; loads = [];
+  buildPlanStats(); buildPlanTable(); buildLoadsGrid(); buildEditorStoreList();
+  showScreen('editor', document.querySelectorAll('.nav-link')[2]);
+  toast('Empty plan — build orders manually in the editor', 'ok');
+}
+
+// ══════════════════════════════════════════════════════════════
+// PLAN REVIEW
+// ══════════════════════════════════════════════════════════════
+function buildPlanStats() {
+  var approved = orders.filter(function(o){ return o.status==='approved'; }).length;
+  var totalCarts = orders.reduce(function(s,o){ return s+(o.cart_count||0); },0);
+  var totalUnits = orders.reduce(function(s,o){ return s+(o.total_units||0); },0);
+
+  var stats = [
+    {id:'stat-stores', num:orders.length,              icon:'bi-shop',           cls:''},
+    {id:'stat-carts',  num:totalCarts,                  icon:'bi-cart3',          cls:''},
+    {id:'stat-units',  num:fmtNum(totalUnits),           icon:'bi-box-seam',       cls:''},
+    {id:'stat-loads',  num:loads.length,                 icon:'bi-truck',          cls:''},
+    {id:'stat-clear',  num:'97.5%',                      icon:'bi-graph-up',       cls:'ok'},
+    {id:'stat-appr',   num:approved+'/'+orders.length,   icon:'bi-check-circle',   cls:approved>0?'ok':''},
+  ];
+
+  var labels = ['Stores Served','Total Carts','Units Allocated','Truck Loads','Clearance','Approved'];
+  var el = document.getElementById('plan-stats');
+  if (!el) return;
+
+  if (!orders.length) {
+    el.innerHTML = '<div class="col-12 text-center text-muted py-4"><i class="bi bi-inbox" style="font-size:32px;opacity:.2"></i><p class="mt-2">No plan generated yet — upload availability and click Generate</p></div>';
+    return;
+  }
+
+  el.innerHTML = stats.map(function(s,i) {
+    return '<div class="col-6 col-md-4 col-xl-2"><div class="stat-card ' + s.cls + '">'
+      + '<div class="num"><i class="bi ' + s.icon + ' me-2" style="font-size:.9rem"></i>' + s.num + '</div>'
+      + '<div class="lbl">' + labels[i] + '</div></div></div>';
+  }).join('');
+}
+
+function buildPlanTable(data) {
+  var rows = data || orders;
+  var countEl = document.getElementById('plan-count');
+  if (countEl) countEl.textContent = rows.length + ' orders';
+  var tbody = document.getElementById('plan-tbody');
+  if (!tbody) return;
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4 text-muted">'
+      + (orders.length ? 'No orders match filter' : 'Generate a plan to see orders here')
+      + '</td></tr>';
+    document.getElementById('export-btn').disabled = true;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(function(o) {
+    var storeId = o.store_id || o.id;
+    var name    = o.store_name || o.name || '';
+    var city    = o.city || '';
+    var state   = o.state || '';
+    var tier    = (o.dynamic_velocity_tier || o.tier || '').trim();
+    var statT   = (o.volume_code || o.static || '').trim();
+    var days    = o.days_since_last_delivery != null ? o.days_since_last_delivery : o.days;
+    var carts   = o.cart_count || o.carts || 0;
+    var units   = o.total_units || o.units || 0;
+    var load    = o.load_name || o.load || '—';
+    var status  = o.status || 'draft';
+    var diff    = statT && tier && statT !== tier
+      ? '<span class="text-muted ms-1" style="font-size:10px">was '+statT+'</span>' : '';
+    var actionBtn = status === 'draft'
+      ? '<button class="btn btn-sm btn-cta py-0 px-2" style="font-size:11px" onclick="openApproveModal(\''+storeId+'\',\''+name.replace(/'/g,"\\'")+'\',\''+state+'\','+carts+','+units+',\''+load+'\')">Approve</button>'
+      : '<i class="bi bi-check-circle-fill text-success"></i>';
+
+    return '<tr class="' + (status==='approved'?'approved':'') + '" onclick="openOrderEditor(\''+storeId+'\')">'
+      + '<td><strong>' + storeId + '</strong></td>'
+      + '<td style="font-size:12px">' + name + '<br><span class="text-muted">' + city + ', ' + state + '</span></td>'
+      + '<td>' + tierBadge(tier) + diff + '</td>'
+      + '<td style="font-size:12px">' + (days!=null?days+'d ago':'—') + '</td>'
+      + '<td class="text-center fw-bold">' + carts + '</td>'
+      + '<td class="text-center">' + fmtNum(units) + '</td>'
+      + '<td style="font-size:12px">' + load + '</td>'
+      + '<td>' + statusPill(status) + '</td>'
+      + '<td onclick="event.stopPropagation()">' + actionBtn + '</td>'
+      + '</tr>';
+  }).join('');
+
+  document.getElementById('export-btn').disabled = !orders.some(function(o){ return o.status==='approved'; });
+}
+
+function filterPlanTable() {
+  var q = (document.getElementById('plan-search').value||'').toLowerCase();
+  var t = (document.getElementById('plan-tier-filter').value||'').trim();
+  buildPlanTable(orders.filter(function(o) {
+    var sid   = String(o.store_id||o.id||'');
+    var name  = (o.store_name||o.name||'').toLowerCase();
+    var city  = (o.city||'').toLowerCase();
+    var tier  = (o.dynamic_velocity_tier||o.tier||'').trim();
+    return (!q || sid.includes(q) || name.includes(q) || city.includes(q))
+        && (!t || tier === t);
+  }));
+}
+
+function buildLoadsGrid() {
+  var el = document.getElementById('loads-grid');
+  if (!el) return;
+  if (!loads.length) { el.innerHTML = ''; return; }
+  el.innerHTML = loads.map(function(l, idx) {
+    var name  = l.load_name || 'Load '+(idx+1);
+    var merch = l.merchant || '';
+    var carts = l.cart_count || 0;
+    var stores= l.store_count || 0;
+    var util  = parseFloat(l.utilization_pct || 0);
+    var low   = util < 95;
+    return '<div class="col-6 col-md-4 col-xl-2">'
+      + '<div class="card p-3" style="cursor:pointer;transition:box-shadow .15s"'
+      + ' onmouseenter="this.style.boxShadow=\'0 4px 14px rgba(47,74,62,.18)\'"'
+      + ' onmouseleave="this.style.boxShadow=\'\'"'
+      + ' onclick="openLoadModal(' + idx + ')">'
+      + '<div class="d-flex justify-content-between align-items-start mb-1">'
+      + '<strong style="font-size:13px">' + name + '</strong>'
+      + '<span class="' + (low?'text-orange':'text-success') + ' fw-bold" style="font-size:12px">' + util + '%</span>'
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--ink-soft)">' + merch + '</div>'
+      + '<div style="font-size:11px;color:var(--ink-soft)" class="mb-2">' + carts + ' carts · ' + stores + ' stores</div>'
+      + '<div class="load-util"><div class="load-fill ' + (low?'warn':'') + '" style="width:' + util + '%"></div></div>'
+      + (low ? '<div style="font-size:10px;color:var(--orange);margin-top:3px"><i class="bi bi-exclamation-triangle me-1"></i>Below 95%</div>'
+             : '<div style="font-size:10px;color:var(--success);margin-top:3px"><i class="bi bi-mouse me-1"></i>Click to view & approve</div>')
+      + '</div></div>';
+  }).join('');
+}
+
+// ── Approve logic ──────────────────────────────────────────────
+var approveTarget = null;
+
+function openApproveModal(storeId, name, state, carts, units, load) {
+  approveTarget = storeId;
+  document.getElementById('approve-modal-body').innerHTML =
+    '<p>Approve order for <strong>Store ' + storeId + ' — ' + name + ', ' + state + '</strong>?</p>'
+    + '<ul style="font-size:13px"><li>' + carts + ' carts · ' + fmtNum(units) + ' units</li>'
+    + '<li>Load: ' + load + '</li></ul>'
+    + '<p class="text-muted mb-0" style="font-size:12px">Locks quantities. Adjustments still possible before export.</p>';
+  approveModal.show();
+}
+
+async function confirmApprove() {
+  if (!approveTarget) return;
+  var o = orders.find(function(x){ return String(x.store_id||x.id)===String(approveTarget); });
+  if (!o) return;
+  try {
+    await api('/api/orders/' + o.id + '/approve?version=' + (o.version||1), { method: 'PATCH' });
+    o.status = 'approved';
+    buildPlanStats(); buildPlanTable(); buildEditorStoreList();
+    toast('Store ' + approveTarget + ' approved', 'ok');
+  } catch(e) {
+    toast('Approve failed: ' + e.message, 'err');
+  }
+  approveModal.hide();
+}
+
+async function approveAll() {
+  var drafts = orders.filter(function(o){ return o.status==='draft'; });
+  var done = 0;
+  for (var o of drafts) {
+    try {
+      await api('/api/orders/' + o.id + '/approve?version=' + (o.version||1), { method: 'PATCH' });
+      o.status = 'approved'; done++;
+    } catch(e) {}
+  }
+  buildPlanStats(); buildPlanTable(); buildEditorStoreList();
+  toast(done + ' orders approved', 'ok');
+}
+
+// ── Load modal ─────────────────────────────────────────────────
+function openLoadModal(loadIdx) {
+  var l = loads[loadIdx];
+  if (!l || !loadModal) return;
+  activeLoadName = l.load_name;
+  var storeIds = (l.store_ids || []).map(function(s){ return parseInt(s); });
+  var loadOrders = orders.filter(function(o){ return storeIds.includes(parseInt(o.store_id||o.id)); });
+  var approvedCount = loadOrders.filter(function(o){ return o.status==='approved'; }).length;
+  var util = parseFloat(l.utilization_pct || 0);
+
+  document.getElementById('load-modal-title').innerHTML =
+    '<i class="bi bi-truck me-2"></i>' + (l.load_name||'Load') + ' — ' + (l.merchant||'') + ' · ' + (l.region||'');
+
+  document.getElementById('load-modal-body').innerHTML =
+    '<div class="row g-2 mb-3">'
+    + '<div class="col-3"><div class="stat-card py-2 text-center"><div class="num" style="font-size:1.3rem">' + (l.cart_count||0) + '</div><div class="lbl">Carts</div></div></div>'
+    + '<div class="col-3"><div class="stat-card py-2 text-center"><div class="num" style="font-size:1.3rem">' + loadOrders.length + '</div><div class="lbl">Stores</div></div></div>'
+    + '<div class="col-3"><div class="stat-card ' + (util<95?'warn':'') + ' py-2 text-center"><div class="num" style="font-size:1.3rem">' + util + '%</div><div class="lbl">Utilization</div></div></div>'
+    + '<div class="col-3"><div class="stat-card ' + (approvedCount===loadOrders.length?'ok':'') + ' py-2 text-center"><div class="num" style="font-size:1.3rem">' + approvedCount + '/' + loadOrders.length + '</div><div class="lbl">Approved</div></div></div>'
+    + '</div>'
+    + '<div class="table-responsive"><table class="table jim-table mb-0"><thead><tr>'
+    + '<th>Store</th><th>Location</th><th>Tier</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Status</th>'
+    + '</tr></thead><tbody>'
+    + loadOrders.map(function(o) {
+        return '<tr><td><strong>' + (o.store_id||o.id) + '</strong><br><span style="font-size:11px;color:var(--ink-soft)">' + (o.store_name||o.name||'') + '</span></td>'
+          + '<td style="font-size:12px">' + (o.city||'') + ', ' + (o.state||'') + '</td>'
+          + '<td>' + tierBadge((o.dynamic_velocity_tier||o.tier||'').trim()) + '</td>'
+          + '<td class="text-center fw-bold">' + (o.cart_count||0) + '</td>'
+          + '<td class="text-center">' + fmtNum(o.total_units||0) + '</td>'
+          + '<td>' + statusPill(o.status||'draft') + '</td></tr>';
+      }).join('')
+    + '</tbody></table></div>'
+    + (util < 95 ? '<div class="alert alert-warning mt-3 py-2 mb-0" style="font-size:12.5px"><i class="bi bi-exclamation-triangle me-2"></i>Below 95% utilization — consider adding stores or merging loads.</div>' : '');
+
+  loadModal.show();
+}
+
+async function approveLoad() {
+  var l = loads.find(function(x){ return x.load_name===activeLoadName; });
+  if (!l) return;
+  var storeIds = (l.store_ids||[]).map(function(s){ return parseInt(s); });
+  var drafts = orders.filter(function(o){ return storeIds.includes(parseInt(o.store_id||o.id)) && o.status==='draft'; });
+  var done = 0;
+  for (var o of drafts) {
+    try {
+      await api('/api/orders/' + o.id + '/approve?version=' + (o.version||1), { method: 'PATCH' });
+      o.status = 'approved'; done++;
+    } catch(e) {}
+  }
+  if (loadModal) loadModal.hide();
+  buildPlanStats(); buildPlanTable(); buildEditorStoreList();
+  toast(activeLoadName + ' approved — ' + done + ' stores (' + (l.merchant||'') + ')', 'ok');
+}
+
+// ── Export ─────────────────────────────────────────────────────
+async function doExport() {
+  if (!activeRunId) { toast('No active plan to export', 'warn'); return; }
+  toast('Generating Aster ERP import file…', 'ok');
+  try {
+    const blob = await apiBlob('/api/exports/runs/' + activeRunId + '/aster-import');
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'JIM_AsterImport_' + (activeWeek||'WK') + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Aster import file downloaded', 'ok');
+  } catch(e) {
+    toast('Export failed: ' + e.message, 'err');
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// ORDER EDITOR (basic — full cart builder is Phase 2)
+// ══════════════════════════════════════════════════════════════
+function buildEditorStoreList(data) {
+  var list = data || orders;
+  var el   = document.getElementById('editor-store-list');
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = '<div class="p-3 text-muted" style="font-size:13px">No orders — generate a plan or start empty</div>';
+    return;
+  }
+  el.innerHTML = list.map(function(o) {
+    var storeId = o.store_id || o.id;
+    var name    = o.store_name || o.name || '';
+    var tier    = (o.dynamic_velocity_tier||o.tier||'').trim();
+    var carts   = o.cart_count || o.carts || 0;
+    return '<div class="store-row" onclick="selectEditorStore(\'' + storeId + '\')">'
+      + '<div class="d-flex align-items-center justify-content-between">'
+      + '<span class="sname">' + storeId + ' — ' + name + '</span>' + tierBadge(tier)
+      + '</div>'
+      + '<div class="smeta d-flex justify-content-between mt-1">'
+      + '<span>' + (o.city||'') + ', ' + (o.state||'') + '</span>'
+      + '<span>' + carts + ' carts · ' + statusPill(o.status||'draft') + '</span>'
+      + '</div></div>';
+  }).join('');
+}
+
+function filterEditorStores(q) {
+  buildEditorStoreList(orders.filter(function(o) {
+    return !q || String(o.store_id||o.id).includes(q) || (o.store_name||o.name||'').toLowerCase().includes(q.toLowerCase());
+  }));
+}
+
+async function selectEditorStore(storeId) {
+  var o = orders.find(function(x){ return String(x.store_id||x.id)===String(storeId); });
+  if (!o) return;
+  // Highlight in list
+  document.querySelectorAll('.store-row').forEach(function(r){ r.classList.remove('active'); });
+  event.currentTarget && event.currentTarget.classList.add('active');
+
+  var panel = document.getElementById('cart-editor-panel');
+  panel.innerHTML = '<div class="cart-panel"><div class="d-flex align-items-center justify-content-between mb-3">'
+    + '<div><h6 class="mb-0">' + (o.store_id||o.id) + ' — ' + (o.store_name||o.name||'') + ', ' + (o.state||'') + '</h6>'
+    + '<div style="font-size:12px;color:var(--ink-soft)">' + (o.merchant||'') + ' · Loading carts…</div></div>'
+    + '<div class="d-flex gap-2 align-items-center">' + tierBadge((o.dynamic_velocity_tier||o.tier||'').trim())
+    + (o.status==='draft'
+      ? '<button class="btn btn-sm btn-cta" onclick="openApproveModal(\''+storeId+'\',\''+(o.store_name||'').replace(/'/g,"\\'")+'\',\''+(o.state||'')+'\','+(o.cart_count||0)+','+(o.total_units||0)+',\''+(o.load_name||'—')+'\')">'
+        + '<i class="bi bi-check me-1"></i>Approve</button>'
+      : '<span class="sp sp-approved"><i class="bi bi-check-circle me-1"></i>Approved</span>')
+    + '</div></div>'
+    + '<div class="text-center text-muted py-4"><span class="spinner-border spinner-border-sm me-2"></span>Loading carts…</div>'
+    + '</div>';
+
+  try {
+    const detail = await api('/api/orders/' + o.id);
+    renderOrderDetail(o, detail);
+  } catch(e) {
+    panel.innerHTML = '<div class="p-4 text-danger">Failed to load carts: ' + e.message + '</div>';
+  }
+}
+
+function renderOrderDetail(o, detail) {
+  var panel  = document.getElementById('cart-editor-panel');
+  var carts  = detail.carts || [];
+  var storeId = o.store_id || o.id;
+
+  var html = '<div class="cart-panel">'
+    + '<div class="d-flex align-items-center justify-content-between mb-3">'
+    + '<div><h6 class="mb-0">' + storeId + ' — ' + (o.store_name||o.name||'') + ', ' + (o.state||'') + '</h6>'
+    + '<div style="font-size:12px;color:var(--ink-soft)">' + (o.merchant||'') + ' · ' + carts.length + ' carts · ' + fmtNum(o.total_units||0) + ' units</div></div>'
+    + '<div class="d-flex gap-2 align-items-center">' + tierBadge((o.dynamic_velocity_tier||o.tier||'').trim())
+    + (o.status==='draft'
+      ? '<button class="btn btn-sm btn-cta" onclick="openApproveModal(\''+storeId+'\',\''+(o.store_name||'').replace(/'/g,"\\'")+'\',\''+(o.state||'')+'\','+(o.cart_count||0)+','+(o.total_units||0)+',\''+(o.load_name||'—')+'\')">'
+        + '<i class="bi bi-check me-1"></i>Approve</button>'
+      : '<span class="sp sp-approved"><i class="bi bi-check-circle me-1"></i>Approved</span>')
+    + '</div></div>';
+
+  carts.forEach(function(cart) {
+    var shelves  = cart.shelves || [];
+    var cartKey  = cart.cart_key || ('WK-C' + cart.cart_number);
+    html += '<div class="cart-card">'
+      + '<div class="cart-hdr"><span><i class="bi bi-cart3 me-2"></i>Cart ' + cart.cart_number
+      + ' <span class="cart-key">' + cartKey + '</span></span>'
+      + '<span class="util">' + (cart.shelves_used||shelves.length) + '/5 shelves · ' + (cart.total_units||0) + ' units'
+      + (cart.is_full ? ' <i class="bi bi-check-circle-fill ms-1"></i>' : '') + '</span></div>';
+
+    shelves.forEach(function(shelf) {
+      html += '<div class="shelf-row">'
+        + '<span class="shelf-num">' + shelf.shelf_position + '</span>'
+        + '<div class="shelf-content">'
+        + '<div class="shelf-name">' + shortDesc(shelf.description||'SKU '+shelf.sku_id) + '</div>'
+        + '<div class="shelf-detail">' + (shelf.tray_count||0) + ' trays · ' + (shelf.unit_count||0) + ' units'
+        + (shelf.kit_type ? ' <span class="kit-pill ms-1">' + shelf.kit_type.replace('_kit','') + '</span>' : '')
+        + '</div></div></div>';
+    });
+
+    // Empty shelf slots
+    var filled = shelves.length;
+    for (var e = filled; e < 5; e++) {
+      html += '<div class="shelf-row" style="background:#fafcfa">'
+        + '<span class="shelf-empty"><i class="bi bi-plus" style="font-size:9px"></i></span>'
+        + '<div style="color:var(--ink-soft);font-size:12px;font-style:italic">Empty shelf ' + (e+1) + '</div></div>';
+    }
+    html += '</div>';
+  });
+
+  html += '</div>';
+  panel.innerHTML = html;
+}
+
+function openOrderEditor(storeId) {
+  showScreen('editor', document.querySelectorAll('.nav-link')[2]);
+  setTimeout(function() {
+    var rows = document.querySelectorAll('.store-row');
+    rows.forEach(function(r) {
+      if (r.textContent.includes(String(storeId))) {
+        r.click();
+      }
+    });
+  }, 50);
+}
+
+// ══════════════════════════════════════════════════════════════
+// STORE EXPLORER
+// ══════════════════════════════════════════════════════════════
+var storeListCache = [];
+var explorerSelected = null;
+
+async function buildExplorerList(filter) {
+  try {
+    if (!storeListCache.length) {
+      storeListCache = await api('/api/stores/?limit=100');
+    }
+    var list = filter ? storeListCache.filter(function(s) {
+      return String(s.store_id).includes(filter)
+          || (s.store_name||'').toLowerCase().includes(filter.toLowerCase())
+          || (s.city||'').toLowerCase().includes(filter.toLowerCase());
+    }) : storeListCache;
+    renderExplorerList(list);
+  } catch(e) {
+    var el = document.getElementById('explorer-list');
+    if (el) el.innerHTML = '<div class="p-3 text-danger" style="font-size:13px">Failed to load stores: ' + e.message + '</div>';
+  }
+}
+
+function renderExplorerList(list) {
+  var el = document.getElementById('explorer-list');
+  if (!el) return;
+  el.innerHTML = list.map(function(s) {
+    var tier = (s.dynamic_velocity_tier||'').trim();
+    return '<div class="store-row ' + (explorerSelected===s.store_id?'active':'') + '" onclick="selectExplorerStore(' + s.store_id + ')">'
+      + '<div class="d-flex align-items-center justify-content-between">'
+      + '<span class="sname">' + s.store_id + ' — ' + (s.store_name||'') + '</span>' + tierBadge(tier)
+      + '</div>'
+      + '<div class="smeta d-flex justify-content-between mt-1">'
+      + '<span>' + (s.city||'') + ', ' + (s.state||'') + '</span>'
+      + '<span>' + (s.merchant||'') + '</span>'
+      + '</div></div>';
+  }).join('');
+}
+
+function filterExplorerStores(q) { buildExplorerList(q); }
+function filterExplorerByTier(t) {
+  if (!t) { renderExplorerList(storeListCache); return; }
+  renderExplorerList(storeListCache.filter(function(s){ return (s.dynamic_velocity_tier||'').trim()===t; }));
+}
+
+async function selectExplorerStore(storeId) {
+  explorerSelected = storeId;
+  document.querySelectorAll('#explorer-list .store-row').forEach(function(r){ r.classList.remove('active'); });
+  event.currentTarget && event.currentTarget.classList.add('active');
+
+  var panel = document.getElementById('profile-panel');
+  panel.innerHTML = '<div class="d-flex align-items-center justify-content-center h-100"><span class="spinner-border text-success"></span></div>';
+
+  try {
+    const p = await api('/api/stores/' + storeId);
+    renderStoreProfile(p);
+  } catch(e) {
+    panel.innerHTML = '<div class="p-4 text-danger">Failed: ' + e.message + '</div>';
+  }
+}
+
+function renderStoreProfile(p) {
+  var s     = p.store || {};
+  var panel = document.getElementById('profile-panel');
+  var tier  = (s.dynamic_velocity_tier||'').trim();
+  var score = parseFloat(s.dynamic_velocity_score||0).toFixed(1);
+
+  var cats = [
+    ['9cm', s.tier_9cm], ['12cm', s.tier_12cm], ['17cm', s.tier_17cm],
+    ['H2O', s.tier_h2o], ['Collectors', s.tier_collectors]
+  ].filter(function(c){ return c[1]; });
+
+  var weekly = (p.weekly_sales||[]).slice(-26).map(function(w){ return w.units||0; });
+  var maxW   = Math.max.apply(null, weekly.concat([1]));
+
+  var topSkus = (p.top_skus||[]).slice(0,8);
+
+  panel.innerHTML =
+    '<div class="d-flex align-items-start justify-content-between mb-3">'
+    + '<div><h5 class="mb-1" style="color:var(--fern-dark)">Store ' + s.store_id + ' — ' + (s.store_name||'') + '</h5>'
+    + '<p class="text-muted mb-1" style="font-size:13px">' + (s.city||'') + ', ' + (s.state||'') + ' · ' + (s.merchant||'') + ' · ' + (s.merch_partner||'') + '</p></div>'
+    + '<div class="text-end">' + tierBadge(tier)
+    + '<div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Static: ' + (s.volume_code||'?').trim() + '</div></div>'
+    + '</div>'
+    // Score cards
+    + '<div class="row g-2 mb-3">'
+    + '<div class="col-6"><div class="stat-card py-2 text-center"><div class="num">' + score + '</div><div class="lbl">Velocity Score</div></div></div>'
+    + '<div class="col-6"><div class="stat-card py-2 text-center"><div class="num">' + (s.region||'—') + '</div><div class="lbl">Region</div></div></div>'
+    + '</div>'
+    // Category tiers
+    + (cats.length ? '<div class="mb-3">'
+      + cats.map(function(c){ return '<span class="group-chip"><span style="font-size:11px;color:var(--ink-soft)">' + c[0] + '</span>' + tierBadge(c[1].trim()) + '</span>'; }).join('')
+      + '</div>' : '')
+    // Weekly chart
+    + '<div class="card mb-3"><div class="card-header light"><i class="bi bi-graph-up me-2"></i>Weekly Sales — Last 26 Weeks</div>'
+    + '<div class="card-body pb-2"><div style="display:flex;align-items:flex-end;gap:2px;height:90px">'
+    + weekly.map(function(v){ return '<div style="flex:1;background:var(--fern);border-radius:2px 2px 0 0;height:' + Math.max(4,v/maxW*88) + 'px;min-width:0;opacity:.85" title="' + v + ' units"></div>'; }).join('')
+    + '</div><div class="d-flex justify-content-between mt-1" style="font-size:10px;color:var(--ink-soft)"><span>26 wks ago</span><span>This week</span></div>'
+    + '</div></div>'
+    // Top SKUs
+    + '<div class="card"><div class="card-header light"><i class="bi bi-bar-chart me-2"></i>Top SKUs (All Time)</div>'
+    + '<table class="table jim-table mb-0"><thead><tr><th>Product</th><th>Family</th><th class="text-end">Units</th></tr></thead><tbody>'
+    + topSkus.map(function(sk){
+        return '<tr><td style="font-size:12px">' + shortDesc(sk.description||sk.desc||'') + '</td>'
+          + '<td style="font-size:11px;color:var(--ink-soft)">' + (sk.family||'') + '</td>'
+          + '<td class="text-end fw-bold">' + fmtNum(sk.total_units||sk.units||0) + '</td></tr>';
+      }).join('')
+    + '</tbody></table></div>';
+}
+
+</script>
