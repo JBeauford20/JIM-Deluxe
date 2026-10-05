@@ -9,10 +9,14 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 
 def init_pool():
     global _pool
+    dsn = os.environ["SUPABASE_DB_URL"]
+    # Supabase connection pooler (port 6543) requires sslmode and
+    # fewer connections than direct (port 5432)
+    extras = "?sslmode=require" if "pooler.supabase.com" in dsn and "sslmode" not in dsn else ""
     _pool = psycopg2.pool.ThreadedConnectionPool(
-        minconn=2,
-        maxconn=10,
-        dsn=os.environ["SUPABASE_DB_URL"],
+        minconn=1,
+        maxconn=5,
+        dsn=dsn + extras,
         connect_timeout=15,
     )
 
