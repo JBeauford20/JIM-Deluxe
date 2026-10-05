@@ -549,21 +549,8 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 async function bootApp() {
-  try {
-    // Check if there's already a recent run to resume
-    const recent = await api('/api/availability/recent-run').catch(() => null);
-    if (recent && recent.run_id) {
-      activeBatchId = recent.batch_id;
-      activeRunId   = recent.run_id;
-      activeWeek    = recent.shipping_week_start;
-      showBatchLoaded(recent.source_filename, recent.shipping_week_start);
-      await loadPlan();
-      updateWeekStrip();
-      toast('Resumed: ' + recent.source_filename + ' — ' + recent.stores_served + ' stores', 'ok');
-    }
-  } catch(e) {
-    console.log('No recent run to resume:', e.message);
-  }
+  // Always start fresh — user uploads availability and generates manually
+  console.log('JIM Deluxe ready — upload an availability file to begin');
   buildExplorerList();
 }
 
