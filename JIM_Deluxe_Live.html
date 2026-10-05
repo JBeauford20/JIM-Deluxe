@@ -70,6 +70,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" onclick="go('plan',this)"><i class="bi bi-clipboard-check me-1"></i>Review Plan</span>
   <span class="nl" onclick="go('editor',this)"><i class="bi bi-cart3 me-1"></i>Order Editor</span>
   <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
+  <span class="nl" id="nl-configs" onclick="go('configs',this)" style="display:none"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
   <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
 </nav>
 
@@ -183,15 +184,29 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 
 <!-- EDITOR -->
 <div id="screen-editor" class="screen">
-<div class="sl">
-  <div class="sc2">
+<div style="display:grid;grid-template-columns:260px 1fr 280px;height:calc(100vh - 114px);overflow:hidden">
+  <!-- Left: store list -->
+  <div style="overflow-y:auto;border-right:1px solid var(--line)">
     <div style="padding:10px 14px;border-bottom:1px solid var(--line);background:#f8faf8">
       <input class="form-control form-control-sm" placeholder="Search store..." oninput="filterES(this.value)">
     </div>
     <div id="el"><div class="p-3 text-muted" style="font-size:13px">Generate a plan to see orders here</div></div>
   </div>
+  <!-- Center: cart detail -->
   <div id="ed" class="p-4 d-flex align-items-center justify-content-center text-muted" style="overflow-y:auto">
-    <div class="text-center"><i class="bi bi-cursor-fill" style="font-size:36px;opacity:.2"></i><p class="mt-2">Select a store to view its order</p></div>
+    <div class="text-center"><i class="bi bi-cursor-fill" style="font-size:36px;opacity:.2"></i><p class="mt-2">Select a store to view and edit its order</p></div>
+  </div>
+  <!-- Right: availability picker -->
+  <div id="avail-picker" style="border-left:1px solid var(--line);background:#fafcfa;overflow-y:auto;display:flex;flex-direction:column">
+    <div style="padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--fern-dark)">
+      <i class="bi bi-box-seam me-2"></i>Available Products
+    </div>
+    <div style="padding:8px 14px;border-bottom:1px solid var(--line);font-size:12px;color:var(--ink-soft)" id="picker-hint">
+      Select a store, then click a product to add it to the next open shelf
+    </div>
+    <div id="picker-items" style="flex:1;overflow-y:auto">
+      <div class="p-3 text-muted" style="font-size:12.5px">No availability loaded</div>
+    </div>
   </div>
 </div></div>
 
@@ -678,6 +693,257 @@ async function openStore(id,e){
       }).join('')+'</tbody></table></div>';
   }catch(e){sp.innerHTML='<div class="p-4 text-danger">Failed: '+e.message+'</div>';}
 }
+</script>
+
+<!-- CART CONFIGS SCREEN -->
+<div id="screen-configs" class="screen">
+<div class="container-fluid p-4">
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <div>
+      <h5 class="mb-0" style="color:var(--fern-dark)"><i class="bi bi-grid-3x3 me-2"></i>Cart Configurations</h5>
+      <p class="text-muted mb-0" style="font-size:13px" id="cfg-subtitle">Unique cart configs generated this week</p>
+    </div>
+    <span class="badge" style="background:var(--fern);font-size:13px" id="cfg-count">—</span>
+  </div>
+  <div class="row g-3" id="configs-grid">
+    <div class="col-12 text-center text-muted py-5"><i class="bi bi-grid-3x3" style="font-size:36px;opacity:.2"></i><p class="mt-2">Generate a plan to see cart configurations</p></div>
+  </div>
+</div>
+</div>
+
+<script>
+
+// ═══════════════════════════════════════════════════════════
+// CART CONFIGS TAB
+// ═══════════════════════════════════════════════════════════
+
+async function loadCartConfigs() {
+  if (!rId) return;
+  var el = document.getElementById('configs-grid');
+  var sub = document.getElementById('cfg-subtitle');
+  var cnt = document.getElementById('cfg-count');
+  if (!el) return;
+  el.innerHTML = '<div class="col-12 text-center py-4"><span class="spinner-border spinner-border-sm me-2"></span>Loading configurations...</div>';
+  try {
+    var configs = await api('/api/orders/runs/' + rId + '/cart-configs');
+    if (!configs.length) {
+      el.innerHTML = '<div class="col-12 text-center text-muted py-5"><i class="bi bi-grid-3x3" style="font-size:36px;opacity:.2"></i><p class="mt-2">No configs found</p></div>';
+      return;
+    }
+    if (cnt) cnt.textContent = configs.length + ' unique configs';
+    if (sub) sub.textContent = configs.length + ' unique cart configurations across ' + configs.reduce(function(s,c){return s+c.cart_count;},0) + ' total carts';
+
+    el.innerHTML = configs.map(function(c, i) {
+      var shelves = c.shelves || [];
+      var shelfHTML = shelves.map(function(s) {
+        return '<div class="d-flex align-items-center gap-2 py-1" style="border-bottom:1px solid #f0f4f0;font-size:12px">'
+          + '<span style="width:20px;height:20px;background:var(--fern);color:#fff;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">' + s.pos + '</span>'
+          + '<div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + sn(s.desc||('SKU '+s.sku_id)) + '</div>'
+          + '<div style="font-size:10.5px;color:var(--ink-soft)">' + (s.trays||0) + ' trays &middot; ' + (s.units||0) + 'u'
+          + (s.kit && s.kit!=='grower_pot' ? ' <span style="font-size:9.5px;padding:1px 5px;border-radius:8px;background:#f0f4f0;color:var(--fern)">' + s.kit.replace('_kit','') + '</span>' : '')
+          + '</div></div></div>';
+      }).join('');
+
+      // Fill empty slots
+      for (var e = shelves.length; e < 5; e++) {
+        shelfHTML += '<div class="d-flex align-items-center gap-2 py-1" style="font-size:12px;color:var(--ink-soft)">'
+          + '<span style="width:20px;height:20px;border:2px dashed var(--line);border-radius:50%;flex-shrink:0"></span>'
+          + '<em>Empty shelf ' + (e+1) + '</em></div>';
+      }
+
+      return '<div class="col-12 col-md-6 col-xl-4"><div class="card h-100">'
+        + '<div class="ch d-flex justify-content-between align-items-center" style="padding:9px 14px">'
+        + '<span><i class="bi bi-cart3 me-2"></i>Config ' + (i+1) + '</span>'
+        + '<span class="badge" style="background:rgba(255,255,255,.2);font-size:11px">' + c.cart_count + ' carts &middot; ' + c.store_count + ' stores</span>'
+        + '</div>'
+        + '<div class="card-body p-3">'
+        + shelfHTML
+        + '</div>'
+        + '<div class="card-footer py-2 px-3" style="font-size:11.5px;color:var(--ink-soft);background:#f8faf8">'
+        + '<i class="bi bi-box-seam me-1"></i>' + fmt(c.total_units) + ' units/cart'
+        + (c.sample_cart_key ? ' &middot; e.g. ' + c.sample_cart_key : '')
+        + '</div></div></div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="col-12"><div class="alert alert-danger">Failed to load: ' + e.message + '</div></div>';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// AVAILABILITY PICKER (for editor screen)
+// ═══════════════════════════════════════════════════════════
+var pickerAvail = [];
+var activePickerCart = null;  // {cart_id, order_id, store_id}
+
+async function loadPickerAvail() {
+  if (!bId) return;
+  try {
+    var lines = await api('/api/orders/runs/' + rId + '/availability/' + bId);
+    pickerAvail = lines || [];
+    renderPicker();
+  } catch(e) {
+    var el = document.getElementById('picker-items');
+    if (el) el.innerHTML = '<div class="p-3 text-danger" style="font-size:12px">' + e.message + '</div>';
+  }
+}
+
+function renderPicker() {
+  var el = document.getElementById('picker-items');
+  if (!el) return;
+  if (!pickerAvail.length) {
+    el.innerHTML = '<div class="p-3 text-muted" style="font-size:12.5px">No availability loaded</div>';
+    return;
+  }
+  el.innerHTML = pickerAvail.map(function(a) {
+    var pct = a.units_available > 0 ? Math.max(3, (a.remaining||a.units_available) / a.units_available * 100) : 0;
+    var low = pct < 20;
+    var depleted = (a.remaining||a.units_available) <= 0;
+    return '<div class="' + (depleted ? '' : '') + '" onclick="addFromPicker('' + a.availability_line_id + '')" style="'
+      + 'padding:8px 14px;border-bottom:1px solid var(--line);cursor:' + (depleted?'default':'pointer') + ';'
+      + 'opacity:' + (depleted?'.4':'1') + ';transition:background .1s"'
+      + ' onmouseover="if(!'+depleted+')this.style.background='#edf5ee'" onmouseout="this.style.background=''">'
+      + '<div class="d-flex justify-content-between align-items-start">'
+      + '<span style="font-size:12.5px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + sn(a.description||('SKU '+a.sku_id)) + '</span>'
+      + '<span style="font-size:12px;font-weight:700;color:var(--fern-dark);flex-shrink:0;margin-left:6px">' + fmt(a.remaining||a.units_available) + '</span>'
+      + '</div>'
+      + '<div style="font-size:10.5px;color:var(--ink-soft)">' + (a.family||'') + (a.code_level==='3M'?' &middot; CG-kitted':' &middot; in-house') + '</div>'
+      + '<div style="height:4px;background:var(--line);border-radius:2px;margin-top:4px">'
+      + '<div style="height:4px;border-radius:2px;background:' + (low?'var(--orange)':'var(--fern)') + ';width:' + pct + '%"></div></div>'
+      + '</div>';
+  }).join('');
+}
+
+async function addFromPicker(availLineId) {
+  if (!activePickerCart) { toast('Click an empty shelf slot first', 'warn'); return; }
+  var avail = pickerAvail.find(function(a){ return a.availability_line_id===availLineId; });
+  if (!avail || (avail.remaining||avail.units_available) <= 0) { toast('No remaining inventory for this item', 'warn'); return; }
+
+  try {
+    var result = await api('/api/carts/' + activePickerCart.cart_id + '/shelves', {
+      method: 'POST',
+      body: JSON.stringify({
+        sku_id: avail.sku_id,
+        tray_count: avail.units_per_tray ? 1 : 1,
+        kit_type: avail.hard_good_type!=='grower_pot' ? avail.hard_good_type : null,
+        availability_line_id: availLineId
+      })
+    });
+    // Update remaining in picker
+    if (avail.remaining !== undefined) avail.remaining = Math.max(0, avail.remaining - (result.units_added||0));
+    else avail.units_available = Math.max(0, (avail.units_available||0) - (result.units_added||0));
+    renderPicker();
+    // Reload the cart view
+    var o = orders.find(function(x){ return x.store_id == activePickerCart.store_id || x.id == activePickerCart.order_id; });
+    if (o) { var d = await api('/api/orders/' + activePickerCart.order_id); renderOrder(o, d); }
+    toast('Added ' + sn(avail.description||'product') + ' to shelf ' + result.shelf_position, 'ok');
+    activePickerCart = null;
+  } catch(e) { toast('Failed to add: ' + e.message, 'err'); }
+}
+
+// Override renderOrder to wire up shelf clicks and remove buttons
+var _origRenderOrder = renderOrder;
+renderOrder = function(o, d) {
+  _origRenderOrder(o, d);
+  // Wire up empty shelf clicks
+  document.querySelectorAll('#ed .shr').forEach(function(row) {
+    if (row.querySelector('em') && row.querySelector('em').textContent.includes('Empty shelf')) {
+      row.style.cursor = 'pointer';
+      row.onclick = function() {
+        var cartId = row.closest('[data-cart-id]');
+        if (cartId) {
+          activePickerCart = {
+            cart_id: cartId.dataset.cartId,
+            order_id: o.id,
+            store_id: o.store_id||o.id
+          };
+          document.getElementById('picker-hint').innerHTML =
+            '<strong style="color:var(--fern)">Shelf ready</strong> — pick a product from the list';
+          toast('Pick a product from the right panel to add to this shelf', 'ok');
+        }
+      };
+    }
+  });
+};
+
+// Patch renderOrder to add data-cart-id and remove buttons
+renderOrder = function(o, d) {
+  var cs = d.carts || [];
+  var h = '<div class="p-4"><div class="d-flex justify-content-between mb-3">'
+    + '<div><h6 class="mb-0">' + (o.store_id||o.id) + ' — ' + (o.store_name||o.name||'') + ', ' + (o.state||'') + '</h6>'
+    + '<div style="font-size:12px;color:var(--ink-soft)">' + (o.merchant||'') + ' &middot; ' + cs.length + ' carts &middot; ' + fmt(o.total_units||0) + ' units</div></div>'
+    + mkTB((o.dynamic_velocity_tier||o.tier||'').trim()) + '</div>';
+
+  cs.forEach(function(c) {
+    var sh = c.shelves || [];
+    h += '<div class="card mb-3" data-cart-id="' + c.id + '">'
+      + '<div class="ch d-flex justify-content-between" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0">'
+      + '<span><i class="bi bi-cart3 me-2"></i>Cart ' + c.cart_number + ' <span class="ck">' + (c.cart_key||'C'+c.cart_number) + '</span></span>'
+      + '<span style="font-size:11px;opacity:.8">' + (c.shelves_used||sh.length) + '/5 &middot; ' + (c.total_units||0) + 'u' + (c.is_full?'&nbsp;&#10003;':'') + '</span>'
+      + '</div>';
+    sh.forEach(function(s) {
+      h += '<div class="shr">'
+        + '<span class="shn">' + s.shelf_position + '</span>'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-weight:600;font-size:12.5px">' + sn(s.description||('SKU '+s.sku_id)) + '</div>'
+        + '<div style="font-size:11px;color:var(--ink-soft)">' + (s.tray_count||0) + ' trays &middot; ' + (s.unit_count||0) + 'u'
+        + (s.kit_type ? '<span class="kp ms-1">' + s.kit_type.replace('_kit','') + '</span>' : '')
+        + '</div></div>'
+        + '<button onclick="removeShelfAPI('' + c.id + '',' + s.shelf_position + ','' + (o.id) + '')" '
+        + 'class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:11px;flex-shrink:0">'
+        + '<i class="bi bi-x"></i></button>'
+        + '</div>';
+    });
+    // Empty slots — clickable to add
+    for (var e = sh.length; e < 5; e++) {
+      h += '<div class="shr" style="background:#fafcfa;cursor:pointer" '
+        + 'data-cart-id="' + c.id + '" data-order-id="' + o.id + '" data-store-id="' + (o.store_id||o.id) + '" '
+        + 'onclick="setActiveShelf(this,' + (e+1) + ')">'
+        + '<div style="width:22px;height:22px;border:2px dashed var(--line);border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--fern);font-size:12px;flex-shrink:0"><i class="bi bi-plus"></i></div>'
+        + '<div style="color:var(--ink-soft);font-size:12px;font-style:italic">Empty shelf ' + (e+1) + ' &mdash; click to add product</div>'
+        + '</div>';
+    }
+    h += '</div>';
+  });
+  h += '</div>';
+  document.getElementById('ed').innerHTML = h;
+
+  // Load picker availability if not loaded
+  if (pickerAvail.length === 0 && bId && rId) loadPickerAvail();
+};
+
+function setActiveShelf(el, pos) {
+  activePickerCart = {
+    cart_id: el.dataset.cartId,
+    order_id: el.dataset.orderId,
+    store_id: el.dataset.storeId
+  };
+  document.querySelectorAll('#ed .shr').forEach(function(r){ r.style.background=''; });
+  el.style.background = '#e8f5ee';
+  document.getElementById('picker-hint').innerHTML =
+    '<strong style="color:var(--fern)">Shelf ' + pos + ' ready</strong> &mdash; pick a product from below';
+  toast('Pick a product from the right panel', 'ok');
+}
+
+async function removeShelfAPI(cartId, shelfPos, orderId) {
+  try {
+    await api('/api/carts/' + cartId + '/shelves/' + shelfPos, { method: 'DELETE' });
+    // Reload
+    var o = orders.find(function(x){ return x.id===orderId; });
+    if (o) { var d = await api('/api/orders/' + orderId); renderOrder(o, d); }
+    if (bId && rId) loadPickerAvail();
+    toast('Shelf removed', 'warn');
+  } catch(e) { toast('Remove failed: ' + e.message, 'err'); }
+}
+
+// Show Cart Configs tab when plan is generated
+var _origLoadPlan = loadPlan;
+loadPlan = async function() {
+  await _origLoadPlan();
+  var nl = document.getElementById('nl-configs');
+  if (nl) nl.style.display = 'flex';
+  await loadCartConfigs();
+};
+
 </script>
 </body>
 </html>

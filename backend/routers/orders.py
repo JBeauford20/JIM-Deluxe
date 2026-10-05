@@ -119,6 +119,109 @@ def run_summary(run_id: str, user=Depends(get_current_user)):
         return cur.fetchone()
 
 
+@router.get("/runs/{run_id}/cart-configs")
+def cart_configs(run_id: str, user=Depends(get_current_user)):
+    """
+    All unique cart configurations generated for a run.
+    Groups carts by their shelf fingerprint so you can see how many
+    distinct configurations exist and which stores got each one.
+    """
+    with get_db() as conn:
+        cur = cursor(conn)
+        # Pull every cart + its shelves for this run
+        cur.execute("""
+            SELECT
+                oc.id            AS cart_id,
+                oc.cart_key,
+                oc.total_units,
+                oc.shelves_used,
+                oc.order_id,
+                o.store_id,
+                s.store_name,
+                s.city, s.state,
+                json_agg(
+                    json_build_object(
+                        'pos',   cs.shelf_position,
+                        'sku_id', cs.sku_id,
+                        'desc',  k.description,
+                        'family', k.family,
+                        'trays', cs.tray_count,
+                        'units', cs.unit_count,
+                        'kit',   cs.kit_type
+                    ) ORDER BY cs.shelf_position
+                ) AS shelves
+            FROM order_carts oc
+            JOIN orders o       ON o.id = oc.order_id
+            JOIN stores s       ON s.store_id = o.store_id
+            LEFT JOIN cart_shelves cs ON cs.cart_id = oc.id
+            LEFT JOIN skus k    ON k.sku_id = cs.sku_id
+            WHERE o.run_id = %s
+            GROUP BY oc.id, oc.cart_key, oc.total_units, oc.shelves_used,
+                     oc.order_id, o.store_id, s.store_name, s.city, s.state
+            ORDER BY oc.total_units DESC
+        """, (run_id,))
+        carts = cur.fetchall()
+
+    # Deduplicate by shelf fingerprint
+    from collections import defaultdict
+    import json
+
+    configs = defaultdict(lambda: {
+        "shelves": [], "cart_count": 0, "store_ids": [],
+        "total_units": 0, "sample_cart_key": ""
+    })
+
+    for cart in carts:
+        shelves = cart["shelves"] or []
+        # Fingerprint: sorted shelf contents
+        fp_parts = []
+        for sh in sorted(shelves, key=lambda x: x["pos"]):
+            fp_parts.append(f"{sh['pos']}:{sh['sku_id']}:{sh['trays']}")
+        fingerprint = "|".join(fp_parts) or "empty"
+
+        cfg = configs[fingerprint]
+        cfg["cart_count"] += 1
+        cfg["total_units"] = int(cart["total_units"] or 0)
+        cfg["shelves_used"] = int(cart["shelves_used"] or 0)
+        if not cfg["shelves"]:
+            cfg["shelves"] = shelves
+            cfg["sample_cart_key"] = cart["cart_key"] or ""
+        sid = int(cart["store_id"])
+        if sid not in cfg["store_ids"]:
+            cfg["store_ids"].append(sid)
+
+    # Sort by most carts first and return
+    result = []
+    for fp, cfg in sorted(configs.items(), key=lambda x: -x[1]["cart_count"]):
+        result.append({
+            "fingerprint":    fp,
+            "cart_count":     cfg["cart_count"],
+            "store_count":    len(cfg["store_ids"]),
+            "total_units":    cfg["total_units"],
+            "shelves_used":   cfg.get("shelves_used", 0),
+            "sample_cart_key": cfg["sample_cart_key"],
+            "shelves":        cfg["shelves"],
+            "store_ids":      cfg["store_ids"][:10],  # sample — first 10
+        })
+    return result
+
+
+@router.get("/runs/{run_id}/availability/{batch_id}")
+def run_availability(run_id: str, batch_id: str, user=Depends(get_current_user)):
+    """Available inventory remaining after this run's allocations."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT ar.*, k.description, k.family, k.legacy_product_group,
+                   ar.hard_good_type, ar.code_level
+            FROM availability_remaining ar
+            JOIN skus k ON k.sku_id = ar.sku_id
+            WHERE ar.batch_id = %s
+            ORDER BY ar.units_available DESC
+        """, (batch_id,))
+        return cur.fetchall()
+
+
 @router.patch("/{order_id}/review")
 def mark_reviewed(order_id: str, user=Depends(require_role("order_writer","manager","admin"))):
     with get_db() as conn:
