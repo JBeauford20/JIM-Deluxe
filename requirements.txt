@@ -1,8 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.31.0
 psycopg2-binary==2.9.9
-supabase==2.9.0
-python-jose[cryptography]==3.3.0
 python-multipart==0.0.12
 openpyxl==3.1.5
 pydantic==2.9.2
