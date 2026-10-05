@@ -140,13 +140,11 @@ def load_availability(filepath: str, shipping_week: date = None,
         aster_code = safe_int(code_val)
         quantity   = safe_int(qty_val)
 
-        if not aster_code or not quantity:
-            if any(v is not None for v in row):  # non-empty row
+        # Skip rows with no code, zero, or negative quantity (short/deficit items)
+        if not aster_code or not quantity or quantity <= 0:
+            if any(v is not None for v in row):
                 skipped.append((code_val, qty_val))
             continue
-
-        if quantity is None or quantity <= 0:
-            continue  # skip negatives (short/deficit) and zeros
 
         raw_lines.append({
             'aster_code': str(aster_code),

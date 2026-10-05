@@ -155,16 +155,14 @@ def add_trays(
         if pos is None:
             pos = cart["shelves_used"] + 1
 
-        # Get profile and config
+        # Get profile, config, and compute units for this shelf
         profile_id = get_sku_profile(cur, req.sku_id)
         cfg = get_shelf_config(cur, profile_id)
-        units = req.tray_count * cfg["units_per_shelf"] // (cfg["units_per_shelf"] // cfg["units_per_shelf"])
-        units = req.tray_count * (cfg["units_per_shelf"] // max(1, 6))  # trays × units_per_tray
-        # Simpler: units = tray_count × units_per_tray from packing_profiles
         cur.execute("SELECT units_per_tray FROM packing_profiles WHERE id = %s", (profile_id,))
-        units = req.tray_count * cur.fetchone()["units_per_tray"]
+        units_per_tray = cur.fetchone()["units_per_tray"]
+        units = req.tray_count * units_per_tray
 
-        # Check availability
+        # Check availability — availability_line_id strongly recommended to prevent double-spend
         if req.availability_line_id:
             cur.execute("""
                 SELECT remaining FROM availability_remaining
@@ -172,7 +170,13 @@ def add_trays(
             """, (req.availability_line_id,))
             avail = cur.fetchone()
             if not avail or avail["remaining"] < units:
-                raise HTTPException(400, f"Insufficient availability: need {units}, have {avail['remaining'] if avail else 0}")
+                remaining = avail["remaining"] if avail else 0
+                raise HTTPException(400, f"Insufficient availability: need {units}, have {remaining}")
+        else:
+            # No availability_line_id supplied — skipping reservation check.
+            # This allows manual builds but risks double-spend. Always supply
+            # availability_line_id when building from a batch.
+            pass
 
         # Write shelf
         cur.execute("""

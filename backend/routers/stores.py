@@ -11,7 +11,7 @@ def list_stores(
     tier:    str  = Query(None),
     region:  str  = Query(None),
     merchant: str = Query(None),
-    limit:   int  = Query(50),
+    limit:   int  = Query(50, le=500),  # cap at 500
     offset:  int  = Query(0),
     user=Depends(get_current_user)
 ):

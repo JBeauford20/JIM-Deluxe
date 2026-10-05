@@ -24,6 +24,8 @@ def init_pool():
 
 @contextmanager
 def get_db():
+    if _pool is None:
+        raise RuntimeError("Database pool not initialised — check SUPABASE_DB_URL")
     conn = _pool.getconn()
     try:
         conn.autocommit = False

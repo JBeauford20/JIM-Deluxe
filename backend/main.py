@@ -24,10 +24,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: restrict to known frontend origins.
+# Set ALLOWED_ORIGINS env var on Railway (comma-separated) to lock this down.
+import os as _os
+_raw_origins = _os.environ.get("ALLOWED_ORIGINS", "*")
+_allowed_origins = [o.strip() for o in _raw_origins.split(",")] if _raw_origins != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to Railway frontend URL in production
-    allow_methods=["*"],
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -408,7 +414,9 @@ async function generate(){
   }
 }
 
-function pollJob(jid,gb,gs){
+function pollJob(jid,gb,gs,retries){
+  retries=(retries||0)+1;
+  if(retries>20){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';if(gs)gs.style.display='none';toast('Engine timed out after 50 seconds — check Railway logs','err');return;}
   setTimeout(async function(){
     try{
       var j=await api('/api/engine/jobs/'+jid);
@@ -427,7 +435,7 @@ function pollJob(jid,gb,gs){
         if(j.progress_msg)gs.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>'+j.progress_msg;
         pollJob(jid,gb,gs);
       }
-    }catch(e){pollJob(jid,gb,gs);}
+    }catch(e){pollJob(jid,gb,gs,retries);}
   },2500);
 }
 

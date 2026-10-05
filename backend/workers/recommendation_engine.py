@@ -22,7 +22,17 @@ from datetime import date, timedelta
 from collections import defaultdict
 import psycopg2, psycopg2.extras
 
-from playbook_engine import PlaybookEngine, load_adjustments
+try:
+    from playbook_engine import PlaybookEngine, load_adjustments
+except ImportError:
+    # playbook_engine not available — use no-op stubs
+    class PlaybookEngine:
+        def __init__(self, *a, **kw): pass
+        def stage1_priority_bonus(self, *a): return 0.0
+        def stage1_cart_target(self, sid, default): return default
+        def stage2_sku_score_modifier(self, sid, sku_id, vel, avail): return vel, avail
+        def print_summary(self, log=print): log("  Playbook: not available (import error)")
+    def load_adjustments(cur, week): return []
 
 BASE = Path(__file__).parent
 ENV_FILE = BASE / "jim.env"

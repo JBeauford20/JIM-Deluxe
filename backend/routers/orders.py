@@ -127,4 +127,7 @@ def mark_reviewed(order_id: str, user=Depends(require_role("order_writer","manag
             UPDATE orders SET is_reviewed = true, reviewed_at = now(), reviewed_by = %s
             WHERE id = %s RETURNING id
         """, (user["email"], order_id))
+        if not cur.fetchone():
+            from fastapi import HTTPException
+            raise HTTPException(404, "Order not found")
         return {"reviewed": True}
