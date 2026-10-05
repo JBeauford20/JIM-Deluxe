@@ -180,9 +180,9 @@ body { background:var(--paper); color:var(--ink); font-size:14px; font-family:'S
     <i class="bi bi-shop me-1"></i> Stores
   </span>
   <div class="ms-auto">
-    <span><i class="bi bi-calendar3 me-1"></i>Week of Oct 5, 2026</span>
+    <span id="nav-week-display"><i class="bi bi-calendar3 me-1"></i>No week selected</span>
     <span style="opacity:.5">|</span>
-    <span>Josh Beauford &nbsp;<i class="bi bi-box-arrow-right" style="cursor:pointer" onclick="toast('Signed out','ok')"></i></span>
+    <span>TPC Order Writer &nbsp;<i class="bi bi-box-arrow-right" style="cursor:pointer" onclick="toast('Signed out','ok')"></i></span>
   </div>
 </nav>
 
@@ -508,6 +508,7 @@ const HDRS  = {'X-Dev-Key': 'jim-dev-2026', 'Content-Type': 'application/json'};
 
 // ── State ──────────────────────────────────────────────────────
 let activeBatchId  = null;
+let activeRunSummary = null;
 let activeRunId    = null;
 let activeWeek     = null;
 let orders         = [];
@@ -560,8 +561,11 @@ function showScreen(name, clickedEl) {
 }
 
 function updateWeekStrip() {
-  var weekEl = document.getElementById('week-strip-week');
-  if (weekEl && activeWeek) weekEl.textContent = activeWeek;
+  var weekEl  = document.getElementById('week-strip-week');
+  var navWeek = document.getElementById('nav-week-display');
+  if (weekEl  && activeWeek) weekEl.textContent = activeWeek;
+  if (navWeek && activeWeek)
+    navWeek.innerHTML = '<i class="bi bi-calendar3 me-1"></i>Week of ' + activeWeek;
 }
 
 function updateWeekStripBatch(filename) {
@@ -642,10 +646,10 @@ async function doUploadAvail(file) {
 
   try {
     const week = document.getElementById('week-input') ?
-      document.getElementById('week-input').value : '2026-10-05';
+      document.getElementById('week-input').value : new Date().toISOString().slice(0,10);
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('shipping_week', week || '2026-10-05');
+    fd.append('shipping_week', week || new Date().toISOString().slice(0,10));
     const res = await fetch(API + '/api/availability/upload', {
       method: 'POST',
       headers: {'X-Dev-Key': 'jim-dev-2026'},
@@ -719,7 +723,7 @@ async function runGenerate() {
   try {
     const job = await api('/api/engine/generate', {
       method: 'POST',
-      body: JSON.stringify({ batch_id: activeBatchId, shipping_week: activeWeek || '2026-10-05' })
+      body: JSON.stringify({ batch_id: activeBatchId, shipping_week: activeWeek || new Date().toISOString().slice(0,10) })
     });
     pollJob(job.job_id, genBtn, statusBar);
   } catch(e) {
@@ -764,12 +768,14 @@ function pollJob(jobId, genBtn, statusBar) {
 async function loadPlan() {
   if (!activeRunId) return;
   try {
-    const [ordersData, loadsData] = await Promise.all([
+    const [ordersData, loadsData, summaryData] = await Promise.all([
       api('/api/orders/runs/' + activeRunId),
-      api('/api/orders/runs/' + activeRunId + '/loads')
+      api('/api/orders/runs/' + activeRunId + '/loads'),
+      api('/api/orders/runs/' + activeRunId + '/summary').catch(()=>null)
     ]);
     orders = Array.isArray(ordersData) ? ordersData : [];
     loads  = Array.isArray(loadsData)  ? loadsData  : [];
+    activeRunSummary = summaryData || null;
     buildPlanStats(); buildPlanTable(); buildLoadsGrid(); buildEditorStoreList();
   } catch(e) {
     toast('Failed to load plan: ' + e.message, 'err');
@@ -796,7 +802,7 @@ function buildPlanStats() {
     {id:'stat-carts',  num:totalCarts,                  icon:'bi-cart3',          cls:''},
     {id:'stat-units',  num:fmtNum(totalUnits),           icon:'bi-box-seam',       cls:''},
     {id:'stat-loads',  num:loads.length,                 icon:'bi-truck',          cls:''},
-    {id:'stat-clear',  num:'97.5%',                      icon:'bi-graph-up',       cls:'ok'},
+    {id:'stat-clear',  num:(activeRunSummary ? activeRunSummary.inventory_clearance+'%' : '—'), icon:'bi-graph-up', cls:activeRunSummary?'ok':''},
     {id:'stat-appr',   num:approved+'/'+orders.length,   icon:'bi-check-circle',   cls:approved>0?'ok':''},
   ];
 
