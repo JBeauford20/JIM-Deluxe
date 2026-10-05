@@ -9,7 +9,8 @@ from db import get_db, cursor
 from routers.auth import require_role
 import sys, os
 
-sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), '..', '..', 'JIM Deluxe')))
+# Workers live in backend/workers/ — deployed with the repo
+sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), '..', 'workers')))
 
 router = APIRouter()
 
