@@ -59,6 +59,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 @keyframes si{from{transform:translateX(40px);opacity:0}to{transform:none;opacity:1}}
 .modal-header{background:var(--fd);color:#fff;}.modal-header .btn-close{filter:invert(1);}
 ::-webkit-scrollbar{width:6px;height:6px;}::-webkit-scrollbar-track{background:#f0f4f0;}::-webkit-scrollbar-thumb{background:var(--mp);border-radius:3px;}
+.lcard{cursor:pointer;transition:box-shadow .15s;}.lcard:hover{box-shadow:0 4px 14px rgba(47,74,62,.18)!important;}
 </style>
 </head>
 <body>
@@ -463,7 +464,7 @@ function buildLoads(){
   if(!loads.length){el.innerHTML='';return;}
   el.innerHTML=loads.map(function(l,i){
     var u=parseFloat(l.utilization_pct||0);var lw=u<95;
-    return '<div class="col-6 col-md-4 col-xl-2"><div class="card p-3" style="cursor:pointer" onmouseenter="this.style.boxShadow='0 4px 14px rgba(47,74,62,.18)'" onmouseleave="this.style.boxShadow=''" onclick="openLoad('+i+')">'
+    return '<div class="col-6 col-md-4 col-xl-2"><div class="card p-3 lcard" onclick="openLoad('+i+')">'
       +'<div class="d-flex justify-content-between mb-1"><strong style="font-size:13px">'+(l.load_name||'L'+(i+1))+'</strong><span class="'+(lw?'text-danger':'text-success')+' fw-bold" style="font-size:12px">'+u+'%</span></div>'
       +'<div style="font-size:11px;color:var(--is)">'+(l.merchant||'')+'</div>'
       +'<div style="font-size:11px;color:var(--is)" class="mb-2">'+(l.cart_count||0)+' carts, '+(l.store_count||0)+' stores</div>'
