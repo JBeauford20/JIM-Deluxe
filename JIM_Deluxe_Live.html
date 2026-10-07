@@ -7,7 +7,7 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
 <style>
-:root{--fern:#2F4A3E;--fd:#213631;--fl:#3d6150;--moss:#6B7D52;--mp:#DCE3CC;--paper:#F5F7F4;--ink:#232A20;--is:#5B6152;--line:#E2E6DF;--ora:#B5502D;--ok:#3F7A4F;}
+:root{--fern:#8B0000;--fd:#5C0000;--fl:#B22222;--moss:#9B4040;--mp:#EBCFCF;--paper:#F5F7F4;--ink:#232A20;--is:#5B6152;--line:#E2E6DF;--ora:#B5502D;--ok:#3F7A4F;}
 body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe UI",system-ui,sans-serif;}
 .jnav{background:var(--fd);height:56px;padding:0 1.25rem;display:flex;align-items:center;}
 .brand{color:#fff;font-weight:800;font-size:15px;margin-right:24px;}
@@ -60,6 +60,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 .modal-header{background:var(--fd);color:#fff;}.modal-header .btn-close{filter:invert(1);}
 ::-webkit-scrollbar{width:6px;height:6px;}::-webkit-scrollbar-track{background:#f0f4f0;}::-webkit-scrollbar-thumb{background:var(--mp);border-radius:3px;}
 .lcard{cursor:pointer;transition:box-shadow .15s;}.lcard:hover{box-shadow:0 4px 14px rgba(47,74,62,.18)!important;}
+.pitem:not(.dep):hover{background:#f9eaea;}
 </style>
 </head>
 <body>
@@ -427,8 +428,8 @@ function buildTable(d){
     var sid=o.store_id||o.id;var tier=(o.dynamic_velocity_tier||o.tier||'').trim();
     var days=o.days_since_last_delivery!=null?o.days_since_last_delivery+'d ago':'--';
     var oenc=encodeURIComponent(JSON.stringify({id:o.id,sid:sid,name:o.store_name||o.name||'',state:o.state||'',carts:o.cart_count||0,units:o.total_units||0,load:o.load_name||o.load||'--',v:o.version||1}));
-    var act=o.status==='draft'?'<button class="btn btn-sm btn-cta py-0 px-2" style="font-size:11px" onclick="event.stopPropagation();doOpenApprove(''+oenc+'')">Approve</button>':'<i class="bi bi-check-circle-fill text-success"></i>';
-    return '<tr class="'+(o.status==='approved'?'ar':'')+'" onclick="openEd(''+sid+'')">'
+    var act=o.status==='draft'?'<button class="btn btn-sm btn-cta py-0 px-2" style="font-size:11px" onclick="event.stopPropagation();doOpenApprove(\''+oenc+'\')">Approve</button>':'<i class="bi bi-check-circle-fill text-success"></i>';
+    return '<tr class="'+(o.status==='approved'?'ar':'')+'" onclick="openEd('+sid+')">'
       +'<td><strong>'+sid+'</strong></td><td style="font-size:12px">'+(o.store_name||o.name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span></td>'
       +'<td>'+mkTB(tier)+'</td><td style="font-size:12px">'+days+'</td>'
       +'<td class="text-center fw-bold">'+(o.cart_count||0)+'</td><td class="text-center">'+fmt(o.total_units||0)+'</td>'
@@ -502,7 +503,7 @@ async function doExport(){
 function buildEL(d){
   var el=document.getElementById('el');if(!el)return;var list=d||orders;
   if(!list.length){el.innerHTML='<div class="p-3 text-muted" style="font-size:13px">No orders yet</div>';return;}
-  el.innerHTML=list.map(function(o){var sid=o.store_id||o.id;return '<div class="sr" onclick="selEd(''+sid+'')">'+'<div class="d-flex align-items-center justify-content-between"><span style="font-weight:700;font-size:13px">'+sid+' -- '+(o.store_name||o.name||'')+'</span>'+mkTB((o.dynamic_velocity_tier||o.tier||'').trim())+'</div>'+'<div style="font-size:11px;color:var(--is)" class="d-flex justify-content-between mt-1"><span>'+(o.city||'')+', '+(o.state||'')+'</span><span>'+(o.cart_count||0)+' carts '+mkSP(o.status||'draft')+'</span></div></div>';}).join('');
+  el.innerHTML=list.map(function(o){var sid=o.store_id||o.id;return '<div class="sr" onclick="selEd('+sid+')">'+'<div class="d-flex align-items-center justify-content-between"><span style="font-weight:700;font-size:13px">'+sid+' -- '+(o.store_name||o.name||'')+'</span>'+mkTB((o.dynamic_velocity_tier||o.tier||'').trim())+'</div>'+'<div style="font-size:11px;color:var(--is)" class="d-flex justify-content-between mt-1"><span>'+(o.city||'')+', '+(o.state||'')+'</span><span>'+(o.cart_count||0)+' carts '+mkSP(o.status||'draft')+'</span></div></div>';}).join('');
 }
 function filterES(q){buildEL(orders.filter(function(o){return !q||String(o.store_id||o.id).includes(q)||(o.store_name||o.name||'').toLowerCase().includes(q.toLowerCase());}));}
 
@@ -528,10 +529,10 @@ function renderCart(o,d){
     var sh=c.shelves||[];
     h+='<div class="card mb-3"><div class="ch d-flex justify-content-between" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0"><span><i class="bi bi-cart3 me-2"></i>Cart '+c.cart_number+' <span class="ck">'+(c.cart_key||'C'+c.cart_number)+'</span></span><span style="font-size:11px;opacity:.8">'+(c.shelves_used||sh.length)+'/5, '+(c.total_units||0)+'u'+(c.is_full?' &#10003;':'')+'</span></div>';
     sh.forEach(function(s){
-      h+='<div class="shr"><span class="shn">'+s.shelf_position+'</span><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+sn(s.description||'SKU '+s.sku_id)+'</div><div style="font-size:11px;color:var(--is)">'+(s.tray_count||0)+' trays, '+(s.unit_count||0)+'u'+(s.kit_type?'<span class="kp ms-1">'+s.kit_type.replace('_kit','')+'</span>':'')+'</div></div><button onclick="rmShelf(''+c.id+'','+s.shelf_position+',''+o.id+'',event)" class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:11px;flex-shrink:0"><i class="bi bi-x"></i></button></div>';
+      h+='<div class="shr"><span class="shn">'+s.shelf_position+'</span><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+sn(s.description||'SKU '+s.sku_id)+'</div><div style="font-size:11px;color:var(--is)">'+(s.tray_count||0)+' trays, '+(s.unit_count||0)+'u'+(s.kit_type?'<span class="kp ms-1">'+s.kit_type.replace('_kit','')+'</span>':'')+'</div></div><button onclick="rmShelf(\''+c.id+'\','+s.shelf_position+',\''+o.id+'\',event)" class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:11px;flex-shrink:0"><i class="bi bi-x"></i></button></div>';
     });
     for(var e=sh.length;e<5;e++){
-      h+='<div class="shr" style="background:#fafcfa;cursor:pointer" onclick="setSlot(''+c.id+'',''+o.id+'','+(e+1)+')"><div style="width:22px;height:22px;border:2px dashed var(--line);border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--fern);font-size:12px;flex-shrink:0"><i class="bi bi-plus"></i></div><div style="color:var(--is);font-size:12px;font-style:italic">Empty shelf '+(e+1)+' -- click to add product</div></div>';
+      h+='<div class="shr" style="background:#fafcfa;cursor:pointer" onclick="setSlot(\''+c.id+'\',\''+o.id+'\','+(e+1)+')"><div style="width:22px;height:22px;border:2px dashed var(--line);border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--fern);font-size:12px;flex-shrink:0"><i class="bi bi-plus"></i></div><div style="color:var(--is);font-size:12px;font-style:italic">Empty shelf '+(e+1)+' -- click to add product</div></div>';
     }
     h+='</div>';
   });
@@ -588,7 +589,7 @@ function renderPicker(){
     var rem=a.remaining!=null?a.remaining:(a.units_available||0);
     var pct=a.units_available>0?Math.max(3,rem/a.units_available*100):0;
     var low=pct<20,dep=rem<=0;
-    return '<div onclick="'+(dep?'':'addProduct(''+a.availability_line_id+'')')+'" style="padding:8px 14px;border-bottom:1px solid var(--line);cursor:'+(dep?'default':'pointer')+';opacity:'+(dep?'.4':'1')+'"'+(dep?'':'onmouseover="this.style.background='#edf5ee'" onmouseout="this.style.background=''"')+'>'
+    return '<div class="pitem'+(dep?' dep':'')+'" onclick="'+(dep?'':'addProduct(\''+a.availability_line_id+'\')')+'" style="padding:8px 14px;border-bottom:1px solid var(--line);cursor:'+(dep?'default':'pointer')+';opacity:'+(dep?'.4':'1')+'">'
       +'<div class="d-flex justify-content-between"><span style="font-size:12.5px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+sn(a.description||'SKU '+a.sku_id)+'</span><span style="font-size:12px;font-weight:700;color:var(--fd);flex-shrink:0;margin-left:6px">'+fmt(rem)+'</span></div>'
       +'<div style="font-size:10.5px;color:var(--is)">'+(a.family||'')+(a.code_level==='3M'?' CG-kitted':' in-house')+'</div>'
       +'<div style="height:4px;background:var(--line);border-radius:2px;margin-top:4px"><div style="height:4px;border-radius:2px;background:'+(low?'var(--ora)':'var(--fern)')+';width:'+pct+'%"></div></div>'
