@@ -246,7 +246,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-// JIM Deluxe — Live v2 — Zero hardcoded values
+// JIM Deluxe -- Live v2 -- Zero hardcoded values
 const B='',DH={'X-Dev-Key':'jim-dev-2026','Content-Type':'application/json'};
 let bId=null,rId=null,wk=null,orders=[],loads=[],stores=[],aT=null,aLN=null,aMod,lMod;
 
@@ -292,7 +292,7 @@ function mkSP(s){return '<span class="sp sp-'+s+'">'+s+'</span>';}
 function fmt(n){return(n||0).toLocaleString();}
 function sn(d){return(d||'').replace(/^PW /,'').replace(/ TPC$/,'');}
 function setStrip(w,f,st){
-  var sw=document.getElementById('sw');if(sw)sw.textContent=w||'—';
+  var sw=document.getElementById('sw');if(sw)sw.textContent=w||'--';
   var sf=document.getElementById('sf'),sfn=document.getElementById('sfn');
   if(sf)sf.style.display=f?'inline':'none';if(sfn)sfn.textContent=f||'';
   var ss=document.getElementById('ss');
@@ -330,7 +330,7 @@ async function uploadFile(file){
     document.getElementById('gb').disabled=false;
     document.getElementById('eb').disabled=false;
     setStrip(w,file.name);
-    toast(file.name+' uploaded — '+ls.length+' SKUs, '+fmt(tot)+' units','ok');
+    toast(file.name+' uploaded -- '+ls.length+' SKUs, '+fmt(tot)+' units','ok');
   }catch(e){
     uz.innerHTML='<div class="text-danger"><i class="bi bi-exclamation-triangle me-2"></i>'+e.message+'</div>'
       +'<small class="text-muted" style="cursor:pointer" onclick="resetUZ()">Try again</small>';
@@ -382,11 +382,11 @@ function pollJob(jid,gb,gs){
       if(j.status==='complete'){
         rId=j.run_id;await loadPlan();
         gs.style.background='#d4edda';gs.style.border='1px solid #b8d4c2';gs.style.color='#155724';
-        gs.innerHTML='<i class="bi bi-check-circle-fill me-2"></i><strong>Plan generated</strong> — '+orders.length+' stores, '+orders.reduce(function(s,o){return s+(o.cart_count||0);},0)+' carts';
+        gs.innerHTML='<i class="bi bi-check-circle-fill me-2"></i><strong>Plan generated</strong> -- '+orders.length+' stores, '+orders.reduce(function(s,o){return s+(o.cart_count||0);},0)+' carts';
         gb.disabled=false;gb.innerHTML='<i class="bi bi-arrow-clockwise me-2"></i>Re-generate';
         document.getElementById('rb').style.display='block';
         setStrip(wk,null,'Draft Plan');
-        toast('Plan ready — '+orders.length+' stores','ok');
+        toast('Plan ready -- '+orders.length+' stores','ok');
       }else if(j.status==='failed'){
         gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';
         gs.style.display='none';toast('Engine error: '+(j.error_text||'unknown'),'err');
@@ -417,7 +417,7 @@ async function loadPlan(){
 function startEmpty(){
   orders=[];loads=[];buildStats();buildTable();buildLoads();buildEL();
   go('editor',document.querySelectorAll('.nl')[2]);
-  toast('Empty plan — build orders manually in the editor','ok');
+  toast('Empty plan -- build orders manually in the editor','ok');
 }
 
 // STATS
@@ -430,7 +430,7 @@ function buildStats(sum){
   var appr=orders.filter(function(o){return o.status==='approved';}).length;
   var tc=orders.reduce(function(s,o){return s+(o.cart_count||0);},0);
   var tu=orders.reduce(function(s,o){return s+(o.total_units||0);},0);
-  var cl=sum?sum.inventory_clearance+'%':'—';
+  var cl=sum?sum.inventory_clearance+'%':'--';
   var sd=[
     ['bi-shop','Stores Served',orders.length,''],
     ['bi-cart3','Total Carts',tc,''],
@@ -533,7 +533,7 @@ function openLoad(i){
   var lo=orders.filter(function(o){return sids.includes(parseInt(o.store_id||o.id));});
   var u=parseFloat(l.utilization_pct||0);
   var apprC=lo.filter(function(o){return o.status==='approved';}).length;
-  document.getElementById('lt').innerHTML='<i class="bi bi-truck me-2"></i>'+(l.load_name||'')+' — '+(l.merchant||'')+' \xb7 '+(l.region||'');
+  document.getElementById('lt').innerHTML='<i class="bi bi-truck me-2"></i>'+(l.load_name||'')+' -- '+(l.merchant||'')+' \xb7 '+(l.region||'');
   document.getElementById('lb').innerHTML=
     '<div class="row g-2 mb-3">'
     +'<div class="col-3"><div class="sc py-2 text-center"><div class="n" style="font-size:1.3rem">'+(l.cart_count||0)+'</div><div class="l">Carts</div></div></div>'
@@ -561,7 +561,7 @@ async function doApproveLoad(){
     try{await api('/api/orders/'+o.id+'/approve?version='+(o.version||1),{method:'PATCH'});o.status='approved';done++;}catch(e){}
   }
   if(lMod)lMod.hide();buildStats();buildTable();buildEL();
-  toast(aLN+' approved — '+done+' stores','ok');
+  toast(aLN+' approved -- '+done+' stores','ok');
 }
 
 // EXPORT
@@ -585,7 +585,7 @@ function buildEL(d){
     var sid=o.store_id||o.id;var tier=(o.dynamic_velocity_tier||o.tier||'').trim();
     return '<div class="sr" onclick="openEditorStore(\''+sid+'\',event)">'
       +'<div class="d-flex align-items-center justify-content-between">'
-      +'<span style="font-weight:700;font-size:13px">'+sid+' — '+(o.store_name||o.name||'')+'</span>'+mkTB(tier)+'</div>'
+      +'<span style="font-weight:700;font-size:13px">'+sid+' -- '+(o.store_name||o.name||'')+'</span>'+mkTB(tier)+'</div>'
       +'<div style="font-size:11px;color:var(--ink-soft)" class="d-flex justify-content-between mt-1">'
       +'<span>'+(o.city||'')+', '+(o.state||'')+'</span>'
       +'<span>'+(o.cart_count||0)+' carts '+mkSP(o.status||'draft')+'</span></div></div>';
@@ -601,7 +601,7 @@ async function openEditorStore(sid,e){
   var ed=document.getElementById('ed');
   ed.style.display='block';ed.classList.remove('d-flex','align-items-center','justify-content-center');
   ed.innerHTML='<div class="p-4"><div class="d-flex justify-content-between mb-3"><div>'
-    +'<h6 class="mb-0">'+(o.store_id||o.id)+' — '+(o.store_name||o.name||'')+', '+(o.state||'')+'</h6>'
+    +'<h6 class="mb-0">'+(o.store_id||o.id)+' -- '+(o.store_name||o.name||'')+', '+(o.state||'')+'</h6>'
     +'<div style="font-size:12px;color:var(--ink-soft)">Loading carts...</div></div>'
     +mkTB((o.dynamic_velocity_tier||o.tier||'').trim())+'</div>'
     +'<div class="text-center py-4"><span class="spinner-border spinner-border-sm"></span></div></div>';
@@ -618,14 +618,14 @@ function openEditor(sid,e){
 function renderOrder(o,d){
   var cs=d.carts||[];
   var h='<div class="p-4"><div class="d-flex justify-content-between mb-3"><div>'
-    +'<h6 class="mb-0">'+(o.store_id||o.id)+' — '+(o.store_name||o.name||'')+', '+(o.state||'')+'</h6>'
+    +'<h6 class="mb-0">'+(o.store_id||o.id)+' -- '+(o.store_name||o.name||'')+', '+(o.state||'')+'</h6>'
     +'<div style="font-size:12px;color:var(--ink-soft)">'+(o.merchant||'')+' \xb7 '+cs.length+' carts \xb7 '+fmt(o.total_units||0)+' units</div></div>'
     +mkTB((o.dynamic_velocity_tier||o.tier||'').trim())+'</div>';
   cs.forEach(function(c){
     var sh=c.shelves||[];
     h+='<div class="card mb-3"><div class="ch d-flex justify-content-between" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0">'
       +'<span><i class="bi bi-cart3 me-2"></i>Cart '+c.cart_number+' <span class="ck">'+(c.cart_key||'C'+c.cart_number)+'</span></span>'
-      +'<span style="font-size:11px;opacity:.8">'+(c.shelves_used||sh.length)+'/5 \xb7 '+(c.total_units||0)+'u'+(c.is_full?'✓':'')+'</span></div>';
+      +'<span style="font-size:11px;opacity:.8">'+(c.shelves_used||sh.length)+'/5 \xb7 '+(c.total_units||0)+'u'+(c.is_full?' ':'')+'</span></div>';
     sh.forEach(function(s){
       h+='<div class="shr"><span class="shn">'+s.shelf_position+'</span>'
         +'<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+sn(s.description||('SKU '+s.sku_id))+'</div>'
@@ -652,7 +652,7 @@ function renderSL(list){
   var el=document.getElementById('sl2');if(!el)return;
   el.innerHTML=list.map(function(s){
     return '<div class="sr" onclick="openStore('+s.store_id+',event)">'
-      +'<div class="d-flex justify-content-between"><span style="font-weight:700;font-size:13px">'+s.store_id+' — '+(s.store_name||'')+'</span>'+mkTB((s.dynamic_velocity_tier||'').trim())+'</div>'
+      +'<div class="d-flex justify-content-between"><span style="font-weight:700;font-size:13px">'+s.store_id+' -- '+(s.store_name||'')+'</span>'+mkTB((s.dynamic_velocity_tier||'').trim())+'</div>'
       +'<div style="font-size:11px;color:var(--ink-soft)" class="d-flex justify-content-between mt-1">'
       +'<span>'+(s.city||'')+', '+(s.state||'')+'</span><span>'+(s.merchant||'')+'</span></div></div>';
   }).join('');
@@ -675,14 +675,14 @@ async function openStore(id,e){
     var cats=[['9cm',s.tier_9cm],['12cm',s.tier_12cm],['17cm',s.tier_17cm],['H2O',s.tier_h2o],['Collectors',s.tier_collectors]].filter(function(c){return c[1];});
     sp.innerHTML=
       '<div class="d-flex justify-content-between align-items-start mb-3">'
-      +'<div><h5 class="mb-1" style="color:var(--fern-dark)">Store '+s.store_id+' — '+(s.store_name||'')+'</h5>'
+      +'<div><h5 class="mb-1" style="color:var(--fern-dark)">Store '+s.store_id+' -- '+(s.store_name||'')+'</h5>'
       +'<p class="text-muted mb-0" style="font-size:13px">'+(s.city||'')+', '+(s.state||'')+' \xb7 '+(s.merchant||'')+'</p></div>'
       +'<div class="text-end">'+mkTB(tier)+'<div style="font-size:11px;color:var(--ink-soft);margin-top:3px">Static: '+(s.volume_code||'').trim()+'</div></div></div>'
       +'<div class="row g-2 mb-3">'
       +'<div class="col-6"><div class="sc py-2 text-center"><div class="n">'+parseFloat(s.dynamic_velocity_score||0).toFixed(1)+'</div><div class="l">Velocity Score</div></div></div>'
-      +'<div class="col-6"><div class="sc py-2 text-center"><div class="n">'+(s.region||'—')+'</div><div class="l">Region</div></div></div></div>'
+      +'<div class="col-6"><div class="sc py-2 text-center"><div class="n">'+(s.region||'--')+'</div><div class="l">Region</div></div></div></div>'
       +(cats.length?'<div class="mb-3">'+cats.map(function(c){return '<span style="background:#f0f9f0;border:1px solid var(--moss-pale);border-radius:8px;padding:5px 10px;display:inline-flex;align-items:center;gap:5px;font-size:12px;margin:3px"><span style="color:var(--ink-soft)">'+c[0]+'</span>'+mkTB(c[1].trim())+'</span>';}).join('')+'</div>':'')
-      +'<div class="card mb-3"><div class="ch lt"><i class="bi bi-graph-up me-2"></i>Weekly Sales — Last 26 Weeks</div>'
+      +'<div class="card mb-3"><div class="ch lt"><i class="bi bi-graph-up me-2"></i>Weekly Sales -- Last 26 Weeks</div>'
       +'<div class="card-body pb-2"><div style="display:flex;align-items:flex-end;gap:2px;height:90px">'
       +weekly.map(function(v){return '<div style="flex:1;background:var(--fern);border-radius:2px 2px 0 0;height:'+Math.max(4,v/maxW*88)+'px;min-width:0;opacity:.85" title="'+v+'u"></div>';}).join('')
       +'</div><div class="d-flex justify-content-between mt-1" style="font-size:10px;color:var(--ink-soft)"><span>26 wks ago</span><span>This week</span></div></div></div>'
@@ -824,7 +824,7 @@ function setActiveShelf(cartId, orderId, shelfNum) {
   activePickerCart = { cart_id: cartId, order_id: orderId };
   document.querySelectorAll('#ed .shr').forEach(function(r){ r.style.background=''; });
   var hint = document.getElementById('picker-hint');
-  if (hint) hint.innerHTML = '<strong style="color:var(--fern)">Shelf ' + shelfNum + ' selected</strong> — pick a product from below';
+  if (hint) hint.innerHTML = '<strong style="color:var(--fern)">Shelf ' + shelfNum + ' selected</strong> -- pick a product from below';
   toast('Pick a product from the right panel', 'ok');
 }
 
@@ -841,14 +841,14 @@ async function removeShelfAPI(cartId, shelfPos, orderId) {
 function renderEditorDetail(o, d) {
   var cs = d.carts || [];
   var h = '<div class="p-4"><div class="d-flex justify-content-between mb-3">'
-    + '<div><h6 class="mb-0">' + (o.store_id||o.id) + ' — ' + (o.store_name||o.name||'') + ', ' + (o.state||'') + '</h6>'
+    + '<div><h6 class="mb-0">' + (o.store_id||o.id) + ' -- ' + (o.store_name||o.name||'') + ', ' + (o.state||'') + '</h6>'
     + '<div style="font-size:12px;color:var(--ink-soft)">' + (o.merchant||'') + ' \xb7 ' + cs.length + ' carts \xb7 ' + fmt(o.total_units||0) + ' units</div></div>'
     + mkTB((o.dynamic_velocity_tier||o.tier||'').trim()) + '</div>';
   cs.forEach(function(c) {
     var sh = c.shelves || [];
     h += '<div class="card mb-3"><div class="ch d-flex justify-content-between" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0">'
       + '<span><i class="bi bi-cart3 me-2"></i>Cart ' + c.cart_number + ' <span class="ck">' + (c.cart_key||'C'+c.cart_number) + '</span></span>'
-      + '<span style="font-size:11px;opacity:.8">' + (c.shelves_used||sh.length) + '/5 \xb7 ' + (c.total_units||0) + 'u' + (c.is_full?' ✓':'') + '</span></div>';
+      + '<span style="font-size:11px;opacity:.8">' + (c.shelves_used||sh.length) + '/5 \xb7 ' + (c.total_units||0) + 'u' + (c.is_full?'  ':'') + '</span></div>';
     sh.forEach(function(s) {
       h += '<div class="shr">'
         + '<span class="shn">' + s.shelf_position + '</span>'
@@ -864,7 +864,7 @@ function renderEditorDetail(o, d) {
       h += '<div class="shr" style="background:#fafcfa;cursor:pointer" '
         + 'onclick="setActiveShelf(\'' + (c.id||'') + '\',\'' + o.id + '\',' + (e+1) + ')">'
         + '<div style="width:22px;height:22px;border:2px dashed var(--line);border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--fern);font-size:12px;flex-shrink:0"><i class="bi bi-plus"></i></div>'
-        + '<div style="color:var(--ink-soft);font-size:12px;font-style:italic">Empty shelf ' + (e+1) + ' — click to add</div></div>';
+        + '<div style="color:var(--ink-soft);font-size:12px;font-style:italic">Empty shelf ' + (e+1) + ' -- click to add</div></div>';
     }
     h += '</div>';
   });
