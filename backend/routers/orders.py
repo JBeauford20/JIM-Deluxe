@@ -122,86 +122,75 @@ def run_summary(run_id: str, user=Depends(get_current_user)):
 @router.get("/runs/{run_id}/cart-configs")
 def cart_configs(run_id: str, user=Depends(get_current_user)):
     """
-    All unique cart configurations generated for a run.
-    Groups carts by their shelf fingerprint so you can see how many
-    distinct configurations exist and which stores got each one.
+    Unique cart configurations for a run, grouped by canonical config_code
+    (CC1, CC2 … CCN, where N ≤ 25).  The engine's consolidation step assigns
+    the codes so similar carts share a code even if their shelf contents differ
+    slightly due to inventory depletion.
     """
+    from collections import defaultdict
+
     with get_db() as conn:
         cur = cursor(conn)
-        # Pull every cart + its shelves for this run
         cur.execute("""
             SELECT
                 oc.id            AS cart_id,
                 oc.cart_key,
+                oc.config_code,
                 oc.total_units,
                 oc.shelves_used,
-                oc.order_id,
                 o.store_id,
-                s.store_name,
-                s.city, s.state,
                 json_agg(
                     json_build_object(
-                        'pos',   cs.shelf_position,
+                        'pos',    cs.shelf_position,
                         'sku_id', cs.sku_id,
-                        'desc',  k.description,
+                        'desc',   k.description,
                         'family', k.family,
-                        'trays', cs.tray_count,
-                        'units', cs.unit_count,
-                        'kit',   cs.kit_type
+                        'trays',  cs.tray_count,
+                        'units',  cs.unit_count,
+                        'kit',    cs.kit_type
                     ) ORDER BY cs.shelf_position
                 ) AS shelves
             FROM order_carts oc
-            JOIN orders o       ON o.id = oc.order_id
-            JOIN stores s       ON s.store_id = o.store_id
+            JOIN orders o          ON o.id = oc.order_id
             LEFT JOIN cart_shelves cs ON cs.cart_id = oc.id
-            LEFT JOIN skus k    ON k.sku_id = cs.sku_id
+            LEFT JOIN skus k       ON k.sku_id = cs.sku_id
             WHERE o.run_id = %s
-            GROUP BY oc.id, oc.cart_key, oc.total_units, oc.shelves_used,
-                     oc.order_id, o.store_id, s.store_name, s.city, s.state
-            ORDER BY oc.total_units DESC
+            GROUP BY oc.id, oc.cart_key, oc.config_code,
+                     oc.total_units, oc.shelves_used, o.store_id
+            ORDER BY oc.config_code, oc.total_units DESC
         """, (run_id,))
         carts = cur.fetchall()
 
-    # Deduplicate by shelf fingerprint
-    from collections import defaultdict
-    import json
-
     configs = defaultdict(lambda: {
-        "shelves": [], "cart_count": 0, "store_ids": [],
-        "total_units": 0, "sample_cart_key": ""
+        "shelves": None, "cart_count": 0, "store_ids": set(),
+        "total_units": 0, "shelves_used": 0, "sample_cart_key": ""
     })
 
     for cart in carts:
-        shelves = cart["shelves"] or []
-        # Fingerprint: sorted shelf contents
-        fp_parts = []
-        for sh in sorted(shelves, key=lambda x: x["pos"]):
-            fp_parts.append(f"{sh['pos']}:{sh['sku_id']}:{sh['trays']}")
-        fingerprint = "|".join(fp_parts) or "empty"
-
-        cfg = configs[fingerprint]
+        code = cart["config_code"] or "CC?"
+        cfg  = configs[code]
         cfg["cart_count"] += 1
-        cfg["total_units"] = int(cart["total_units"] or 0)
+        cfg["total_units"]  = int(cart["total_units"] or 0)
         cfg["shelves_used"] = int(cart["shelves_used"] or 0)
-        if not cfg["shelves"]:
-            cfg["shelves"] = shelves
-            cfg["sample_cart_key"] = cart["cart_key"] or ""
-        sid = int(cart["store_id"])
-        if sid not in cfg["store_ids"]:
-            cfg["store_ids"].append(sid)
+        if cfg["shelves"] is None:
+            cfg["shelves"]          = cart["shelves"] or []
+            cfg["sample_cart_key"]  = cart["cart_key"] or ""
+        cfg["store_ids"].add(int(cart["store_id"]))
 
-    # Sort by most carts first and return
     result = []
-    for fp, cfg in sorted(configs.items(), key=lambda x: -x[1]["cart_count"]):
+    for code, cfg in sorted(configs.items(),
+                             key=lambda x: (
+                                 int(x[0][2:]) if x[0][2:].isdigit() else 99,
+                             )):
         result.append({
-            "fingerprint":    fp,
-            "cart_count":     cfg["cart_count"],
-            "store_count":    len(cfg["store_ids"]),
-            "total_units":    cfg["total_units"],
-            "shelves_used":   cfg.get("shelves_used", 0),
+            "config_code":     code,
+            "cart_count":      cfg["cart_count"],
+            "store_count":     len(cfg["store_ids"]),
+            "total_units":     cfg["total_units"],
+            "shelves_used":    cfg["shelves_used"],
             "sample_cart_key": cfg["sample_cart_key"],
-            "shelves":        cfg["shelves"],
-            "store_ids":      cfg["store_ids"][:10],  # sample — first 10
+            "shelves":         cfg["shelves"],
+            "store_ids":       list(cfg["store_ids"])[:10],
         })
     return result
 
