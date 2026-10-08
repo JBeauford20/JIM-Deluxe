@@ -6,6 +6,23 @@ from routers.auth import get_current_user, require_role
 
 router = APIRouter()
 
+@router.get("/history")
+def order_history(user=Depends(get_current_user)):
+    """All finalized (exported) recommendation runs, newest first."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT rr.id, rr.shipping_week, rr.stores_served, rr.total_carts,
+                   rr.total_units, rr.inventory_clearance, rr.finalized_at,
+                   rr.status, ab.source_filename
+            FROM recommendation_runs rr
+            JOIN availability_batches ab ON ab.id = rr.batch_id
+            WHERE rr.status = 'exported'
+            ORDER BY rr.shipping_week DESC
+        """)
+        return cur.fetchall()
+
+
 @router.get("/runs/{run_id}")
 def list_orders(run_id: str, user=Depends(get_current_user)):
     """All orders for a recommendation run with summary data."""
@@ -227,23 +244,6 @@ def run_availability(run_id: str, batch_id: str, user=Depends(get_current_user))
             WHERE al.batch_id = %s
             ORDER BY remaining DESC
         """, (run_id, batch_id))
-        return cur.fetchall()
-
-
-@router.get("/history")
-def order_history(user=Depends(get_current_user)):
-    """All finalized (exported) recommendation runs, newest first."""
-    with get_db() as conn:
-        cur = cursor(conn)
-        cur.execute("""
-            SELECT rr.id, rr.shipping_week, rr.stores_served, rr.total_carts,
-                   rr.total_units, rr.inventory_clearance, rr.finalized_at,
-                   rr.status, ab.source_filename
-            FROM recommendation_runs rr
-            JOIN availability_batches ab ON ab.id = rr.batch_id
-            WHERE rr.status = 'exported'
-            ORDER BY rr.shipping_week DESC
-        """)
         return cur.fetchall()
 
 
