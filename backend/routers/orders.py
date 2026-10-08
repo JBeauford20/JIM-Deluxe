@@ -197,17 +197,36 @@ def cart_configs(run_id: str, user=Depends(get_current_user)):
 
 @router.get("/runs/{run_id}/availability/{batch_id}")
 def run_availability(run_id: str, batch_id: str, user=Depends(get_current_user)):
-    """Available inventory remaining after this run's allocations."""
+    """
+    Inventory the order editor can actually use: batch availability minus
+    units already committed in draft/approved order_lines for this run.
+    """
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
-            SELECT ar.*, k.description, k.family, k.legacy_product_group,
-                   ar.hard_good_type, ar.code_level
-            FROM availability_remaining ar
-            JOIN skus k ON k.sku_id = ar.sku_id
-            WHERE ar.batch_id = %s
-            ORDER BY ar.units_available DESC
-        """, (batch_id,))
+            SELECT
+                al.id               AS availability_line_id,
+                al.sku_id,
+                al.units_available,
+                al.hard_good_type,
+                al.code_level,
+                al.kit_selection_required,
+                k.description,
+                k.family,
+                k.legacy_product_group,
+                al.units_available - COALESCE(
+                    (SELECT SUM(ol.draft_qty)
+                     FROM order_lines ol
+                     JOIN orders o ON o.id = ol.order_id
+                     WHERE o.run_id = %s
+                       AND ol.sku_id = al.sku_id),
+                    0
+                ) AS remaining
+            FROM availability_lines al
+            JOIN skus k ON k.sku_id = al.sku_id
+            WHERE al.batch_id = %s
+            ORDER BY remaining DESC
+        """, (run_id, batch_id))
         return cur.fetchall()
 
 
