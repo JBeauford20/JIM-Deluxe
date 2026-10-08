@@ -230,6 +230,72 @@ def run_availability(run_id: str, batch_id: str, user=Depends(get_current_user))
         return cur.fetchall()
 
 
+@router.get("/history")
+def order_history(user=Depends(get_current_user)):
+    """All finalized (exported) recommendation runs, newest first."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT rr.id, rr.shipping_week, rr.stores_served, rr.total_carts,
+                   rr.total_units, rr.inventory_clearance, rr.finalized_at,
+                   rr.status, ab.source_filename
+            FROM recommendation_runs rr
+            JOIN availability_batches ab ON ab.id = rr.batch_id
+            WHERE rr.status = 'exported'
+            ORDER BY rr.shipping_week DESC
+        """)
+        return cur.fetchall()
+
+
+@router.post("/runs/{run_id}/finalize")
+def finalize_run(run_id: str, user=Depends(require_role("manager", "admin", "order_writer"))):
+    """
+    Approve all remaining draft orders and lock the run for archiving.
+    Sets run status → exported, records finalized_at timestamp.
+    """
+    with get_db() as conn:
+        cur = cursor(conn)
+        # Approve all draft orders in one shot
+        cur.execute("""
+            UPDATE orders SET status = 'approved', version = version + 1
+            WHERE run_id = %s AND status = 'draft'
+        """, (run_id,))
+        # Fill approved_qty for any order lines that don't have it yet
+        cur.execute("""
+            UPDATE order_lines SET approved_qty = COALESCE(draft_qty, recommended_qty)
+            WHERE order_id IN (SELECT id FROM orders WHERE run_id = %s)
+              AND approved_qty IS NULL
+        """, (run_id,))
+        # Lock the run
+        cur.execute("""
+            UPDATE recommendation_runs
+            SET status = 'exported', finalized_at = NOW()
+            WHERE id = %s
+            RETURNING id
+        """, (run_id,))
+        if not cur.fetchone():
+            from fastapi import HTTPException
+            raise HTTPException(404, "Run not found")
+        return {"finalized": True}
+
+
+@router.post("/runs/{run_id}/reopen")
+def reopen_run(run_id: str, user=Depends(require_role("manager", "admin", "order_writer"))):
+    """Reopen a finalized run so orders can be edited and re-exported."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            UPDATE recommendation_runs
+            SET status = 'draft', finalized_at = NULL
+            WHERE id = %s
+            RETURNING id
+        """, (run_id,))
+        if not cur.fetchone():
+            from fastapi import HTTPException
+            raise HTTPException(404, "Run not found")
+        return {"reopened": True}
+
+
 @router.patch("/{order_id}/review")
 def mark_reviewed(order_id: str, user=Depends(require_role("order_writer","manager","admin"))):
     with get_db() as conn:

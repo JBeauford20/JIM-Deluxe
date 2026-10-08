@@ -72,6 +72,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" onclick="go('editor',this)"><i class="bi bi-cart3 me-1"></i>Order Editor</span>
   <span class="nl" id="nl-cfg" onclick="go('configs',this)" style="display:none"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
   <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
+  <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
   <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
 </nav>
 
@@ -163,6 +164,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <div class="ms-auto d-flex gap-2">
       <button class="btn btn-sm btn-outline-primary" onclick="approveAll()"><i class="bi bi-check-all me-1"></i>Approve All</button>
       <button class="btn btn-sm btn-cta" id="xb" onclick="doExport()" disabled><i class="bi bi-download me-1"></i>Export to Aster</button>
+      <button class="btn btn-sm btn-primary" id="fb" onclick="doFinalizeWeek()" disabled title="Approve all remaining orders, lock week, and move to Order History"><i class="bi bi-archive me-1"></i>Finalize Week</button>
     </div>
   </div>
   <div class="card"><div class="table-responsive">
@@ -219,7 +221,17 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   </div>
 </div></div>
 
+<!-- HISTORY -->
+<div id="screen-history" class="screen">
+  <div id="hist-list-view" class="p-4"></div>
+  <div id="hist-detail-view" style="display:none"></div>
+</div>
+
 <!-- MODALS -->
+<div class="modal fade" id="hoM" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
+  <div class="modal-header"><h5 class="modal-title" id="hoT">Order Detail</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body" id="hoB"></div>
+</div></div></div>
 <div class="modal fade" id="aM" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
   <div class="modal-header"><h5 class="modal-title"><i class="bi bi-check-circle me-2"></i>Approve Order</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
   <div class="modal-body" id="ab"></div>
@@ -337,13 +349,15 @@ function resetUZ(){
 }
 
 function doClearBatch(){
-  bId=null;wk=null;orders=[];loads=[];
+  bId=null;wk=null;orders=[];loads=[];rId=null;
   document.getElementById('uz').style.display='block';
   document.getElementById('ap').style.display='none';
   document.getElementById('gb').disabled=true;
   document.getElementById('eb').disabled=true;
   document.getElementById('rb').style.display='none';
   document.getElementById('gs').style.display='none';
+  var xb=document.getElementById('xb');if(xb)xb.disabled=true;
+  var fb=document.getElementById('fb');if(fb)fb.disabled=true;
   var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='none';
   setStrip(null,null);
   buildStats();buildTable();buildLoads();buildEL();
@@ -379,6 +393,7 @@ function doPoll(jid,gb,gs,retries){
         gb.disabled=false;gb.innerHTML='<i class="bi bi-arrow-clockwise me-2"></i>Re-generate';
         document.getElementById('rb').style.display='block';
         var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='flex';
+        var fb=document.getElementById('fb');if(fb)fb.disabled=false;
         setStrip(wk,null,'Draft Plan');
         toast('Plan ready -- '+orders.length+' stores','ok');
         loadCfgs().catch(function(){});
@@ -645,6 +660,189 @@ async function openSt(id){
       +'<div class="card mb-3"><div class="ch lt"><i class="bi bi-graph-up me-2"></i>Weekly Sales -- Last 26 Weeks</div><div class="card-body pb-2"><div style="display:flex;align-items:flex-end;gap:2px;height:90px">'+weekly.map(function(v){return '<div style="flex:1;background:var(--fern);border-radius:2px 2px 0 0;height:'+Math.max(4,v/maxW*88)+'px;min-width:0;opacity:.85" title="'+v+'u"></div>';}).join('')+'</div><div class="d-flex justify-content-between mt-1" style="font-size:10px;color:var(--is)"><span>26 wks ago</span><span>This week</span></div></div></div>'
       +'<div class="card"><div class="ch lt"><i class="bi bi-bar-chart me-2"></i>Top SKUs</div><table class="table jt mb-0"><thead><tr><th>Product</th><th>Family</th><th class="text-end">Units</th></tr></thead><tbody>'+(p.top_skus||[]).slice(0,8).map(function(sk){return '<tr><td style="font-size:12px">'+sn(sk.description||sk.desc||'')+'</td><td style="font-size:11px;color:var(--is)">'+(sk.family||'')+'</td><td class="text-end fw-bold">'+fmt(sk.total_units||sk.units||0)+'</td></tr>';}).join('')+'</tbody></table></div>';
   }catch(e){sp.innerHTML='<div class="p-4 text-danger">Failed: '+e.message+'</div>';}
+}
+
+/* ORDER HISTORY */
+var histOrders=[],histLoads=[],_histRuns=[];
+
+async function loadHistory(){
+  var lv=document.getElementById('hist-list-view');
+  var dv=document.getElementById('hist-detail-view');
+  if(dv)dv.style.display='none';
+  if(lv)lv.style.display='block';
+  if(!lv)return;
+  lv.innerHTML='<div class="text-center py-5"><span class="spinner-border spinner-border-sm me-2"></span>Loading history...</div>';
+  try{
+    _histRuns=await api('/api/orders/history');
+    renderHistList(_histRuns);
+  }catch(e){lv.innerHTML='<div class="p-4 text-danger">Failed: '+e.message+'</div>';}
+}
+
+function renderHistList(runs){
+  var lv=document.getElementById('hist-list-view');if(!lv)return;
+  if(!runs||!runs.length){
+    lv.innerHTML='<div class="p-5 text-center text-muted"><i class="bi bi-clock-history" style="font-size:48px;opacity:.2"></i><p class="mt-3 mb-0">No finalized weeks yet.</p><p style="font-size:13px">Generate a plan, review it, then click <strong>Finalize Week</strong> to archive it here.</p></div>';
+    return;
+  }
+  lv.innerHTML='<div class="container-fluid p-4"><h5 style="color:var(--fd)" class="mb-4"><i class="bi bi-clock-history me-2"></i>Order History</h5><div class="d-flex flex-column gap-3">'+
+  runs.map(function(r){
+    var wk=r.shipping_week?String(r.shipping_week).slice(0,10):'--';
+    var fin=r.finalized_at?new Date(r.finalized_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'--';
+    var cl=r.inventory_clearance?parseFloat(r.inventory_clearance).toFixed(1)+'%':'--';
+    var fname=r.source_filename||'';
+    return '<div class="card lcard" onclick="openHistRun(\''+r.id+'\',\''+wk+'\')">'+
+      '<div class="card-body py-3 px-4"><div class="d-flex align-items-center justify-content-between flex-wrap gap-3">'+
+      '<div><h6 class="mb-0" style="color:var(--fd)"><i class="bi bi-calendar-week me-2"></i>Week of '+wk+'</h6>'+
+      '<div style="font-size:12px;color:var(--is);margin-top:3px">Finalized '+fin+(fname?' &middot; '+fname:'')+'</div></div>'+
+      '<div class="d-flex gap-4 align-items-center">'+
+      '<div class="text-center"><div style="font-size:1.15rem;font-weight:700;color:var(--fd)">'+fmt(r.stores_served)+'</div><div style="font-size:10px;color:var(--is);text-transform:uppercase;letter-spacing:.04em">Stores</div></div>'+
+      '<div class="text-center"><div style="font-size:1.15rem;font-weight:700;color:var(--fd)">'+fmt(r.total_carts)+'</div><div style="font-size:10px;color:var(--is);text-transform:uppercase;letter-spacing:.04em">Carts</div></div>'+
+      '<div class="text-center"><div style="font-size:1.15rem;font-weight:700;color:var(--fd)">'+fmt(r.total_units)+'</div><div style="font-size:10px;color:var(--is);text-transform:uppercase;letter-spacing:.04em">Units</div></div>'+
+      '<div class="text-center"><div style="font-size:1.15rem;font-weight:700;color:var(--ok)">'+cl+'</div><div style="font-size:10px;color:var(--is);text-transform:uppercase;letter-spacing:.04em">Clearance</div></div>'+
+      '<i class="bi bi-chevron-right text-muted"></i>'+
+      '</div></div></div></div>';
+  }).join('')+'</div></div>';
+}
+
+async function openHistRun(runId, weekLabel){
+  var lv=document.getElementById('hist-list-view');
+  var dv=document.getElementById('hist-detail-view');
+  if(lv)lv.style.display='none';
+  if(dv){dv.style.display='block';dv.innerHTML='<div class="text-center py-5"><span class="spinner-border spinner-border-sm me-2"></span>Loading week...</div>';}
+  try{
+    var res=await Promise.all([
+      api('/api/orders/runs/'+runId),
+      api('/api/orders/runs/'+runId+'/loads'),
+      api('/api/orders/runs/'+runId+'/summary').catch(function(){return null;})
+    ]);
+    histOrders=Array.isArray(res[0])?res[0]:[];
+    histLoads=Array.isArray(res[1])?res[1]:[];
+    renderHistDetail(runId,weekLabel,res[2]);
+  }catch(e){if(dv)dv.innerHTML='<div class="p-4 text-danger">Failed: '+e.message+'</div>';}
+}
+
+function renderHistDetail(runId,weekLabel,summary){
+  var dv=document.getElementById('hist-detail-view');if(!dv)return;
+  var cl=summary?parseFloat(summary.inventory_clearance||0).toFixed(1)+'%':'--';
+  var tc=histOrders.reduce(function(s,o){return s+(o.cart_count||0);},0);
+  var tu=histOrders.reduce(function(s,o){return s+(o.total_units||0);},0);
+  dv.innerHTML='<div class="container-fluid p-4">'+
+    '<div class="d-flex align-items-center gap-3 mb-4 flex-wrap">'+
+    '<button class="btn btn-sm btn-outline-secondary" onclick="loadHistory()"><i class="bi bi-arrow-left me-1"></i>All Weeks</button>'+
+    '<h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-calendar-week me-2"></i>Week of '+weekLabel+'</h5>'+
+    '<div class="ms-auto d-flex gap-2">'+
+    '<button class="btn btn-sm btn-outline-secondary" onclick="doReopenRun(\''+runId+'\')"><i class="bi bi-unlock me-1"></i>Re-open Week</button>'+
+    '<button class="btn btn-sm btn-cta" onclick="doHistExport(\''+runId+'\')"><i class="bi bi-download me-1"></i>Re-export Aster</button>'+
+    '</div></div>'+
+    '<div class="row g-3 mb-4">'+
+    '<div class="col-6 col-md-3 col-xl-2"><div class="sc"><div class="n">'+fmt(histOrders.length)+'</div><div class="l">Stores</div></div></div>'+
+    '<div class="col-6 col-md-3 col-xl-2"><div class="sc"><div class="n">'+fmt(tc)+'</div><div class="l">Carts</div></div></div>'+
+    '<div class="col-6 col-md-3 col-xl-2"><div class="sc"><div class="n">'+fmt(tu)+'</div><div class="l">Units</div></div></div>'+
+    '<div class="col-6 col-md-3 col-xl-2"><div class="sc ok"><div class="n">'+cl+'</div><div class="l">Clearance</div></div></div>'+
+    '<div class="col-6 col-md-3 col-xl-2"><div class="sc"><div class="n">'+fmt(histLoads.length)+'</div><div class="l">Loads</div></div></div>'+
+    '</div>'+
+    '<div class="card mb-4"><div class="table-responsive"><table class="table jt mb-0">'+
+    '<thead><tr><th>Store</th><th>Location</th><th>Tier</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th></tr></thead>'+
+    '<tbody>'+histOrders.map(function(o){
+      var sid=o.store_id||o.id;
+      var tier=(o.dynamic_velocity_tier||o.tier||'').trim();
+      return '<tr class="ar" onclick="openHistStore('+sid+',\''+o.id+'\')" style="cursor:pointer">'+
+        '<td><strong>'+sid+'</strong></td>'+
+        '<td style="font-size:12px">'+(o.store_name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span></td>'+
+        '<td>'+mkTB(tier)+'</td>'+
+        '<td class="text-center fw-bold">'+(o.cart_count||0)+'</td>'+
+        '<td class="text-center">'+fmt(o.total_units||0)+'</td>'+
+        '<td style="font-size:12px">'+(o.load_name||o.load||'--')+'</td>'+
+        '<td><span class="sp sp-approved">approved</span></td>'+
+        '</tr>';
+    }).join('')+
+    '</tbody></table></div></div>'+
+    (histLoads.length?'<h6 style="color:var(--fd)" class="mb-3"><i class="bi bi-truck me-2"></i>Truck Loads</h6><div class="row g-3">'+
+    histLoads.map(function(l,i){
+      var u=parseFloat(l.utilization_pct||0);
+      return '<div class="col-6 col-md-4 col-xl-2"><div class="card p-3">'+
+        '<div class="d-flex justify-content-between mb-1"><strong style="font-size:13px">'+(l.load_name||'L'+(i+1))+'</strong><span class="fw-bold" style="font-size:12px;color:var(--ok)">'+u+'%</span></div>'+
+        '<div style="font-size:11px;color:var(--is)">'+(l.merchant||'')+'</div>'+
+        '<div style="font-size:11px;color:var(--is)" class="mb-2">'+(l.cart_count||0)+' carts &middot; '+(l.store_count||0)+' stores</div>'+
+        '<div class="lu"><div class="lf" style="width:'+u+'%"></div></div>'+
+        '</div></div>';
+    }).join('')+'</div>':'')+'</div>';
+}
+
+async function openHistStore(sid,orderId){
+  var hoMod=bootstrap.Modal.getOrCreateInstance(document.getElementById('hoM'));
+  var hoT=document.getElementById('hoT');
+  var hoB=document.getElementById('hoB');
+  var o=histOrders.find(function(x){return String(x.store_id||x.id)===String(sid);});
+  if(hoT)hoT.innerHTML='<i class="bi bi-shop me-2"></i>Store '+sid+(o?' &mdash; '+(o.store_name||''):'');
+  if(hoB)hoB.innerHTML='<div class="text-center py-4"><span class="spinner-border spinner-border-sm"></span></div>';
+  hoMod.show();
+  try{
+    var d=await api('/api/orders/'+orderId);
+    var cs=d.carts||[];
+    var h='<div style="font-size:12.5px;color:var(--is);margin-bottom:14px">'+(o?(o.merchant||'')+'&nbsp;&middot;&nbsp;':'')+(o?mkTB((o.dynamic_velocity_tier||'').trim()):'')+'&nbsp;&nbsp;'+cs.length+' carts &middot; '+fmt(o?o.total_units||0:0)+' units</div>';
+    cs.forEach(function(c){
+      var sh=c.shelves||[];
+      h+='<div class="card mb-3"><div class="ch d-flex justify-content-between" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0">'+
+        '<span><i class="bi bi-cart3 me-2"></i>Cart '+c.cart_number+' <span class="ck">'+(c.cart_key||'C'+c.cart_number)+'</span></span>'+
+        '<span style="font-size:11px;opacity:.8">'+(c.shelves_used||sh.length)+'/5 &middot; '+(c.total_units||0)+'u</span>'+
+        '</div>';
+      sh.forEach(function(s){
+        h+='<div class="shr"><span class="shn">'+s.shelf_position+'</span>'+
+          '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+sn(s.description||'SKU '+s.sku_id)+'</div>'+
+          '<div style="font-size:11px;color:var(--is)">'+(s.tray_count||0)+' trays &middot; '+(s.unit_count||0)+'u'+(s.kit_type?'<span class="kp ms-1">'+s.kit_type.replace('_kit','')+'</span>':'')+'</div>'+
+          '</div></div>';
+      });
+      h+='</div>';
+    });
+    if(hoB)hoB.innerHTML=h;
+  }catch(e){if(hoB)hoB.innerHTML='<div class="p-3 text-danger">Failed: '+e.message+'</div>';}
+}
+
+async function doFinalizeWeek(){
+  if(!rId){toast('No active plan to finalize','warn');return;}
+  var fb=document.getElementById('fb');
+  if(fb){fb.disabled=true;fb.innerHTML='<span class="spinner-border spinner-border-sm me-1"></span>Finalizing...';}
+  try{
+    await api('/api/orders/runs/'+rId+'/finalize',{method:'POST'});
+    toast('Week finalized and archived in Order History','ok');
+    rId=null;bId=null;wk=null;orders=[];loads=[];
+    buildStats();buildTable();buildLoads();buildEL();
+    var gs=document.getElementById('gs');if(gs)gs.style.display='none';
+    var gb=document.getElementById('gb');if(gb){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';}
+    var rb=document.getElementById('rb');if(rb)rb.style.display='none';
+    var xb=document.getElementById('xb');if(xb)xb.disabled=true;
+    if(fb){fb.disabled=true;fb.innerHTML='<i class="bi bi-archive me-1"></i>Finalize Week';}
+    var ap=document.getElementById('ap');if(ap)ap.style.display='none';
+    var uz=document.getElementById('uz');if(uz)uz.style.display='block';
+    var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='none';
+    setStrip(null,null);
+    var histTab=Array.from(document.querySelectorAll('.nl')).find(function(el){return el.textContent.trim().includes('Order History');});
+    go('history',histTab);
+    loadHistory();
+  }catch(e){
+    toast('Finalize failed: '+e.message,'err');
+    if(fb){fb.disabled=false;fb.innerHTML='<i class="bi bi-archive me-1"></i>Finalize Week';}
+  }
+}
+
+async function doReopenRun(runId){
+  try{
+    await api('/api/orders/runs/'+runId+'/reopen',{method:'POST'});
+    toast('Week reopened -- orders are editable again','ok');
+    loadHistory();
+  }catch(e){toast('Re-open failed: '+e.message,'err');}
+}
+
+async function doHistExport(runId){
+  toast('Generating Aster import file...','ok');
+  try{
+    var b=await apiBlob('/api/exports/runs/'+runId+'/aster-import');
+    var u=URL.createObjectURL(b);
+    var a=document.createElement('a');a.href=u;a.download='JIM_Aster_'+runId.slice(0,8)+'.csv';
+    a.click();URL.revokeObjectURL(u);
+    toast('Downloaded','ok');
+  }catch(e){toast('Export failed: '+e.message,'err');}
 }
 </script>
 </body>
