@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from db import init_pool
-from routers import availability, orders, carts, engine, stores, exports, auth
+from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,7 +43,8 @@ app.include_router(availability.router, prefix="/api/availability", tags=["Avail
 app.include_router(orders.router,       prefix="/api/orders",       tags=["Orders"])
 app.include_router(carts.router,        prefix="/api/carts",        tags=["Carts"])
 app.include_router(engine.router,       prefix="/api/engine",       tags=["Engine"])
-app.include_router(exports.router,      prefix="/api/exports",      tags=["Exports"])
+app.include_router(exports.router,         prefix="/api/exports",      tags=["Exports"])
+app.include_router(ai_explanations.router, prefix="/api/ai",           tags=["AI"])
 
 @app.get("/api/health")
 def health():
