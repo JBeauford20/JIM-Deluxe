@@ -287,8 +287,8 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
 
     log = print if verbose else lambda *a, **k: None
 
+    today = date.today()
     if shipping_week is None:
-        today = date.today()
         days_ahead = (7 - today.weekday()) % 7 or 7
         shipping_week = today + timedelta(days=days_ahead)
 
@@ -549,7 +549,6 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     # ── STAGE 1: SCORE STORES ─────────────────────────────────
     log("\nStage 1: Scoring stores (velocity + recency + pace + breadth)...")
     store_scores = {}
-    today = date.today()
 
     for store_id, meta in store_rows.items():
         raw_vel  = float(meta['dynamic_velocity_score'] or 0)
