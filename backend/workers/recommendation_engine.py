@@ -5,7 +5,10 @@ Given an availability batch, produces store-level orders with full
 cart-by-cart, shelf-by-shelf packing plans and truck load assignments.
 
 Algorithm:
-  Stage 1   — Score every store (velocity + recency + pace + breadth)
+  Stage 0   — Store Clock: compute static grade + dynamic DUE gate per store.
+               Stores that have not earned out their last delivery (not DUE)
+               are excluded from allocation entirely.
+  Stage 1   — Score every eligible store (velocity + recency + pace + breadth)
   Stage 2+3 — For each store, score SKUs using tier-avg group velocity,
                then build mixed carts (max 2 shelves/SKU, fill greedily)
   Stage 4.5 — Consolidate cart configs down to ≤ MAX_CART_CONFIGS unique codes
@@ -51,10 +54,22 @@ MAX_SHELVES_SKU   = 2
 CARTS_PER_TRUCK   = 45
 MIN_CARTS         = 2
 JUTE_CERAMIC_SPLIT = 0.5
-PACE_WINDOW_DAYS  = 84   # 12-week rolling window for pace calculation
+PACE_WINDOW_DAYS  = 84   # 12-week rolling window for pace / dynamic clock
 MAX_CART_CONFIGS  = 25   # hard cap on unique cart config codes per run
 
 TIER_TARGET_CARTS = {'AA': 6, 'A': 4, 'B': 3, 'C': 2, 'D': 2, 'P': 2}
+
+# ── Store Clock constants (manager-editable) ──────────────────
+# Ken's formula: clock = ROUNDUP(STATIC_DROP_CARTS × STATIC_CART_WHL × TARGET_PACE / scans_wk)
+# Josh's DUE gate: due = weeks_since_last >= CEIL(actual_delivery_whl × TARGET_PACE / scans_12wk)
+STATIC_DROP_CARTS         = 2        # minimum 2-cart standard drop for letter/grade
+STATIC_CART_WHL           = 2534.00  # wholesale value of a standard 213-unit cart
+TARGET_PACE_CLOCK         = 0.70     # 70% sell-through target
+CLOCK_MIN_WEEKS           = 2        # floor on any clock value
+CLOCK_MAX_WEEKS           = 13       # ceiling — beyond this product has likely aged out
+CLOCK_OVERSTOCK_FLAG_WKS  = 7        # dynamic clock > this → overshipped flag
+CLOCK_LONG_WINDOW_DAYS    = 280      # ~40 weeks for static grade (stable store property)
+WHOLESALE_PRICE_FALLBACK  = 11.89    # per-unit fallback if SKU has no price on file
 
 RECENCY_CURVE = [
     (0,   0.00),
@@ -82,6 +97,39 @@ def normalize(val, min_val, max_val):
     if max_val <= min_val:
         return 0.5
     return max(0.0, min(1.0, (val - min_val) / (max_val - min_val)))
+
+# ── Store Clock helpers ───────────────────────────────────────
+
+def clock_grade(raw_weeks):
+    """Letter band from the unrounded clock weeks (Ken's bands)."""
+    if raw_weeks <= 3:  return 'A'
+    if raw_weeks <= 5:  return 'B'
+    if raw_weeks <= 8:  return 'C'
+    if raw_weeks <= 12: return 'D'
+    return 'F'
+
+def static_clock(scans_per_week_whl_long):
+    """
+    Store property — how many weeks does this store take to earn a standard 2-cart drop?
+    Used for letter/grade. Stable; recomputed each run from the long sales window.
+    """
+    if not scans_per_week_whl_long or scans_per_week_whl_long <= 0:
+        return CLOCK_MAX_WEEKS, 'F'
+    raw = (STATIC_DROP_CARTS * STATIC_CART_WHL * TARGET_PACE_CLOCK) / scans_per_week_whl_long
+    weeks = max(CLOCK_MIN_WEEKS, min(CLOCK_MAX_WEEKS, math.ceil(raw)))
+    return weeks, clock_grade(raw)
+
+def dynamic_clock(last_delivery_whl, scans_per_week_whl_12w):
+    """
+    This-week DUE test — has the store earned out its actual last delivery?
+    Accounts for real cart count and real product mix value (using per-SKU wholesale prices).
+    """
+    if not last_delivery_whl or last_delivery_whl <= 0:
+        return CLOCK_MIN_WEEKS   # no delivery on file → always due
+    if not scans_per_week_whl_12w or scans_per_week_whl_12w <= 0:
+        return CLOCK_MAX_WEEKS   # no scan data → conservatively not due
+    raw = (last_delivery_whl * TARGET_PACE_CLOCK) / scans_per_week_whl_12w
+    return max(CLOCK_MIN_WEEKS, min(CLOCK_MAX_WEEKS, math.ceil(raw)))
 
 # ── Config consolidation ──────────────────────────────────────
 
@@ -343,6 +391,98 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         store_pace[r['store_id']] = min(1.0, r['sold'] / r['delivered'])
     log(f"  {len(store_pace)} stores with pace data")
 
+    # ── STAGE 0: STORE CLOCK DATA ─────────────────────────────
+    log("Stage 0: Loading Store Clock data...")
+
+    # Dollar-weighted scans per week — two windows
+    # Long window (~40 wks): stable store property → static grade/letter
+    # 12-week window: current pace → dynamic DUE gate
+    cur.execute("""
+        SELECT s.store_id,
+               SUM(s.units_sold * COALESCE(sk.wholesale_price_whl, %s))
+                   / %s AS scans_wk_long,
+               SUM(CASE WHEN s.sale_date >= CURRENT_DATE - INTERVAL '84 days'
+                        THEN s.units_sold * COALESCE(sk.wholesale_price_whl, %s) END)
+                   / 12.0 AS scans_wk_12w
+        FROM sales s
+        JOIN skus sk ON sk.sku_id = s.sku_id
+        WHERE s.sale_date >= CURRENT_DATE - INTERVAL '%s days'
+        GROUP BY s.store_id
+    """, (WHOLESALE_PRICE_FALLBACK, CLOCK_LONG_WINDOW_DAYS / 7.0,
+          WHOLESALE_PRICE_FALLBACK, CLOCK_LONG_WINDOW_DAYS))
+    store_scan_whl = {r['store_id']: (float(r['scans_wk_long'] or 0),
+                                      float(r['scans_wk_12w'] or 0))
+                     for r in cur.fetchall()}
+
+    # Last delivery wholesale value per store from raw AGS delivery history
+    cur.execute("""
+        WITH last_dates AS (
+            SELECT store_id, MAX(delivery_date) AS last_date
+            FROM deliveries GROUP BY store_id
+        )
+        SELECT d.store_id,
+               SUM(d.units_delivered * COALESCE(sk.wholesale_price_whl, %s)) AS delivery_whl
+        FROM deliveries d
+        JOIN last_dates ld ON ld.store_id = d.store_id
+                           AND d.delivery_date = ld.last_date
+        LEFT JOIN skus sk ON sk.sku_id = d.sku_id
+        GROUP BY d.store_id
+    """, (WHOLESALE_PRICE_FALLBACK,))
+    last_delivery_whl = {r['store_id']: float(r['delivery_whl'] or 0)
+                         for r in cur.fetchall()}
+
+    # Override with JIM order values where available and more recent
+    cur.execute("""
+        SELECT o.store_id,
+               SUM(ol.approved_qty * COALESCE(sk.wholesale_price_whl, %s)) AS delivery_whl,
+               MAX(ab.shipping_week_start) AS last_week
+        FROM orders o
+        JOIN order_lines ol ON ol.order_id = o.id
+        JOIN recommendation_runs rr ON rr.id = o.run_id
+        JOIN availability_batches ab ON ab.id = rr.batch_id
+        LEFT JOIN skus sk ON sk.sku_id = ol.sku_id
+        WHERE o.status IN ('approved', 'exported')
+          AND ol.approved_qty > 0
+        GROUP BY o.store_id
+    """, (WHOLESALE_PRICE_FALLBACK,))
+    for r in cur.fetchall():
+        if r['delivery_whl']:
+            # JIM history takes precedence — it has exact SKU-level pricing
+            last_delivery_whl[r['store_id']] = float(r['delivery_whl'])
+
+    # Compute clock values for every store
+    store_clock = {}
+    skipped_not_due = 0
+    for store_id, meta in store_rows.items():
+        scan_long, scan_12w = store_scan_whl.get(store_id, (0.0, 0.0))
+        del_whl = last_delivery_whl.get(store_id, 0.0)
+        last_del = last_delivery.get(store_id)
+        days_ago = (today - last_del).days if last_del else None
+        weeks_ago = (days_ago / 7.0) if days_ago is not None else None
+
+        s_weeks, s_grade = static_clock(scan_long)
+        d_weeks = dynamic_clock(del_whl, scan_12w)
+        gap = d_weeks - s_weeks
+        is_due = (weeks_ago is None) or (weeks_ago >= d_weeks)
+        is_over = gap > CLOCK_OVERSTOCK_FLAG_WKS
+
+        store_clock[store_id] = {
+            'static_clock':  s_weeks,
+            'static_grade':  s_grade,
+            'dynamic_clock': d_weeks,
+            'clock_gap':     gap,
+            'is_due':        is_due,
+            'is_overshipped': is_over,
+            'last_del_whl':  del_whl,
+        }
+        if not is_due:
+            skipped_not_due += 1
+
+    log(f"  {len(store_rows) - skipped_not_due:,} stores DUE | "
+        f"{skipped_not_due:,} not yet due (excluded from allocation)")
+    log(f"  Overshipped flags: "
+        f"{sum(1 for c in store_clock.values() if c['is_overshipped'])}")
+
     log("Loading SKU group velocity...")
     cur.execute("""
         SELECT store_id, sku_group_id, ewma_score
@@ -435,19 +575,27 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
 
         priority = min(1.0, priority + playbook.stage1_priority_bonus(store_id))
 
+        clk = store_clock.get(store_id, {})
         store_scores[store_id] = {
-            'priority':       round(priority, 6),
-            'vel_component':  round(vel_norm  * W_VELOCITY, 6),
-            'rec_component':  round(rec_score * W_RECENCY,  6),
-            'pace_component': round(pace_sc   * W_PACE,     6),
-            'brd_component':  round(breadth_norm * W_BREADTH, 6),
-            'pace_ratio':     round(pace_ratio, 4) if pace_ratio is not None else None,
-            'days_since':     days_ago,
-            'tier':           meta['dynamic_velocity_tier'],
-            'merchant':       meta['merchant'],
-            'region':         meta['region'],
-            'state':          meta['state'],
-            'market_number':  meta['market_number'],
+            'priority':        round(priority, 6),
+            'vel_component':   round(vel_norm  * W_VELOCITY, 6),
+            'rec_component':   round(rec_score * W_RECENCY,  6),
+            'pace_component':  round(pace_sc   * W_PACE,     6),
+            'brd_component':   round(breadth_norm * W_BREADTH, 6),
+            'pace_ratio':      round(pace_ratio, 4) if pace_ratio is not None else None,
+            'days_since':      days_ago,
+            'tier':            meta['dynamic_velocity_tier'],
+            'merchant':        meta['merchant'],
+            'region':          meta['region'],
+            'state':           meta['state'],
+            'market_number':   meta['market_number'],
+            # Store Clock
+            'static_clock':    clk.get('static_clock'),
+            'static_grade':    clk.get('static_grade'),
+            'dynamic_clock':   clk.get('dynamic_clock'),
+            'clock_gap':       clk.get('clock_gap'),
+            'is_due':          clk.get('is_due', True),
+            'is_overshipped':  clk.get('is_overshipped', False),
         }
 
     ranked_stores = sorted(store_scores.items(), key=lambda x: -x[1]['priority'])
@@ -482,6 +630,12 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     for store_id, score_meta in ranked_stores:
         if sum(inventory.values()) == 0:
             break
+
+        # ── STORE CLOCK DUE GATE ─────────────────────────────
+        # If this store has not earned out its last delivery, skip it.
+        # This is a hard binary gate — not a scoring penalty.
+        if not score_meta.get('is_due', True):
+            continue
 
         tier = score_meta['tier']
 
@@ -618,13 +772,18 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     log(f"  Truck loads:        {len(loads_out)}")
     log(f"  Unique cart configs:{unique_after} (was {unique_before})")
     log(f"\n  Top 10 stores by priority:")
-    log(f"  {'Store':<8} {'Tier':<4} {'Priority':>9} {'Pace':>6} {'Carts':>6} {'Days':>6}")
-    log(f"  {'-'*48}")
+    log(f"  {'Store':<8} {'Tier':<4} {'Grade':<6} {'SClock':>6} {'DClock':>7} "
+        f"{'Pace':>6} {'Carts':>6} {'Days':>6}")
+    log(f"  {'-'*60}")
     for store_id, data in list(all_orders.items())[:10]:
         sm = data['score_meta']
         pace_pct = f"{sm['pace_ratio']*100:.0f}%" if sm.get('pace_ratio') is not None else "  --"
-        log(f"  {store_id:<8} {sm['tier']:<4} {sm['priority']:>9.4f} "
-            f"{pace_pct:>6} {data['total_carts']:>6} "
+        flag = " !" if sm.get('is_overshipped') else "  "
+        log(f"  {store_id:<8} {sm['tier']:<4} "
+            f"{sm.get('static_grade','?'):<6} "
+            f"{str(sm.get('static_clock','?')):>6} "
+            f"{str(sm.get('dynamic_clock','?')):>7}"
+            f"{flag} {pace_pct:>6} {data['total_carts']:>6} "
             f"{str(sm['days_since'] or 'new'):>6}")
 
     if preview:
@@ -670,6 +829,12 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             sm['days_since'],    data['total_carts'],
             data['total_units'], data['is_exception'],
             sm.get('pace_ratio'),
+            sm.get('static_clock'),
+            sm.get('static_grade'),
+            sm.get('dynamic_clock'),
+            sm.get('clock_gap'),
+            sm.get('is_overshipped', False),
+            sm.get('is_due', True),
         ))
 
     psycopg2.extras.execute_batch(cur, """
@@ -678,8 +843,11 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
              velocity_component, recency_component, pace_component,
              breadth_component,
              days_since_last_delivery, cart_count, total_units,
-             is_one_cart_exception, pace_ratio)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             is_one_cart_exception, pace_ratio,
+             static_clock_weeks, static_grade,
+             dynamic_clock_weeks, clock_gap,
+             is_overshipped, is_due)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, order_rows, page_size=500)
     log(f"  {len(order_rows)} orders written")
 

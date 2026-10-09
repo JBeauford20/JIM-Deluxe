@@ -169,8 +169,8 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   </div>
   <div class="card"><div class="table-responsive">
     <table class="table jt mb-0">
-      <thead><tr><th>Store</th><th>Location</th><th>Tier</th><th>Last Delivery</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody id="ot"><tr><td colspan="9" class="text-center py-4 text-muted">No plan generated yet</td></tr></tbody>
+      <thead><tr><th>Store</th><th>Location</th><th>Tier</th><th>Grade</th><th>Clock</th><th>Last Delivery</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="ot"><tr><td colspan="11" class="text-center py-4 text-muted">No plan generated yet</td></tr></tbody>
     </table>
   </div></div>
   <div class="mt-4"><h6 style="color:var(--fd)" class="mb-3"><i class="bi bi-truck me-2"></i>Truck Loads</h6><div class="row g-3" id="lg"></div></div>
@@ -438,15 +438,22 @@ function buildTable(d){
   _ofs=d||orders;
   var c=document.getElementById('oc');if(c)c.textContent=_ofs.length+' orders';
   var tb=document.getElementById('ot');if(!tb)return;
-  if(!_ofs.length){tb.innerHTML='<tr><td colspan="9" class="text-center py-4 text-muted">'+(orders.length?'No orders match filter':'No plan generated yet')+'</td></tr>';var xb=document.getElementById('xb');if(xb)xb.disabled=true;return;}
+  if(!_ofs.length){tb.innerHTML='<tr><td colspan="11" class="text-center py-4 text-muted">'+(orders.length?'No orders match filter':'No plan generated yet')+'</td></tr>';var xb=document.getElementById('xb');if(xb)xb.disabled=true;return;}
   tb.innerHTML=_ofs.map(function(o){
     var sid=o.store_id||o.id;var tier=(o.dynamic_velocity_tier||o.tier||'').trim();
     var days=o.days_since_last_delivery!=null?o.days_since_last_delivery+'d ago':'--';
+    var grade=o.static_grade||'--';
+    var sc=o.static_clock_weeks!=null?o.static_clock_weeks+'w':'--';
+    var dc=o.dynamic_clock_weeks!=null?o.dynamic_clock_weeks+'w':'--';
+    var clockCell='<span style="font-size:11px">S:'+sc+' D:'+dc+'</span>'+(o.is_overshipped?'<span class="ms-1" style="font-size:9px;background:#fde8e8;color:#8b0000;border-radius:4px;padding:1px 5px;font-weight:700">OVER</span>':'');
     var oenc=encodeURIComponent(JSON.stringify({id:o.id,sid:sid,name:o.store_name||o.name||'',state:o.state||'',carts:o.cart_count||0,units:o.total_units||0,load:o.load_name||o.load||'--',v:o.version||1}));
     var act=o.status==='draft'?'<button class="btn btn-sm btn-cta py-0 px-2" style="font-size:11px" onclick="event.stopPropagation();doOpenApprove(\''+oenc+'\')">Approve</button>':'<i class="bi bi-check-circle-fill text-success"></i>';
     return '<tr class="'+(o.status==='approved'?'ar':'')+'" onclick="openEd('+sid+')">'
       +'<td><strong>'+sid+'</strong></td><td style="font-size:12px">'+(o.store_name||o.name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span></td>'
-      +'<td>'+mkTB(tier)+'</td><td style="font-size:12px">'+days+'</td>'
+      +'<td>'+mkTB(tier)+'</td>'
+      +'<td><span style="font-size:12px;font-weight:700">'+grade+'</span></td>'
+      +'<td>'+clockCell+'</td>'
+      +'<td style="font-size:12px">'+days+'</td>'
       +'<td class="text-center fw-bold">'+(o.cart_count||0)+'</td><td class="text-center">'+fmt(o.total_units||0)+'</td>'
       +'<td style="font-size:12px">'+(o.load_name||o.load||'--')+'</td><td>'+mkSP(o.status||'draft')+'</td>'
       +'<td>'+act+'</td></tr>';
