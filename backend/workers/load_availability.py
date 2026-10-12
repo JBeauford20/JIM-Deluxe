@@ -163,12 +163,23 @@ def load_availability(filepath: str, shipping_week: date = None,
 
     codes = [r['aster_code'] for r in raw_lines]
     cur.execute("""
-        SELECT aster_code, hd_sku_id, aster_name, code_level,
-               hard_good_type, legacy_product_group
-        FROM aster_product_mapping
-        WHERE aster_code = ANY(%s) AND active = true
+        SELECT apm.aster_code, apm.hd_sku_id, apm.aster_name, apm.code_level,
+               apm.hard_good_type, apm.legacy_product_group,
+               sk.is_holiday
+        FROM aster_product_mapping apm
+        JOIN skus sk ON sk.sku_id = apm.hd_sku_id
+        WHERE apm.aster_code = ANY(%s)
+          AND apm.active = true
+          AND sk.is_holiday = false
+        ORDER BY apm.aster_code
     """, (codes,))
-    mapping = {r['aster_code']: dict(r) for r in cur.fetchall()}
+    # Keep first match per Aster code — query already excludes holiday SKUs.
+    # Without ORDER BY + keep-first, a dict comprehension silently overwrites
+    # earlier rows with later ones, which was causing holiday SKUs to win.
+    mapping = {}
+    for r in cur.fetchall():
+        if r['aster_code'] not in mapping:
+            mapping[r['aster_code']] = dict(r)
 
     matched   = []
     unmatched = []
