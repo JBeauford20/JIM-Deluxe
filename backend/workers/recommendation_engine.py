@@ -46,7 +46,7 @@ W_PACE      = 0.20   # sell-through rate: scans ÷ deliveries (12-week window)
 W_BREADTH   = 0.10   # how many SKU groups the store sells well
 
 W_SKU_VEL   = 0.65   # tier-avg group velocity for this SKU
-W_SKU_AVAIL = 0.35   # availability weight (clears more of what we have)
+W_SKU_AVAIL = 0.18   # availability weight — reduced Oct 2026 (was 0.35); velocity dominates
 
 # ── Operational constants ─────────────────────────────────────
 CART_SHELVES      = 5
@@ -54,10 +54,10 @@ MAX_SHELVES_SKU   = 2
 CARTS_PER_TRUCK   = 45
 MIN_CARTS         = 2
 JUTE_CERAMIC_SPLIT = 0.5
-PACE_WINDOW_DAYS  = 84   # 12-week rolling window for pace / dynamic clock
+PACE_WINDOW_DAYS  = 42   # 6-week rolling window for pace / dynamic clock (was 84 / 12wk Oct 2026)
 MAX_CART_CONFIGS  = 25   # hard cap on unique cart config codes per run
 
-TIER_TARGET_CARTS = {'AA': 6, 'A': 4, 'B': 3, 'C': 2, 'D': 2, 'P': 2}
+TIER_TARGET_CARTS = {'AA': 6, 'A': 4, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 
 # ── Store Clock constants (manager-editable) ──────────────────
 # Ken's formula: clock = ROUNDUP(STATIC_DROP_CARTS × STATIC_CART_WHL × TARGET_PACE / scans_wk)
@@ -364,19 +364,19 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             if existing is None or r['last_order_week'] > existing:
                 last_delivery[r['store_id']] = r['last_order_week']
 
-    # ── PACE: sell-through rate (scans ÷ deliveries, 12-week window) ──
+    # ── PACE: sell-through rate (scans ÷ deliveries, 6-week window) ──
     log("Loading sell-through pace...")
     cur.execute("""
         WITH del_w AS (
             SELECT store_id, SUM(units_delivered) AS delivered
             FROM deliveries
-            WHERE delivery_date >= CURRENT_DATE - INTERVAL '84 days'
+            WHERE delivery_date >= CURRENT_DATE - INTERVAL '42 days'
             GROUP BY store_id
         ),
         sal_w AS (
             SELECT store_id, SUM(units_sold) AS sold
             FROM sales
-            WHERE sale_date >= CURRENT_DATE - INTERVAL '84 days'
+            WHERE sale_date >= CURRENT_DATE - INTERVAL '42 days'
             GROUP BY store_id
         )
         SELECT d.store_id,
@@ -396,14 +396,14 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
 
     # Dollar-weighted scans per week — two windows
     # Long window (~40 wks): stable store property → static grade/letter
-    # 12-week window: current pace → dynamic DUE gate
+    # 6-week window: current pace → dynamic DUE gate (was 12wk, tightened Oct 2026)
     cur.execute("""
         SELECT s.store_id,
                SUM(s.units_sold * COALESCE(sk.wholesale_price_whl, %s))
                    / %s AS scans_wk_long,
-               SUM(CASE WHEN s.sale_date >= CURRENT_DATE - INTERVAL '84 days'
+               SUM(CASE WHEN s.sale_date >= CURRENT_DATE - INTERVAL '42 days'
                         THEN s.units_sold * COALESCE(sk.wholesale_price_whl, %s) END)
-                   / 12.0 AS scans_wk_12w
+                   / 6.0 AS scans_wk_6w
         FROM sales s
         JOIN skus sk ON sk.sku_id = s.sku_id
         WHERE s.sale_date >= CURRENT_DATE - INTERVAL '%s days'
@@ -411,7 +411,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     """, (WHOLESALE_PRICE_FALLBACK, CLOCK_LONG_WINDOW_DAYS / 7.0,
           WHOLESALE_PRICE_FALLBACK, CLOCK_LONG_WINDOW_DAYS))
     store_scan_whl = {r['store_id']: (float(r['scans_wk_long'] or 0),
-                                      float(r['scans_wk_12w'] or 0))
+                                      float(r['scans_wk_6w'] or 0))
                      for r in cur.fetchall()}
 
     # Last delivery wholesale value per store from raw AGS delivery history
@@ -454,14 +454,14 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     store_clock = {}
     skipped_not_due = 0
     for store_id, meta in store_rows.items():
-        scan_long, scan_12w = store_scan_whl.get(store_id, (0.0, 0.0))
+        scan_long, scan_6w = store_scan_whl.get(store_id, (0.0, 0.0))
         del_whl = last_delivery_whl.get(store_id, 0.0)
         last_del = last_delivery.get(store_id)
         days_ago = (today - last_del).days if last_del else None
         weeks_ago = (days_ago / 7.0) if days_ago is not None else None
 
         s_weeks, s_grade = static_clock(scan_long)
-        d_weeks = dynamic_clock(del_whl, scan_12w)
+        d_weeks = dynamic_clock(del_whl, scan_6w)
         gap = d_weeks - s_weeks
         is_due = (weeks_ago is None) or (weeks_ago >= d_weeks)
         is_over = gap > CLOCK_OVERSTOCK_FLAG_WKS
