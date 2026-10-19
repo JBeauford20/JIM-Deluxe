@@ -339,6 +339,8 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             'kit_selection_required': r['kit_selection_required'],
         }
 
+    # Snapshot before allocation so Stage 3.5 can detect zero-allocated SKUs
+    initial_inventory = dict(inventory)
     total_available = sum(inventory.values())
     log(f"  {len(inventory)} SKUs | {total_available:,} total units\n")
 
@@ -526,6 +528,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         if '12cm' in fam.lower(): groups.append('12cm_all')
         if '17cm' in fam.lower(): groups.append('17cm_premium')
         if 'h2o'  in fam.lower(): groups.append('h2o_all')
+        if 'dish' in fam.lower(): groups.append('12cm_all')   # Dish Garden borrows 12cm velocity
         if tier in ('Collectors', 'Specialty', 'Boutique', 'Rare Collectors'):
             groups.append('boutique_all')
         return groups
@@ -717,6 +720,74 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     allocated_units = sum(o['total_units'] for o in all_orders.values())
     clearance = (allocated_units / total_available * 100) if total_available else 0
     log(f"  {allocated_units:,} / {total_available:,} units ({clearance:.1f}% clearance)")
+
+    # ── STAGE 3.5: ZERO-SKU MINIMUM PASS ─────────────────────
+    # Any available SKU that received 0 allocation gets pushed to the top stores
+    # that have spare shelf capacity. Ensures no SKU is silently left at 0%.
+    log("\nStage 3.5: Zero-allocation safety sweep...")
+    zero_skus = [
+        sku_id for sku_id in initial_inventory
+        if initial_inventory[sku_id] > 0
+        and inventory.get(sku_id, 0) == initial_inventory[sku_id]
+    ]
+
+    if zero_skus:
+        log(f"  {len(zero_skus)} SKU(s) with 0 allocation — distributing minimum...")
+        RESCUE_MAX_STORES = 30
+
+        for sku_id in zero_skus:
+            profile_id = sku_profiles.get(sku_id)
+            if not profile_id or profile_id not in shelf_configs:
+                log(f"  SKU {sku_id}: no shelf config for '{profile_id}' — skipping rescue")
+                continue
+            cfg         = shelf_configs[profile_id]
+            ups         = cfg['units_per_shelf']
+            profile_max = cfg.get('max_shelves') or CART_SHELVES
+            if not ups:
+                continue
+
+            rescued = 0
+            for store_id, _ in ranked_stores:
+                if rescued >= RESCUE_MAX_STORES:
+                    break
+                if store_id not in all_orders:
+                    continue
+                avail_net = inventory.get(sku_id, 0)
+                if avail_net <= 0:
+                    break
+
+                order_data = all_orders[store_id]
+                last_cart  = order_data['carts'][-1] if order_data['carts'] else None
+                if not last_cart or last_cart['shelves_used'] >= CART_SHELVES:
+                    continue
+
+                # Respect per-profile max for this cart
+                profile_used = sum(
+                    sh for s, sh, _, _ in last_cart['contents']
+                    if sku_profiles.get(s) == profile_id
+                )
+                if profile_used >= profile_max:
+                    continue
+
+                units_to_add = min(ups, avail_net)
+                if units_to_add <= 0:
+                    continue
+
+                kit = determine_kit_type(sku_id, units_to_add,
+                                         defaultdict(int), avail_meta)
+                last_cart['contents'].append((sku_id, 1, units_to_add, kit))
+                last_cart['shelves_used'] += 1
+                last_cart['total_units']  += units_to_add
+                last_cart['is_full']       = last_cart['shelves_used'] >= CART_SHELVES
+                last_cart['is_flagged']    = not last_cart['is_full']
+                order_data['total_units'] += units_to_add
+                inventory[sku_id]         = max(0, avail_net - units_to_add)
+                rescued += 1
+
+            placed = initial_inventory[sku_id] - inventory.get(sku_id, 0)
+            log(f"  SKU {sku_id}: rescued {placed:,} units across {rescued} stores")
+    else:
+        log("  All available SKUs have allocation — no rescue needed")
 
     # ── STAGE 4.5: CONFIG CONSOLIDATION ──────────────────────
     log(f"\nStage 4.5: Consolidating cart configs (target: ≤{MAX_CART_CONFIGS})...")
