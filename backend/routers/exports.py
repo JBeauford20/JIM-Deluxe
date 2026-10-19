@@ -35,11 +35,13 @@ def export_aster(
         if not run:
             raise HTTPException(404, "No approved orders found for this run")
 
-        # Pull all approved order lines with their Aster codes.
-        # aster_code will be NULL for any SKU with no active mapping entry —
-        # those rows are surfaced as warnings, never written as HD SKU numbers.
+        # Pull one row per order line — DISTINCT ON (store_id, order_line_id) ensures
+        # each allocation appears exactly once in the CSV so Quantity sums correctly.
+        # Preference: 3M kitted codes over 1M, then lowest aster_code for determinism.
+        # aster_code will be NULL when no mapping exists — surfaced as a warning, never
+        # written as an HD SKU number.
         cur.execute("""
-            SELECT
+            SELECT DISTINCT ON (o.store_id, ol.id)
                 o.store_id                                                      AS store_number,
                 apm.aster_code,
                 ol.sku_id,
@@ -69,7 +71,11 @@ def export_aster(
             WHERE o.run_id = %s
               AND o.status = 'approved'
               AND COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty) > 0
-            ORDER BY o.store_id, k.description, apm.aster_code
+            ORDER BY
+                o.store_id,
+                ol.id,
+                apm.code_level DESC NULLS LAST,   -- prefer 3M over 1M
+                apm.aster_code   ASC  NULLS LAST  -- lowest code for determinism
         """, (run_id,))
         rows = cur.fetchall()
 
