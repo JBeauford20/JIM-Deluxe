@@ -57,7 +57,7 @@ JUTE_CERAMIC_SPLIT = 0.5
 PACE_WINDOW_DAYS  = 42   # 6-week rolling window for pace / dynamic clock (was 84 / 12wk Oct 2026)
 MAX_CART_CONFIGS  = 25   # hard cap on unique cart config codes per run
 
-TIER_TARGET_CARTS = {'AA': 6, 'A': 4, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
+TIER_TARGET_CARTS = {'AA': 3, 'A': 3, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 
 # ── Store Clock constants (manager-editable) ──────────────────
 # Ken's formula: clock = ROUNDUP(STATIC_DROP_CARTS × STATIC_CART_WHL × TARGET_PACE / scans_wk)
@@ -209,9 +209,10 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
     flags     = []
 
     for cart_num in range(1, target_carts + 1):
-        shelves_left  = CART_SHELVES
-        cart_contents = []
-        sku_shelf_ct  = defaultdict(int)
+        shelves_left     = CART_SHELVES
+        cart_contents    = []
+        sku_shelf_ct     = defaultdict(int)   # shelves used per SKU this cart
+        profile_shelf_ct = defaultdict(int)   # shelves used per profile this cart
 
         for sku_id, score in ranked_skus:
             if shelves_left == 0:
@@ -226,11 +227,22 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             if not ups:
                 continue
 
+            # Enforce per-profile max_shelves (physical cart constraint).
+            # e.g. 17cm boxes max 3 shelves per cart, 12cm max 4 shelves per cart.
+            profile_max = cfg.get('max_shelves') or CART_SHELVES
+            if profile_shelf_ct[profile_id] >= profile_max:
+                continue
+
             avail_net = inventory.get(sku_id, 0) - committed[sku_id]
             if avail_net <= 0:
                 continue
 
-            shelves_wanted = min(MAX_SHELVES_SKU - sku_shelf_ct[sku_id], shelves_left)
+            # shelves_wanted respects both the per-SKU cap and the per-profile cap
+            shelves_wanted = min(
+                MAX_SHELVES_SKU - sku_shelf_ct[sku_id],
+                profile_max     - profile_shelf_ct[profile_id],
+                shelves_left,
+            )
             units_to_take  = min(shelves_wanted * ups, avail_net)
             if units_to_take <= 0:
                 continue
@@ -241,9 +253,10 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
 
             kit_type = determine_kit_type(sku_id, actual_units, committed, avail_meta)
             cart_contents.append((sku_id, actual_shelves, actual_units, kit_type))
-            committed[sku_id]    += actual_units
-            sku_shelf_ct[sku_id] += actual_shelves
-            shelves_left         -= actual_shelves
+            committed[sku_id]             += actual_units
+            sku_shelf_ct[sku_id]          += actual_shelves
+            profile_shelf_ct[profile_id]  += actual_shelves
+            shelves_left                  -= actual_shelves
 
         if not cart_contents:
             flags.append(f"Cart {cart_num}: no inventory available to fill")
