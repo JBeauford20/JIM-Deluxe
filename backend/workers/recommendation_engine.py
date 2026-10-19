@@ -149,13 +149,19 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
         before_count: int   number of unique configs before consolidation
     """
     def signature(cart):
-        return tuple(sorted(
-            (sku_id, num_shelves)
-            for sku_id, num_shelves, _units, _kit in cart['contents']
-        ))
+        # Group by shelf_position → profile + sorted sku set
+        shelves = {}
+        for shelf_pos, sku_id, _trays, _units, _kit, profile_id in cart['contents']:
+            if shelf_pos not in shelves:
+                shelves[shelf_pos] = (profile_id, [])
+            shelves[shelf_pos][1].append(sku_id)
+        return tuple(
+            (pos, pid, tuple(sorted(skus)))
+            for pos, (pid, skus) in sorted(shelves.items())
+        )
 
     def jaccard(a, b):
-        sa = {x[0] for x in a}
+        sa = {x[1] for x in a}   # profile set
         sb = {x[0] for x in b}
         u = sa | sb
         return len(sa & sb) / len(u) if u else 0.0
@@ -204,65 +210,91 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
 def build_carts_for_store(store_id, ranked_skus, inventory,
                            shelf_configs, sku_profiles,
                            target_carts, avail_meta):
+    """
+    Builds carts shelf-by-shelf, filling each physical shelf with varieties
+    from the same profile group (e.g. a 12cm shelf holds Fittonia + Calathea
+    + Geoganthus rather than a single SKU repeated across all 6 trays).
+
+    cart['contents'] = list of (shelf_pos, sku_id, trays, units, kit_type, profile_id)
+    Multiple entries share the same shelf_pos when they are on the same physical shelf.
+    """
     carts     = []
     committed = defaultdict(int)
     flags     = []
 
+    # Pre-group SKUs by profile, preserving score order (ranked_skus already sorted)
+    profile_skus = defaultdict(list)
+    for sku_id, score in ranked_skus:
+        pid = sku_profiles.get(sku_id)
+        if pid and pid in shelf_configs:
+            profile_skus[pid].append((sku_id, score))
+
     for cart_num in range(1, target_carts + 1):
         shelves_left     = CART_SHELVES
         cart_contents    = []
-        sku_shelf_ct     = defaultdict(int)   # shelves used per SKU this cart
-        profile_shelf_ct = defaultdict(int)   # shelves used per profile this cart
+        profile_shelf_ct = defaultdict(int)
+        shelf_pos        = 0
 
-        for sku_id, score in ranked_skus:
-            if shelves_left == 0:
-                break
-            if sku_shelf_ct[sku_id] >= MAX_SHELVES_SKU:
-                continue
-            profile_id = sku_profiles.get(sku_id)
-            if not profile_id or profile_id not in shelf_configs:
-                continue
-            cfg = shelf_configs[profile_id]
-            ups = cfg['units_per_shelf']
-            if not ups:
+        while shelves_left > 0:
+            # Select the highest-scoring profile that still has inventory
+            # and hasn't hit its per-cart shelf cap
+            best_pid = None; best_score = -1
+            for pid, skus in profile_skus.items():
+                cfg_p   = shelf_configs[pid]
+                p_max   = cfg_p.get('max_shelves') or CART_SHELVES
+                if profile_shelf_ct[pid] >= p_max:
+                    continue
+                for sku_id, score in skus:
+                    if inventory.get(sku_id, 0) - committed[sku_id] > 0:
+                        if score > best_score:
+                            best_score = score; best_pid = pid
+                        break  # top-scored SKU for this profile already checked
+
+            if best_pid is None:
+                break   # nothing left to fill
+
+            cfg  = shelf_configs[best_pid]
+            ups  = cfg['units_per_shelf']
+            upt  = cfg.get('units_per_tray') or max(1, ups // (cfg.get('trays_per_shelf') or 1))
+            tps  = cfg.get('trays_per_shelf') or max(1, ups // upt)
+            p_max = cfg.get('max_shelves') or CART_SHELVES
+
+            # Fill one physical shelf with variety SKUs from this profile
+            shelf_pos      += 1
+            trays_left      = tps
+            shelf_items     = []
+
+            for sku_id, _ in profile_skus[best_pid]:
+                if trays_left <= 0:
+                    break
+                avail_net = inventory.get(sku_id, 0) - committed[sku_id]
+                if avail_net <= 0:
+                    continue
+                # Whole trays only — no partial trays
+                trays_to_take = min(trays_left, avail_net // upt)
+                if trays_to_take <= 0:
+                    continue
+                units_to_take = trays_to_take * upt
+                kit = determine_kit_type(sku_id, units_to_take, committed, avail_meta)
+                shelf_items.append((shelf_pos, sku_id, trays_to_take, units_to_take, kit, best_pid))
+                committed[sku_id] += units_to_take
+                trays_left        -= trays_to_take
+
+            if not shelf_items:
+                shelf_pos -= 1
+                profile_shelf_ct[best_pid] = p_max  # mark exhausted for this cart
                 continue
 
-            # Enforce per-profile max_shelves (physical cart constraint).
-            # e.g. 17cm boxes max 3 shelves per cart, 12cm max 4 shelves per cart.
-            profile_max = cfg.get('max_shelves') or CART_SHELVES
-            if profile_shelf_ct[profile_id] >= profile_max:
-                continue
-
-            avail_net = inventory.get(sku_id, 0) - committed[sku_id]
-            if avail_net <= 0:
-                continue
-
-            # shelves_wanted respects both the per-SKU cap and the per-profile cap
-            shelves_wanted = min(
-                MAX_SHELVES_SKU - sku_shelf_ct[sku_id],
-                profile_max     - profile_shelf_ct[profile_id],
-                shelves_left,
-            )
-            units_to_take  = min(shelves_wanted * ups, avail_net)
-            if units_to_take <= 0:
-                continue
-
-            actual_shelves = math.ceil(units_to_take / ups)
-            actual_units   = min(actual_shelves * ups, avail_net)
-            actual_shelves = math.ceil(actual_units / ups)
-
-            kit_type = determine_kit_type(sku_id, actual_units, committed, avail_meta)
-            cart_contents.append((sku_id, actual_shelves, actual_units, kit_type))
-            committed[sku_id]             += actual_units
-            sku_shelf_ct[sku_id]          += actual_shelves
-            profile_shelf_ct[profile_id]  += actual_shelves
-            shelves_left                  -= actual_shelves
+            cart_contents.extend(shelf_items)
+            profile_shelf_ct[best_pid] += 1
+            shelves_left -= 1
 
         if not cart_contents:
             flags.append(f"Cart {cart_num}: no inventory available to fill")
             break
 
-        shelves_used = CART_SHELVES - shelves_left
+        total_units  = sum(u for _, _, _, u, _, _ in cart_contents)
+        shelves_used = shelf_pos
         is_full      = shelves_left == 0
         if not is_full and shelves_used > 0:
             flags.append(f"Cart {cart_num}: only {shelves_used}/{CART_SHELVES} shelves filled")
@@ -271,7 +303,7 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             'cart_number':  cart_num,
             'cart_type_id': 'cc',
             'shelves_used': shelves_used,
-            'total_units':  sum(c[2] for c in cart_contents),
+            'total_units':  total_units,
             'is_full':      is_full,
             'is_flagged':   not is_full,
             'flag_reason':  flags[-1] if not is_full else None,
@@ -762,20 +794,24 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                     continue
 
                 # Respect per-profile max for this cart
-                profile_used = sum(
-                    sh for s, sh, _, _ in last_cart['contents']
-                    if sku_profiles.get(s) == profile_id
-                )
+                cfg         = shelf_configs[profile_id]
+                upt         = cfg.get('units_per_tray') or max(1, ups // (cfg.get('trays_per_shelf') or 1))
+                profile_used = len({sp for sp, sid, _, _, _, pid in last_cart['contents']
+                                     if pid == profile_id})
                 if profile_used >= profile_max:
                     continue
 
-                units_to_add = min(ups, avail_net)
-                if units_to_add <= 0:
+                trays_to_add = min(avail_net // upt, 1) if upt else 0
+                if trays_to_add <= 0:
                     continue
+                units_to_add = trays_to_add * upt
 
+                new_shelf_pos = last_cart['shelves_used'] + 1
                 kit = determine_kit_type(sku_id, units_to_add,
                                          defaultdict(int), avail_meta)
-                last_cart['contents'].append((sku_id, 1, units_to_add, kit))
+                last_cart['contents'].append(
+                    (new_shelf_pos, sku_id, trays_to_add, units_to_add, kit, profile_id)
+                )
                 last_cart['shelves_used'] += 1
                 last_cart['total_units']  += units_to_add
                 last_cart['is_full']       = last_cart['shelves_used'] >= CART_SHELVES
@@ -964,23 +1000,14 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                 eff_max, cart_key, config_code
             ))
 
-            shelf_pos = 1
-            for (sku_id, num_shelves, total_units, kit_type) in cart['contents']:
-                profile_id = sku_profiles.get(sku_id)
-                cfg        = shelf_configs.get(profile_id, {})
-                ups        = cfg.get('units_per_shelf', 1)
-                tps        = cfg.get('trays_per_shelf') or \
-                             max(1, ups // max(1, cfg.get('units_per_tray', 1)))
-                clean_kit  = kit_type if kit_type != 'mixed' else 'ceramic_kit'
-
-                for _ in range(num_shelves):
-                    shelf_rows.append((
-                        cart_id, shelf_pos, sku_id, profile_id,
-                        clean_kit, tps, ups,
-                    ))
-                    shelf_pos += 1
-
-                sku_totals[sku_id] += total_units
+            for (shelf_pos, sku_id, tray_count, unit_count, kit_type, profile_id) \
+                    in cart['contents']:
+                clean_kit = kit_type if kit_type != 'mixed' else 'ceramic_kit'
+                shelf_rows.append((
+                    cart_id, shelf_pos, sku_id, profile_id,
+                    clean_kit, tray_count, unit_count,
+                ))
+                sku_totals[sku_id] += unit_count
 
         for sku_id, total_units in sku_totals.items():
             kit = avail_meta.get(sku_id, {}).get('hard_good_type')

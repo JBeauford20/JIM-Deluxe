@@ -62,11 +62,29 @@ def order_detail(order_id: str, user=Depends(get_current_user)):
 
         cur.execute("""
             SELECT oc.*,
-                   (SELECT json_agg(cs ORDER BY shelf_position)
-                    FROM (SELECT cs.*, k.description
-                          FROM cart_shelves cs
-                          JOIN skus k ON k.sku_id = cs.sku_id
-                          WHERE cs.cart_id = oc.id) cs) AS shelves
+                   (SELECT json_agg(shelf_row ORDER BY shelf_row->>'pos' DESC)
+                    FROM (
+                        SELECT json_build_object(
+                            'pos',          cs.shelf_position,
+                            'profile',      cs.profile_id,
+                            'profile_short', pp.short_name,
+                            'total_trays',  SUM(cs.tray_count),
+                            'total_units',  SUM(cs.unit_count),
+                            'varieties',    json_agg(json_build_object(
+                                'sku_id', cs.sku_id,
+                                'description', k.description,
+                                'family', k.family,
+                                'trays', cs.tray_count,
+                                'units', cs.unit_count,
+                                'kit_type', cs.kit_type
+                            ) ORDER BY cs.unit_count DESC)
+                        ) AS shelf_row
+                        FROM cart_shelves cs
+                        JOIN skus k ON k.sku_id = cs.sku_id
+                        LEFT JOIN packing_profiles pp ON pp.id = cs.profile_id
+                        WHERE cs.cart_id = oc.id
+                        GROUP BY cs.shelf_position, cs.profile_id, pp.short_name
+                    ) AS shelves_grouped) AS shelves
             FROM order_carts oc WHERE order_id = %s ORDER BY cart_number
         """, (order_id,))
         carts = cur.fetchall()
@@ -156,21 +174,31 @@ def cart_configs(run_id: str, user=Depends(get_current_user)):
                 oc.total_units,
                 oc.shelves_used,
                 o.store_id,
-                json_agg(
-                    json_build_object(
-                        'pos',    cs.shelf_position,
+                json_agg(shelf_row ORDER BY (shelf_row->>'pos')::int DESC) AS shelves
+            FROM order_carts oc
+            JOIN orders o ON o.id = oc.order_id
+            LEFT JOIN LATERAL (
+                SELECT json_build_object(
+                    'pos',          cs.shelf_position,
+                    'profile',      cs.profile_id,
+                    'profile_short', pp.short_name,
+                    'total_trays',  SUM(cs.tray_count),
+                    'total_units',  SUM(cs.unit_count),
+                    'varieties',    json_agg(json_build_object(
                         'sku_id', cs.sku_id,
                         'desc',   k.description,
                         'family', k.family,
                         'trays',  cs.tray_count,
                         'units',  cs.unit_count,
                         'kit',    cs.kit_type
-                    ) ORDER BY cs.shelf_position
-                ) AS shelves
-            FROM order_carts oc
-            JOIN orders o          ON o.id = oc.order_id
-            LEFT JOIN cart_shelves cs ON cs.cart_id = oc.id
-            LEFT JOIN skus k       ON k.sku_id = cs.sku_id
+                    ) ORDER BY cs.unit_count DESC)
+                ) AS shelf_row
+                FROM cart_shelves cs
+                JOIN skus k ON k.sku_id = cs.sku_id
+                LEFT JOIN packing_profiles pp ON pp.id = cs.profile_id
+                WHERE cs.cart_id = oc.id
+                GROUP BY cs.shelf_position, cs.profile_id, pp.short_name
+            ) shelves_grouped ON true
             WHERE o.run_id = %s
             GROUP BY oc.id, oc.cart_key, oc.config_code,
                      oc.total_units, oc.shelves_used, o.store_id
