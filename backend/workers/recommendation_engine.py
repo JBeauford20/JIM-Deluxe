@@ -59,6 +59,26 @@ MAX_CART_CONFIGS  = 25   # hard cap on unique cart config codes per run
 
 TIER_TARGET_CARTS = {'AA': 3, 'A': 3, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 
+# ── Cart diversity rules ───────────────────────────────────────
+# Maximum shelves of any one SIZE GROUP per cart (prevents full 9cm or full 12cm carts).
+# Size group is broader than profile — 9cm Littles + 9cm Ceramic both count as '9cm'.
+MAX_SHELVES_SIZE_GROUP = 2
+
+PROFILE_SIZE_GROUP = {
+    # 9cm family
+    'littles': '9cm', 'cer9': '9cm', 'canopy9': '9cm',
+    # 12cm family
+    'euro12': '12cm', 'db12': '12cm', 'hb12': '12cm',
+    'climb':  '12cm', 'terrEU': '12cm',
+    # 17cm family
+    'box17': '17cm',
+    # H2O family
+    'bowlEU': 'h2o', 'h2opp': 'h2o', 'venti': 'h2o',
+    # Specialties (treated as their own group each)
+    'box8x2': 'dish', 'soilbag1': 'soil', 'soilbag2': 'soil',
+    'spraybox': 'hardgood',
+}
+
 # ── Store Clock constants (manager-editable) ──────────────────
 # Ken's formula: clock = ROUNDUP(STATIC_DROP_CARTS × STATIC_CART_WHL × TARGET_PACE / scans_wk)
 # Josh's DUE gate: due = weeks_since_last >= CEIL(actual_delivery_whl × TARGET_PACE / scans_12wk)
@@ -235,14 +255,20 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
         profile_shelf_ct = defaultdict(int)
         shelf_pos        = 0
 
+        size_group_shelf_ct = defaultdict(int)   # shelves per size family this cart
+
         while shelves_left > 0:
-            # Select the highest-scoring profile that still has inventory
-            # and hasn't hit its per-cart shelf cap
+            # Select the highest-scoring profile that still has inventory,
+            # hasn't hit its per-cart profile cap, and whose size group
+            # hasn't hit MAX_SHELVES_SIZE_GROUP (prevents full 9cm/12cm carts).
             best_pid = None; best_score = -1
             for pid, skus in profile_skus.items():
-                cfg_p   = shelf_configs[pid]
-                p_max   = cfg_p.get('max_shelves') or CART_SHELVES
+                cfg_p    = shelf_configs[pid]
+                p_max    = cfg_p.get('max_shelves') or CART_SHELVES
+                size_grp = PROFILE_SIZE_GROUP.get(pid, pid)
                 if profile_shelf_ct[pid] >= p_max:
+                    continue
+                if size_group_shelf_ct[size_grp] >= MAX_SHELVES_SIZE_GROUP:
                     continue
                 for sku_id, score in skus:
                     if inventory.get(sku_id, 0) - committed[sku_id] > 0:
@@ -287,6 +313,7 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
 
             cart_contents.extend(shelf_items)
             profile_shelf_ct[best_pid] += 1
+            size_group_shelf_ct[PROFILE_SIZE_GROUP.get(best_pid, best_pid)] += 1
             shelves_left -= 1
 
         if not cart_contents:
