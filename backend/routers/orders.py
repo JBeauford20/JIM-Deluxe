@@ -308,3 +308,87 @@ def mark_reviewed(order_id: str, user=Depends(require_role("order_writer","manag
             from fastapi import HTTPException
             raise HTTPException(404, "Order not found")
         return {"reviewed": True}
+
+
+@router.get("/runs/{run_id}/inventory-draw")
+def inventory_draw(run_id: str, user=Depends(get_current_user)):
+    """
+    Per-SKU allocation status for a run.
+    Returns units_available, units_allocated, units_remaining, pct_consumed,
+    store_count, and the full Aster variety pool for each SKU.
+    """
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            WITH avail AS (
+                SELECT al.sku_id, SUM(al.units_available) AS units_available
+                FROM availability_lines al
+                JOIN recommendation_runs rr ON rr.batch_id = al.batch_id
+                WHERE rr.id = %s
+                GROUP BY al.sku_id
+            ),
+            alloc AS (
+                SELECT ol.sku_id,
+                       SUM(COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty, 0))
+                           AS units_allocated,
+                       COUNT(DISTINCT o.store_id) AS store_count
+                FROM order_lines ol
+                JOIN orders o ON o.id = ol.order_id
+                WHERE o.run_id = %s
+                GROUP BY ol.sku_id
+            ),
+            aster AS (
+                SELECT hd_sku_id,
+                       json_agg(
+                           json_build_object(
+                               'aster_code',    apm.aster_code,
+                               'aster_name',    apm.aster_name,
+                               'code_level',    apm.code_level,
+                               'hard_good_type',apm.hard_good_type
+                           )
+                           ORDER BY apm.code_level DESC, apm.aster_code
+                       ) AS codes
+                FROM aster_product_mapping apm
+                WHERE apm.active = true
+                GROUP BY apm.hd_sku_id
+            )
+            SELECT
+                a.sku_id,
+                sk.description,
+                sk.family,
+                sk.legacy_product_group,
+                a.units_available,
+                COALESCE(al.units_allocated, 0)                          AS units_allocated,
+                a.units_available - COALESCE(al.units_allocated, 0)      AS units_remaining,
+                CASE WHEN a.units_available > 0
+                     THEN ROUND(COALESCE(al.units_allocated,0)::numeric
+                                / a.units_available * 100, 1)
+                     ELSE 0 END                                           AS pct_consumed,
+                COALESCE(al.store_count, 0)                              AS store_count,
+                COALESCE(ast.codes, '[]'::json)                          AS aster_codes
+            FROM avail a
+            JOIN skus sk ON sk.sku_id = a.sku_id
+            LEFT JOIN alloc al  ON al.sku_id  = a.sku_id
+            LEFT JOIN aster ast ON ast.hd_sku_id = a.sku_id
+            ORDER BY pct_consumed DESC, a.units_available DESC
+        """, (run_id, run_id))
+        rows = cur.fetchall()
+
+    # Summary totals
+    total_avail = sum(r["units_available"] or 0 for r in rows)
+    total_alloc = sum(r["units_allocated"] or 0 for r in rows)
+    low_count   = sum(1 for r in rows if float(r["pct_consumed"] or 0) >= 90
+                      and float(r["units_remaining"] or 0) > 0)
+    dep_count   = sum(1 for r in rows if float(r["units_remaining"] or 0) <= 0)
+
+    return {
+        "summary": {
+            "total_available":  total_avail,
+            "total_allocated":  total_alloc,
+            "total_remaining":  total_avail - total_alloc,
+            "pct_consumed":     round(total_alloc / total_avail * 100, 1) if total_avail else 0,
+            "low_count":        low_count,
+            "depleted_count":   dep_count,
+        },
+        "skus": rows,
+    }

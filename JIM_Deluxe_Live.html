@@ -71,6 +71,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" onclick="go('plan',this)"><i class="bi bi-clipboard-check me-1"></i>Review Plan</span>
   <span class="nl" onclick="go('editor',this)"><i class="bi bi-cart3 me-1"></i>Order Editor</span>
   <span class="nl" id="nl-cfg" onclick="go('configs',this)" style="display:none"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
+  <span class="nl" id="nl-draw" onclick="go('draw',this);loadDraw()" style="display:none"><i class="bi bi-boxes me-1"></i>Inventory Draw</span>
   <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
   <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
   <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
@@ -203,6 +204,36 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <span class="badge" style="background:var(--fern);font-size:13px" id="cfg-cnt"></span>
   </div>
   <div class="row g-3" id="cg"><div class="col-12 text-center text-muted py-5"><i class="bi bi-grid-3x3" style="font-size:36px;opacity:.2"></i><p class="mt-2">Generate a plan to see cart configurations</p></div></div>
+</div></div>
+
+<!-- INVENTORY DRAW -->
+<div id="screen-draw" class="screen">
+<div class="container-fluid p-4">
+  <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+    <div>
+      <h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-boxes me-2"></i>Inventory Draw</h5>
+      <p class="text-muted mb-0" style="font-size:13px" id="draw-sub">Allocation burn against available inventory</p>
+    </div>
+    <div class="d-flex gap-2 align-items-center flex-wrap" id="draw-hdr-stats" style="display:none!important"></div>
+  </div>
+  <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
+    <select class="form-select form-select-sm" style="width:160px" id="draw-fam" onchange="renderDraw()">
+      <option value="">All Families</option>
+    </select>
+    <select class="form-select form-select-sm" style="width:170px" id="draw-sort" onchange="renderDraw()">
+      <option value="pct">Sort: % Consumed</option>
+      <option value="remain">Sort: Remaining Units</option>
+      <option value="alloc">Sort: Allocated Units</option>
+      <option value="stores">Sort: Store Count</option>
+    </select>
+    <div class="form-check form-switch mb-0 ms-1">
+      <input class="form-check-input" type="checkbox" id="draw-low" onchange="renderDraw()">
+      <label class="form-check-label" for="draw-low" style="font-size:13px">Low only (&lt;10% remain)</label>
+    </div>
+  </div>
+  <div id="draw-body">
+    <div class="text-center text-muted py-5"><i class="bi bi-boxes" style="font-size:36px;opacity:.2"></i><p class="mt-2">Generate a plan to see inventory draw</p></div>
+  </div>
 </div></div>
 
 <!-- STORES -->
@@ -366,6 +397,8 @@ function doClearBatch(){
   var fb=document.getElementById('fb');if(fb)fb.disabled=true;
   var psb=document.getElementById('psb');if(psb)psb.disabled=true;
   var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='none';
+  var nld=document.getElementById('nl-draw');if(nld)nld.style.display='none';
+  drawData=null;
   setStrip(null,null);
   buildStats();buildTable();buildLoads();buildEL();
   toast('Availability cleared','warn');
@@ -400,11 +433,13 @@ function doPoll(jid,gb,gs,retries){
         gb.disabled=false;gb.innerHTML='<i class="bi bi-arrow-clockwise me-2"></i>Re-generate';
         document.getElementById('rb').style.display='block';
         var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='flex';
+        var nld=document.getElementById('nl-draw');if(nld)nld.style.display='flex';
         var fb=document.getElementById('fb');if(fb)fb.disabled=false;
         var psb=document.getElementById('psb');if(psb)psb.disabled=false;
         setStrip(wk,null,'Draft Plan');
         toast('Plan ready -- '+orders.length+' stores','ok');
         loadCfgs().catch(function(){});
+        loadDraw().catch(function(){});
       }else if(j.status==='failed'){
         gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';
         gs.style.display='none';toast('Engine error: '+(j.error_text||'unknown'),'err');
@@ -646,6 +681,141 @@ async function loadCfgs(){
       return '<div class="col-12 col-md-6 col-xl-4"><div class="card h-100"><div class="ch d-flex justify-content-between align-items-center" style="padding:9px 14px"><span><i class="bi bi-cart3 me-2"></i>'+(c.config_code||'CC'+(i+1))+'</span><span class="badge" style="background:rgba(255,255,255,.2);font-size:11px">'+c.cart_count+' carts, '+c.store_count+' stores</span></div><div class="card-body p-3">'+shHTML+'</div><div class="card-footer py-2 px-3" style="font-size:11.5px;color:var(--is);background:#f8faf8"><i class="bi bi-box-seam me-1"></i>'+fmt(c.total_units)+' units/cart'+(c.sample_cart_key?' · '+c.sample_cart_key:'')+'</div></div></div>';
     }).join('');
   }catch(e){el.innerHTML='<div class="col-12"><div class="alert alert-danger">'+e.message+'</div></div>';}
+}
+
+/* INVENTORY DRAW */
+var drawData=null;
+
+async function loadDraw(){
+  if(!rId)return;
+  var el=document.getElementById('draw-body');if(!el)return;
+  el.innerHTML='<div class="text-center py-4"><span class="spinner-border spinner-border-sm me-2"></span>Loading inventory draw...</div>';
+  try{
+    var d=await api('/api/orders/runs/'+rId+'/inventory-draw');
+    drawData=d;
+
+    // Populate family filter
+    var fams=[...new Set((d.skus||[]).map(function(s){return s.family||'';}).filter(Boolean))].sort();
+    var df=document.getElementById('draw-fam');
+    if(df){df.innerHTML='<option value="">All Families</option>'+fams.map(function(f){return '<option>'+f+'</option>';}).join('');}
+
+    // Summary chips
+    var sm=d.summary||{};
+    var hs=document.getElementById('draw-hdr-stats');
+    if(hs){
+      hs.style.display='flex';
+      var pct=sm.pct_consumed||0;
+      var pctCol=pct>=90?'var(--ora)':pct>=50?'#856404':'var(--fern)';
+      hs.innerHTML=[
+        chip('bi-box-seam','Available',fmt(sm.total_available),'var(--fd)'),
+        chip('bi-graph-up-arrow','Allocated',fmt(sm.total_allocated),'var(--fern)'),
+        chip('bi-box','Remaining',fmt(sm.total_remaining),'var(--is)'),
+        chip('bi-percent','Consumed',pct+'%',pctCol),
+        sm.low_count?chip('bi-exclamation-triangle','Running Low',sm.low_count+' SKUs','var(--ora)'):'',
+        sm.depleted_count?chip('bi-x-circle','Depleted',sm.depleted_count+' SKUs','var(--danger)'):'',
+      ].join('');
+    }
+    var sub=document.getElementById('draw-sub');
+    if(sub)sub.textContent=(d.skus||[]).length+' SKUs in this availability batch';
+    renderDraw();
+  }catch(e){if(el)el.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}
+}
+
+function chip(ic,lbl,val,col){
+  return '<div style="background:#f8faf8;border:1px solid var(--line);border-radius:8px;padding:5px 12px;font-size:12px;white-space:nowrap">'
+    +'<div style="color:var(--is);font-size:10px"><i class="bi '+ic+' me-1"></i>'+lbl+'</div>'
+    +'<div style="font-weight:700;color:'+col+'">'+val+'</div></div>';
+}
+
+function renderDraw(){
+  var el=document.getElementById('draw-body');if(!el||!drawData)return;
+  var skus=(drawData.skus||[]).slice();
+  var fam=document.getElementById('draw-fam');
+  var sort=document.getElementById('draw-sort');
+  var low=document.getElementById('draw-low');
+  if(fam&&fam.value)skus=skus.filter(function(s){return s.family===fam.value;});
+  if(low&&low.checked)skus=skus.filter(function(s){return parseFloat(s.units_remaining||0)>=0&&parseFloat(s.pct_consumed||0)>=90;});
+  var sv=(sort&&sort.value)||'pct';
+  skus.sort(function(a,b){
+    if(sv==='remain')return (a.units_remaining||0)-(b.units_remaining||0);
+    if(sv==='alloc')return (b.units_allocated||0)-(a.units_allocated||0);
+    if(sv==='stores')return (b.store_count||0)-(a.store_count||0);
+    return (b.pct_consumed||0)-(a.pct_consumed||0);
+  });
+  if(!skus.length){el.innerHTML='<div class="text-center text-muted py-4">No SKUs match the current filter</div>';return;}
+  el.innerHTML='<div class="table-responsive"><table class="table jt" style="font-size:13px"><thead><tr>'
+    +'<th>SKU</th><th>Description</th><th>Family</th><th>Tier</th>'
+    +'<th class="text-end">Available</th><th class="text-end">Allocated</th>'
+    +'<th class="text-end">Remaining</th><th style="min-width:130px">Consumption</th>'
+    +'<th class="text-center">Stores</th><th></th>'
+    +'</tr></thead><tbody>'
+    +skus.map(function(s,i){return drawRow(s,i);}).join('')
+    +'</tbody></table></div>';
+}
+
+function drawRow(s,i){
+  var pct=parseFloat(s.pct_consumed||0);
+  var rem=parseInt(s.units_remaining||0);
+  var dep=rem<=0;
+  var runLow=!dep&&pct>=90;
+  var warn=!dep&&!runLow&&pct>=80;
+  var mid=!dep&&!runLow&&!warn&&pct>=50;
+  var barCol=dep?'#dc3545':runLow?'var(--ora)':warn?'#ffc107':mid?'var(--ok)':'var(--fern)';
+  var rowBg=dep?'background:#fff5f5':runLow?'background:#fff8f0':'';
+  var uid='dr-'+i;
+  var codes=s.aster_codes||[];
+
+  return '<tr style="'+rowBg+'" onclick="toggleDraw(\''+uid+'\')" style="cursor:pointer">'
+    +'<td style="font-family:monospace;font-size:11px;color:var(--is)">'+s.sku_id+'</td>'
+    +'<td style="font-weight:600;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+sn(s.description||'SKU '+s.sku_id)+'</td>'
+    +'<td><span style="font-size:11px;background:#f0f9f0;border:1px solid var(--mp);border-radius:5px;padding:1px 6px">'+(s.family||'')+'</span></td>'
+    +'<td style="font-size:11px;color:var(--is)">'+(s.legacy_product_group||'')+'</td>'
+    +'<td class="text-end">'+fmt(s.units_available||0)+'</td>'
+    +'<td class="text-end fw-bold" style="color:var(--fern)">'+fmt(s.units_allocated||0)+'</td>'
+    +'<td class="text-end fw-bold" style="color:'+(dep?'#dc3545':runLow?'var(--ora)':'var(--fd)')+'">'+fmt(rem)+'</td>'
+    +'<td><div style="display:flex;align-items:center;gap:6px">'
+    +'<div style="flex:1;height:6px;background:var(--line);border-radius:3px">'
+    +'<div style="height:6px;border-radius:3px;background:'+barCol+';width:'+Math.min(100,pct)+'%"></div></div>'
+    +'<span style="font-size:11px;font-weight:700;color:'+barCol+';width:36px;text-align:right">'+pct+'%</span>'
+    +(dep?'<span class="badge" style="background:#dc3545;font-size:10px">EMPTY</span>'
+      :runLow?'<span class="badge" style="background:var(--ora);font-size:10px">LOW</span>':'')
+    +'</div></td>'
+    +'<td class="text-center fw-bold">'+s.store_count+'</td>'
+    +'<td><i class="bi bi-chevron-down" style="font-size:11px;color:var(--is)"></i></td>'
+    +'</tr>'
+    +'<tr id="'+uid+'" style="display:none;background:#f8faf8">'
+    +'<td colspan="10" style="padding:0">'
+    +'<div style="padding:10px 20px 14px">'
+    +'<div style="font-size:12px;font-weight:700;color:var(--fd);margin-bottom:8px">'
+    +'<i class="bi bi-upc-scan me-1"></i>Aster Variety Pool — '+codes.length+' code'+(codes.length!==1?'s':'')
+    +' <span style="font-weight:400;color:var(--is);font-size:11px">Specific variety assigned at pick time — all '+fmt(s.units_allocated||0)+' allocated units draw from this pool</span></div>'
+    +(codes.length?'<table style="font-size:11.5px;width:100%;border-collapse:collapse">'
+    +'<thead><tr style="border-bottom:1px solid var(--line)">'
+    +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Aster Code</th>'
+    +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Variety Name</th>'
+    +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Type</th>'
+    +'<th style="padding:3px 0 6px 0;color:var(--is);font-weight:600">Kit Format</th>'
+    +'</tr></thead><tbody>'
+    +codes.map(function(c){
+      var is3m=c.code_level==='3M';
+      return '<tr style="border-bottom:1px solid #f0f4f0">'
+        +'<td style="padding:4px 10px 4px 0;font-family:monospace;color:var(--fd);font-weight:700">'+c.aster_code+'</td>'
+        +'<td style="padding:4px 10px 4px 0">'+(c.aster_name||'—')+'</td>'
+        +'<td style="padding:4px 10px 4px 0"><span style="font-size:10px;padding:1px 6px;border-radius:4px;background:'+(is3m?'#e8f4e8':'#edf3ff')+';color:'+(is3m?'var(--fern)':'#3a6bc4')+'">'+(c.code_level||'')+'</span></td>'
+        +'<td style="padding:4px 0 4px 0;color:var(--is);font-size:11px">'+(c.hard_good_type||'—').replace('_',' ')+'</td>'
+        +'</tr>';
+    }).join('')+'</tbody></table>'
+    :'<div style="color:var(--is);font-style:italic">No Aster codes mapped for this SKU</div>')
+    +'</div></td></tr>';
+}
+
+function toggleDraw(uid){
+  var el=document.getElementById(uid);if(!el)return;
+  el.style.display=el.style.display==='none'?'table-row':'none';
+  // Rotate chevron in the trigger row
+  var prev=el.previousElementSibling;
+  if(prev){var ch=prev.querySelector('.bi-chevron-down,.bi-chevron-up');
+    if(ch){ch.classList.toggle('bi-chevron-down');ch.classList.toggle('bi-chevron-up');}}
 }
 
 /* STORES */
