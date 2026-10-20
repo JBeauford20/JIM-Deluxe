@@ -283,7 +283,10 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                 SUM(cs.unit_count)          AS actual_total_units,
                 cc.cart_count,
                 cc.cart_key,
-                ROUND(SUM(cs.unit_count)::numeric / NULLIF(cc.cart_count, 0), 0)
+                -- Divide by COUNT(*) = carts that actually carry this SKU,
+                -- not cc.cart_count which is all carts with this config code.
+                -- e.g. CC1=173 carts but only 27 have 17cm → 1134÷27=42, not 1134÷173=7
+                ROUND(SUM(cs.unit_count)::numeric / NULLIF(COUNT(*), 0), 0)
                                             AS avg_unit_count
             FROM cart_shelves cs
             JOIN order_carts oc ON oc.id = cs.cart_id
