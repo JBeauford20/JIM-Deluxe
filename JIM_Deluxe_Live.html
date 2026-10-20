@@ -202,7 +202,12 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <div class="d-flex align-items-center justify-content-between mb-3">
     <div><h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-grid-3x3 me-2"></i>Cart Configurations</h5>
     <p class="text-muted mb-0" style="font-size:13px" id="cfg-sub">Unique cart configs generated this week</p></div>
-    <span class="badge" style="background:var(--fern);font-size:13px" id="cfg-cnt"></span>
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge" style="background:var(--fern);font-size:13px" id="cfg-cnt"></span>
+      <button class="btn btn-sm btn-outline-success" id="cfg-export-btn" onclick="exportCartConfigs()" style="display:none">
+        <i class="bi bi-file-earmark-spreadsheet me-1"></i>Export Configs
+      </button>
+    </div>
   </div>
   <div class="row g-3" id="cg"><div class="col-12 text-center text-muted py-5"><i class="bi bi-grid-3x3" style="font-size:36px;opacity:.2"></i><p class="mt-2">Generate a plan to see cart configurations</p></div></div>
 </div></div>
@@ -215,7 +220,12 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
       <h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-boxes me-2"></i>Inventory Draw</h5>
       <p class="text-muted mb-0" style="font-size:13px" id="draw-sub">Allocation burn against available inventory</p>
     </div>
-    <div class="d-flex gap-2 align-items-center flex-wrap" id="draw-hdr-stats" style="display:none!important"></div>
+    <div class="d-flex gap-2 align-items-center flex-wrap">
+      <div id="draw-hdr-stats" style="display:none"></div>
+      <button class="btn btn-sm btn-outline-success" id="draw-export-btn" onclick="exportDrawAster()" style="display:none">
+        <i class="bi bi-file-earmark-spreadsheet me-1"></i>Export Aster Detail
+      </button>
+    </div>
   </div>
   <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
     <select class="form-select form-select-sm" style="width:160px" id="draw-fam" onchange="renderDraw()">
@@ -778,6 +788,7 @@ async function loadCfgs(){
     if(!cfgs.length){el.innerHTML='<div class="col-12 text-center text-muted py-5">No configs found</div>';return;}
     if(cnt)cnt.textContent=cfgs.length+' unique configs';
     if(sub)sub.textContent=cfgs.length+' unique configs across '+cfgs.reduce(function(s,c){return s+c.cart_count;},0)+' total carts';
+    var ceb=document.getElementById('cfg-export-btn');if(ceb)ceb.style.display='inline-flex';
     el.innerHTML=cfgs.map(function(c,i){
       var sh=(c.shelves||[]).filter(Boolean).slice().sort(function(a,b){return (b.pos||0)-(a.pos||0);});
       var shHTML=sh.map(function(s){
@@ -830,8 +841,49 @@ async function loadDraw(){
     }
     var sub=document.getElementById('draw-sub');
     if(sub)sub.textContent=(d.skus||[]).length+' SKUs in this availability batch';
+    var eb=document.getElementById('draw-export-btn');if(eb)eb.style.display='inline-flex';
     renderDraw();
   }catch(e){if(el)el.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}
+}
+
+function exportDrawAster(){
+  if(!drawData||!(drawData.skus||[]).length){toast('No data to export','warn');return;}
+  var headers=['Aster Code','Aster Name','HD SKU','HD Description'];
+  var rows=[];
+  (drawData.skus||[]).forEach(function(s){
+    var codes=s.aster_codes||[];
+    if(!codes.length){
+      // SKU with no Aster codes — still include the HD SKU row
+      rows.push(['','',(s.sku_id||''),(s.description||'')]);
+    } else {
+      codes.forEach(function(c){
+        rows.push([
+          c.aster_code||'',
+          c.aster_name||'',
+          s.sku_id||'',
+          s.description||''
+        ]);
+      });
+    }
+  });
+  var csv=[headers].concat(rows).map(function(row){
+    return row.map(function(v){
+      var s=String(v==null?'':v);
+      return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;
+    }).join(',');
+  }).join('\r\n');
+  var blob=new Blob([csv],{type:'text/csv'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='JIM_Aster_Detail_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Exported '+rows.length+' Aster code rows','ok');
+}
+
+function exportCartConfigs(){
+  // Template-based format — awaiting Josh's template reference before implementing
+  toast('Cart Config export coming soon — template pending','warn');
 }
 
 function chip(ic,lbl,val,col){
