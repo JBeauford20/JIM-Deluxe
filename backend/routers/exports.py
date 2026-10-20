@@ -255,12 +255,12 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
         # Shelves for each representative cart
         cart_ids = [c["cart_id"] for c in configs]
         cur.execute("""
-            SELECT cs.cart_id, cs.shelf_position, cs.sku_id,
+            SELECT cs.cart_id::text, cs.shelf_position, cs.sku_id,
                    cs.profile_id, cs.tray_count, cs.unit_count, cs.kit_type,
                    sk.family, sk.description
             FROM cart_shelves cs
             JOIN skus sk ON sk.sku_id = cs.sku_id
-            WHERE cs.cart_id = ANY(%s)
+            WHERE cs.cart_id::text = ANY(%s)
             ORDER BY cs.cart_id, cs.shelf_position DESC, cs.sku_id
         """, (cart_ids,))
         all_shelves = cur.fetchall()
