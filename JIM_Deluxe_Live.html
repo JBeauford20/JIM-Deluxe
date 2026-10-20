@@ -881,9 +881,27 @@ function exportDrawAster(){
   toast('Exported '+rows.length+' Aster code rows','ok');
 }
 
-function exportCartConfigs(){
-  // Template-based format — awaiting Josh's template reference before implementing
-  toast('Cart Config export coming soon — template pending','warn');
+async function exportCartConfigs(){
+  if(!rId){toast('No active plan','warn');return;}
+  var btn=document.getElementById('cfg-export-btn');
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner-border spinner-border-sm me-1"></span>Building...';}
+  try{
+    var resp=await fetch(B+'/api/exports/runs/'+rId+'/cart-config-export',{
+      headers:{'X-Dev-Key':'jim-dev-2026'}
+    });
+    if(!resp.ok)throw new Error(await resp.text());
+    var blob=await resp.blob();
+    var cd=resp.headers.get('Content-Disposition')||'';
+    var m=cd.match(/filename="([^"]+)"/);
+    var fname=m?m[1]:('JIM_CartConfigs_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download=fname;a.click();
+    URL.revokeObjectURL(a.href);
+    toast('Cart config export downloaded','ok');
+  }catch(e){toast('Export failed: '+e.message,'err');}
+  finally{
+    if(btn){btn.disabled=false;btn.innerHTML='<i class="bi bi-file-earmark-spreadsheet me-1"></i>Export Configs';}
+  }
 }
 
 function chip(ic,lbl,val,col){
