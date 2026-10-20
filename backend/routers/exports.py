@@ -217,9 +217,10 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
         cur.execute("SELECT sku_id, upc, retail_price FROM pricebook_hd")
         pricebook = {r["sku_id"]: (r["upc"], r["retail_price"]) for r in cur.fetchall()}
 
-        # Availability pool: sku_id → [(aster_code_int, units), ...] sorted by units desc
+        # Availability pool: sku_id → [(aster_code_text, units), ...] sorted by units desc
+        # plant_id is stored as text — keep as-is, convert to int for variety_ref lookup later
         cur.execute("""
-            SELECT sku_id, plant_id::bigint AS aster_code, units_available
+            SELECT sku_id, plant_id AS aster_code, units_available
             FROM availability_lines
             WHERE batch_id = %s AND plant_id IS NOT NULL
             ORDER BY sku_id, units_available DESC
@@ -235,11 +236,12 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
         profiles_upt = {r["id"]: r["units_per_tray"] or 1 for r in cur.fetchall()}
 
         # Cart configs: one representative cart + count per config code
+        # UUID doesn't support MIN() — use array_agg with ordering instead
         cur.execute("""
             SELECT oc.config_code,
-                   MIN(oc.id)        AS cart_id,
-                   COUNT(oc.id)      AS cart_count,
-                   MIN(oc.cart_key)  AS cart_key
+                   (array_agg(oc.id ORDER BY oc.cart_key))[1]       AS cart_id,
+                   COUNT(oc.id)                                       AS cart_count,
+                   (array_agg(oc.cart_key ORDER BY oc.cart_key))[1]  AS cart_key
             FROM order_carts oc
             JOIN orders o ON o.id = oc.order_id
             WHERE o.run_id = %s
@@ -333,7 +335,12 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                                 continue
                             qty = aster_trays * upt
                             shelf_total += qty
-                            genus, variety = variety_ref.get(aster_code, ("", ""))
+                            # variety_ref keys are bigint; plant_id stored as text
+                            try:
+                                aster_int = int(aster_code)
+                            except (ValueError, TypeError):
+                                aster_int = 0
+                            genus, variety = variety_ref.get(aster_int, ("", ""))
                             if not genus and not variety:
                                 genus   = family
                                 variety = str(aster_code)
