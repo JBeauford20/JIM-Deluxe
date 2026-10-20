@@ -985,6 +985,39 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     cart_config_codes, unique_after, unique_before = consolidate_configs(all_orders)
     log(f"  {unique_before} unique configs → {unique_after} after consolidation")
 
+    # ── STAGE 4.6: POST-CONSOLIDATION DIVERSITY ENFORCEMENT ──────
+    # Rule: stores with 2 carts must have 2 different CC codes;
+    #       stores with 3 carts must have at least 2 different CC codes.
+    # The Jaccard merge can collapse genuinely different carts back to
+    # the same code. Here we reassign cart 2+ for violating stores to
+    # the nearest available DIFFERENT code without touching cart content.
+    all_cc_codes = sorted(set(cart_config_codes.values()))
+    diversity_fixes = 0
+    for store_id, order_data in all_orders.items():
+        n_carts = order_data['total_carts']
+        if n_carts < 2:
+            continue
+        store_codes = [(ci, cart_config_codes.get((store_id, ci)))
+                       for ci in range(n_carts)]
+        unique_codes = set(c for _, c in store_codes if c)
+        if len(unique_codes) >= 2:
+            continue  # already diverse
+        # All same code — reassign cart 1 (index 1) to a different code
+        first_code = store_codes[0][1]
+        alts = [c for c in all_cc_codes if c != first_code]
+        if not alts:
+            continue
+        # Pick the least-used alternative to spread the load
+        alt_usage = {c: sum(1 for v in cart_config_codes.values() if v == c)
+                     for c in alts}
+        best_alt = min(alts, key=lambda c: alt_usage[c])
+        cart_config_codes[(store_id, 1)] = best_alt
+        diversity_fixes += 1
+
+    if diversity_fixes:
+        log(f"  Diversity fix: reassigned CC codes for {diversity_fixes} stores "
+            f"(2-cart: 2 unique codes, 3-cart: ≥2 unique codes)")
+
     # ── STAGE 5: BUILD LOADS ──────────────────────────────────
     log("\nStage 5: Building truck loads...")
 
