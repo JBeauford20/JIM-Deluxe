@@ -14,8 +14,9 @@ def list_batches(user=Depends(get_current_user)):
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
-            SELECT ab.*, COUNT(al.id) AS line_count,
-                   SUM(al.units_available) AS total_units
+            SELECT ab.*,
+                   COUNT(DISTINCT al.sku_id) AS line_count,
+                   SUM(al.units_available)   AS total_units
             FROM availability_batches ab
             LEFT JOIN availability_lines al ON al.batch_id = ab.id
             GROUP BY ab.id ORDER BY ab.created_at DESC LIMIT 20
