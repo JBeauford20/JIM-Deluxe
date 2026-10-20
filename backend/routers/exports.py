@@ -368,14 +368,30 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                         ws.append([None]*7 + [unit_count, unit_count * cart_count] + [None]*8)
                         _style_subtotal(ws)
                     else:
-                        distribution = _distribute_trays(tray_count, asters)
-                        shelf_total  = 0
-                        for aster_code, aster_trays in distribution:
-                            if aster_trays <= 0:
+                        # Unit-level proportional distribution — matches Availability export
+                        # formula exactly so per-Aster totals agree across both reports.
+                        # qty_per_display = round(unit_count × aster_avail / total_sku_avail)
+                        # total_qt        = qty_per_display × cart_count
+                        total_sku_avail = sum(u for _, u in asters) or 1
+                        # Largest-remainder on unit_count so per-cart qtys sum correctly
+                        raw   = [(ac, unit_count * u / total_sku_avail) for ac, u in asters]
+                        floors = [(ac, int(r), r - int(r)) for ac, r in raw]
+                        used  = sum(f for _, f, _ in floors)
+                        rem   = unit_count - used
+                        by_frac = sorted(range(len(floors)), key=lambda i: -floors[i][2])
+                        qty_map = {ac: f for ac, f, _ in floors}
+                        for i in range(rem):
+                            qty_map[floors[by_frac[i]][0]] += 1
+
+                        shelf_total_disp = 0
+                        shelf_total_qt   = 0
+                        for aster_code, aster_avail in asters:
+                            qty = qty_map.get(aster_code, 0)
+                            if qty <= 0:
                                 continue
-                            qty      = aster_trays * upt
                             total_qt = qty * cart_count
-                            shelf_total += qty
+                            shelf_total_disp += qty
+                            shelf_total_qt   += total_qt
                             try:
                                 aster_int = int(aster_code)
                             except (ValueError, TypeError):
@@ -392,7 +408,7 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                                 sku_id, upc, retail, LABEL_REQ, None
                             ])
                             _style_data(ws)
-                        ws.append([None]*7 + [shelf_total, shelf_total * cart_count] + [None]*8)
+                        ws.append([None]*7 + [shelf_total_disp, shelf_total_qt] + [None]*8)
                         _style_subtotal(ws)
 
     # Stream xlsx
