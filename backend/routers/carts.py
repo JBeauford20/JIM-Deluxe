@@ -55,7 +55,7 @@ def recalc_cart(cur, cart_id: str):
     """Recalculate shelves_used, total_units, is_full after any shelf change."""
     cur.execute("""
         SELECT COALESCE(SUM(unit_count), 0)  AS total_units,
-               COUNT(*)                       AS shelves_used
+               COUNT(DISTINCT shelf_position)  AS shelves_used
         FROM cart_shelves WHERE cart_id = %s
     """, (cart_id,))
     agg = cur.fetchone()

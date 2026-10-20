@@ -209,7 +209,7 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
 
     def jaccard(a, b):
         sa = {x[1] for x in a}   # profile set
-        sb = {x[0] for x in b}
+        sb = {x[1] for x in b}   # profile set
         u = sa | sb
         return len(sa & sb) / len(u) if u else 0.0
 

@@ -561,6 +561,7 @@ def audit_run(run_id: str, force: bool = False, user=Depends(get_current_user)):
     # Batch through Claude Haiku (30 stores per call)
     client = _client()
     all_flags = []
+    parse_failures = 0
     BATCH = 30
     for i in range(0, len(orders_ctx), BATCH):
         batch   = orders_ctx[i:i + BATCH]
@@ -578,7 +579,7 @@ def audit_run(run_id: str, force: bool = False, user=Depends(get_current_user)):
                 if isinstance(batch_flags, list):
                     all_flags.extend(batch_flags)
         except Exception:
-            pass  # If a batch fails to parse, skip it — don't crash the whole audit
+            parse_failures += 1
 
     # Clear any prior audit for this run, then write fresh flags
     with get_db() as conn:
@@ -607,6 +608,7 @@ def audit_run(run_id: str, force: bool = False, user=Depends(get_current_user)):
         "warning_count": sum(1 for f in all_flags if f.get("severity") == "WARNING"),
         "info_count":    sum(1 for f in all_flags if f.get("severity") == "INFO"),
         "stores_audited": len(orders_ctx),
+        "parse_failures": parse_failures,
     }
 
 

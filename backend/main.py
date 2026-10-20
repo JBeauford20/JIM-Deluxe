@@ -49,7 +49,20 @@ app.include_router(in_transit.router,      prefix="/api/in-transit",   tags=["In
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "service": "JIM Deluxe API"}
+    try:
+        from db import get_db, cursor
+        with get_db() as conn:
+            cur = cursor(conn)
+            cur.execute("SELECT 1")
+        return {"status": "ok", "service": "JIM Deluxe API", "db": "connected"}
+    except Exception as e:
+        from fastapi import Response
+        import json
+        return Response(
+            content=json.dumps({"status": "degraded", "service": "JIM Deluxe API", "db": str(e)}),
+            status_code=503,
+            media_type="application/json"
+        )
 
 @app.get("/")
 def serve_frontend():

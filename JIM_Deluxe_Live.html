@@ -136,9 +136,10 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
       <div class="ch lt"><i class="bi bi-lightning me-2"></i>Generate Recommendations</div>
       <div class="card-body">
         <div class="row g-2 mb-3 text-center">
-          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Velocity</div><div style="font-size:15px;font-weight:700;color:var(--fd)">45%</div></div>
-          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Recency</div><div style="font-size:15px;font-weight:700;color:var(--fd)">40%</div></div>
-          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Breadth</div><div style="font-size:15px;font-weight:700;color:var(--fd)">15%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Velocity</div><div style="font-size:15px;font-weight:700;color:var(--fd)">40%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Recency</div><div style="font-size:15px;font-weight:700;color:var(--fd)">30%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Pace</div><div style="font-size:15px;font-weight:700;color:var(--fd)">20%</div></div>
+          <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Breadth</div><div style="font-size:15px;font-weight:700;color:var(--fd)">10%</div></div>
           <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Min Carts</div><div style="font-size:15px;font-weight:700;color:var(--fd)">2</div></div>
           <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Truck Cap</div><div style="font-size:15px;font-weight:700;color:var(--fd)">45</div></div>
           <div class="col-4"><div style="font-size:11px;color:var(--is);text-transform:uppercase">Hard Good</div><div style="font-size:15px;font-weight:700;color:var(--fd)">50/50</div></div>
@@ -451,7 +452,7 @@ async function doGenerate(){
 
 function doPoll(jid,gb,gs,retries){
   retries=(retries||0)+1;
-  if(retries>20){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';if(gs)gs.style.display='none';toast('Engine timed out','err');return;}
+  if(retries>60){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';if(gs)gs.style.display='none';toast('Engine timed out','err');return;}
   setTimeout(async function(){
     try{
       var j=await api('/api/engine/jobs/'+jid);
@@ -1095,7 +1096,7 @@ function toggleDraw(uid){
 
 /* STORES */
 async function loadStores(){
-  try{allStores=await api('/api/stores/?limit=100');renderSL(allStores);}
+  try{allStores=await api('/api/stores/?limit=500');renderSL(allStores);}
   catch(e){var el=document.getElementById('sl');if(el)el.innerHTML='<div class="p-3 text-danger" style="font-size:13px">Failed: '+e.message+'</div>';}
 }
 function renderSL(list){

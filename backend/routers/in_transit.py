@@ -56,7 +56,7 @@ def _parse_rows(raw_rows: list) -> list:
         except (ValueError, TypeError, IndexError):
             continue
         vol = str(r[vol_col]).strip() if vol_col is not None and vol_col < len(r) and r[vol_col] else ''
-        if store_id > 0 and carts >= 0:
+        if store_id > 0 and carts > 0:
             parsed.append((store_id, vol, carts))
     return parsed
 

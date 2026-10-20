@@ -32,6 +32,7 @@ def list_orders(run_id: str, user=Depends(get_current_user)):
             SELECT o.*, s.store_name, s.city, s.state, s.merchant,
                    s.dynamic_velocity_tier, s.volume_code,
                    s.dynamic_velocity_score,
+                   o.version,
                    l.load_name,
                    (SELECT array_agg(oc.config_code ORDER BY oc.cart_number)
                     FROM order_carts oc WHERE oc.order_id = o.id) AS cart_codes,
@@ -327,12 +328,12 @@ def reopen_run(run_id: str, user=Depends(require_role("manager", "admin", "order
         cur.execute("""
             UPDATE recommendation_runs
             SET status = 'draft', finalized_at = NULL
-            WHERE id = %s
+            WHERE id = %s AND status = 'exported'
             RETURNING id
         """, (run_id,))
         if not cur.fetchone():
             from fastapi import HTTPException
-            raise HTTPException(404, "Run not found")
+            raise HTTPException(404, "Run not found or not in exported status")
         return {"reopened": True}
 
 
