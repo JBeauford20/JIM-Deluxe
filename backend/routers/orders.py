@@ -32,7 +32,9 @@ def list_orders(run_id: str, user=Depends(get_current_user)):
             SELECT o.*, s.store_name, s.city, s.state, s.merchant,
                    s.dynamic_velocity_tier, s.volume_code,
                    s.dynamic_velocity_score,
-                   l.load_name
+                   l.load_name,
+                   (SELECT array_agg(oc.config_code ORDER BY oc.cart_number)
+                    FROM order_carts oc WHERE oc.order_id = o.id) AS cart_codes
             FROM orders o
             JOIN stores s ON s.store_id = o.store_id
             LEFT JOIN load_assignments la ON la.order_cart_id IN (

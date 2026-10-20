@@ -575,8 +575,9 @@ function exportPlanList(){
   if(!_ofs||!_ofs.length){toast('No orders to export','warn');return;}
   var headers=['Store #','Store Name','City','State','Merchant','Tier','Velocity Score',
                'Grade','Static Clock (wk)','Dynamic Clock (wk)','Days Since Last Delivery',
-               'Carts','Units','Load','Status'];
+               'Carts','Units','Load','Status','Cart 1 Code','Cart 2 Code','Cart 3 Code'];
   var rows=_ofs.map(function(o){
+    var cc=Array.isArray(o.cart_codes)?o.cart_codes:[];
     return [
       o.store_id||o.id,
       o.store_name||o.name||'',
@@ -593,6 +594,9 @@ function exportPlanList(){
       o.total_units||0,
       o.load_name||o.load||'',
       o.status||'',
+      cc[0]||'',
+      cc[1]||'',
+      cc[2]||'',
     ];
   });
   var csv=[headers].concat(rows).map(function(row){
