@@ -266,40 +266,56 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
         )
         profiles_upt = {r["id"]: r["units_per_tray"] or 1 for r in cur.fetchall()}
 
-        # Cart configs: one representative cart + count per config code
-        # UUID doesn't support MIN() — use array_agg with ordering instead
+        # Aggregate actual totals across ALL carts per config+shelf+SKU.
+        # Using representative-cart × cart_count was wrong: after Jaccard
+        # config consolidation many carts share a code but don't all carry
+        # every SKU — the representative cart may have a SKU that only a
+        # fraction of the config's carts actually received.
         cur.execute("""
-            SELECT oc.config_code,
-                   (array_agg(oc.id ORDER BY oc.cart_key))[1]       AS cart_id,
-                   COUNT(oc.id)                                       AS cart_count,
-                   (array_agg(oc.cart_key ORDER BY oc.cart_key))[1]  AS cart_key
-            FROM order_carts oc
-            JOIN orders o ON o.id = oc.order_id
-            WHERE o.run_id = %s
-            GROUP BY oc.config_code
-            ORDER BY oc.config_code
-        """, (run_id,))
-        configs = cur.fetchall()
-        if not configs:
-            raise HTTPException(404, "No cart configurations found")
-
-        # Shelves for each representative cart
-        cart_ids = [c["cart_id"] for c in configs]
-        cur.execute("""
-            SELECT cs.cart_id::text, cs.shelf_position, cs.sku_id,
-                   cs.profile_id, cs.tray_count, cs.unit_count, cs.kit_type,
-                   sk.family, sk.description
+            SELECT
+                oc.config_code,
+                cs.shelf_position,
+                cs.sku_id,
+                cs.profile_id,
+                cs.kit_type,
+                sk.family,
+                sk.description,
+                SUM(cs.unit_count)          AS actual_total_units,
+                cc.cart_count,
+                cc.cart_key,
+                ROUND(SUM(cs.unit_count)::numeric / NULLIF(cc.cart_count, 0), 0)
+                                            AS avg_unit_count
             FROM cart_shelves cs
-            JOIN skus sk ON sk.sku_id = cs.sku_id
-            WHERE cs.cart_id::text = ANY(%s)
-            ORDER BY cs.cart_id, cs.shelf_position DESC, cs.sku_id
-        """, (cart_ids,))
+            JOIN order_carts oc ON oc.id = cs.cart_id
+            JOIN orders o       ON o.id  = oc.order_id
+            JOIN skus sk        ON sk.sku_id = cs.sku_id
+            JOIN (
+                SELECT oc2.config_code,
+                       COUNT(*)                                           AS cart_count,
+                       (array_agg(oc2.cart_key ORDER BY oc2.cart_key))[1] AS cart_key
+                FROM order_carts oc2
+                JOIN orders o2 ON o2.id = oc2.order_id
+                WHERE o2.run_id = %s
+                GROUP BY oc2.config_code
+            ) cc ON cc.config_code = oc.config_code
+            WHERE o.run_id = %s
+            GROUP BY oc.config_code, cs.shelf_position, cs.sku_id,
+                     cs.profile_id, cs.kit_type, sk.family, sk.description,
+                     cc.cart_count, cc.cart_key
+            ORDER BY oc.config_code, cs.shelf_position DESC, cs.sku_id
+        """, (run_id, run_id))
         all_shelves = cur.fetchall()
 
-    # Index shelves by cart_id
-    shelves_by_cart = defaultdict(list)
+    # Index by config_code
+    shelves_by_config = defaultdict(list)
     for s in all_shelves:
-        shelves_by_cart[s["cart_id"]].append(s)
+        shelves_by_config[s["config_code"]].append(s)
+
+    # Unique ordered config codes
+    seen_codes = []
+    for s in all_shelves:
+        if s["config_code"] not in seen_codes:
+            seen_codes.append(s["config_code"])
 
     # ── Build workbook ────────────────────────────────────────────────────────
     wb = openpyxl.Workbook()
@@ -311,12 +327,12 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
     for i, w in enumerate(_COL_WIDTHS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
-    for cfg in configs:
-        code       = cfg["config_code"] or "CC?"
-        cart_count = int(cfg["cart_count"] or 1)
-        cart_key   = cfg["cart_key"] or code
-        cart_id    = cfg["cart_id"]
-        shelves    = shelves_by_cart.get(cart_id, [])
+    for code in seen_codes:
+        shelves    = shelves_by_config.get(code, [])
+        if not shelves:
+            continue
+        cart_count = int(shelves[0]["cart_count"] or 1)
+        cart_key   = shelves[0]["cart_key"] or code
 
         shelf_groups = defaultdict(list)
         for s in shelves:
@@ -328,8 +344,9 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                 family     = shelf_row["family"] or ""
                 desc       = shelf_row["description"] or ""
                 profile_id = shelf_row["profile_id"] or ""
-                tray_count = shelf_row["tray_count"] or 0
-                unit_count = shelf_row["unit_count"] or 0
+                # Use actual total across all carts; avg per cart for display
+                unit_count      = int(shelf_row["avg_unit_count"] or 0)
+                actual_total    = int(shelf_row["actual_total_units"] or 0)
 
                 upt      = profiles_upt.get(profile_id, 1)
                 tray_lbl = f"{upt} pack tray"
@@ -341,55 +358,64 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
 
                 if family in H2O_FAMILIES:
                     h2o_items = family.replace("H2O ", "")
-                    total_qt  = unit_count * cart_count
                     ws.append([
                         code, cart_count, pos, family,
                         "H2O", h2o_items,
-                        sku_id, unit_count, total_qt,
+                        sku_id, unit_count, actual_total,
                         "", tray_lbl, "PW",
                         sku_id, upc, retail, LABEL_REQ, None
                     ])
                     _style_data(ws)
-                    ws.append([None]*7 + [unit_count, unit_count * cart_count] + [None]*8)
+                    ws.append([None]*7 + [unit_count, actual_total] + [None]*8)
                     _style_subtotal(ws)
 
                 else:
                     asters = aster_pool.get(sku_id, [])
                     if not asters:
-                        total_qt = unit_count * cart_count
                         ws.append([
                             code, cart_count, pos, family,
                             desc, desc,
-                            sku_id, unit_count, total_qt,
+                            sku_id, unit_count, actual_total,
                             "", tray_lbl, "PW",
                             sku_id, upc, retail, LABEL_REQ, None
                         ])
                         _style_data(ws)
-                        ws.append([None]*7 + [unit_count, unit_count * cart_count] + [None]*8)
+                        ws.append([None]*7 + [unit_count, actual_total] + [None]*8)
                         _style_subtotal(ws)
                     else:
-                        # Unit-level proportional distribution — matches Availability export
-                        # formula exactly so per-Aster totals agree across both reports.
-                        # qty_per_display = round(unit_count × aster_avail / total_sku_avail)
-                        # total_qt        = qty_per_display × cart_count
+                        # Distribute actual_total (sum across all carts in this config)
+                        # proportionally across Aster varieties — matches Availability exactly.
+                        # qty_per_display = round(avg_unit_count × aster_avail / total_sku_avail)
+                        # total_qt        = round(actual_total × aster_avail / total_sku_avail)
                         total_sku_avail = sum(u for _, u in asters) or 1
-                        # Largest-remainder on unit_count so per-cart qtys sum correctly
-                        raw   = [(ac, unit_count * u / total_sku_avail) for ac, u in asters]
-                        floors = [(ac, int(r), r - int(r)) for ac, r in raw]
-                        used  = sum(f for _, f, _ in floors)
-                        rem   = unit_count - used
-                        by_frac = sorted(range(len(floors)), key=lambda i: -floors[i][2])
-                        qty_map = {ac: f for ac, f, _ in floors}
-                        for i in range(rem):
-                            qty_map[floors[by_frac[i]][0]] += 1
+
+                        # Largest-remainder on actual_total for Total QT
+                        raw_tot   = [(ac, actual_total * u / total_sku_avail) for ac, u in asters]
+                        fl_tot    = [(ac, int(r), r - int(r)) for ac, r in raw_tot]
+                        used_tot  = sum(f for _, f, _ in fl_tot)
+                        rem_tot   = actual_total - used_tot
+                        by_frac_t = sorted(range(len(fl_tot)), key=lambda i: -fl_tot[i][2])
+                        qt_map    = {ac: f for ac, f, _ in fl_tot}
+                        for i in range(rem_tot):
+                            qt_map[fl_tot[by_frac_t[i]][0]] += 1
+
+                        # Largest-remainder on unit_count for Qty per display
+                        raw_d    = [(ac, unit_count * u / total_sku_avail) for ac, u in asters]
+                        fl_d     = [(ac, int(r), r - int(r)) for ac, r in raw_d]
+                        used_d   = sum(f for _, f, _ in fl_d)
+                        rem_d    = unit_count - used_d
+                        by_frac_d = sorted(range(len(fl_d)), key=lambda i: -fl_d[i][2])
+                        disp_map  = {ac: f for ac, f, _ in fl_d}
+                        for i in range(rem_d):
+                            disp_map[fl_d[by_frac_d[i]][0]] += 1
 
                         shelf_total_disp = 0
                         shelf_total_qt   = 0
                         for aster_code, aster_avail in asters:
-                            qty = qty_map.get(aster_code, 0)
-                            if qty <= 0:
+                            total_qt = qt_map.get(aster_code, 0)
+                            qty      = disp_map.get(aster_code, 0)
+                            if total_qt <= 0 and qty <= 0:
                                 continue
-                            total_qt = qty * cart_count
                             shelf_total_disp += qty
                             shelf_total_qt   += total_qt
                             try:
