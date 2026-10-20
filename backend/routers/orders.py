@@ -349,11 +349,15 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
-            WITH avail AS (
+            WITH batch AS (
+                -- Resolve the batch for this run once, used by avail + aster
+                SELECT batch_id FROM recommendation_runs WHERE id = %s
+            ),
+            avail AS (
+                -- One row per HD SKU: total units from all Aster code rows
                 SELECT al.sku_id, SUM(al.units_available) AS units_available
                 FROM availability_lines al
-                JOIN recommendation_runs rr ON rr.batch_id = al.batch_id
-                WHERE rr.id = %s
+                JOIN batch b ON b.batch_id = al.batch_id
                 GROUP BY al.sku_id
             ),
             alloc AS (
@@ -366,26 +370,35 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
                 WHERE o.run_id = %s
                 GROUP BY ol.sku_id
             ),
-            aster AS (
-                -- Read Aster codes directly from the availability batch so the
-                -- dropdown shows exactly what was uploaded, one row per Aster code.
-                SELECT al.sku_id AS hd_sku_id,
-                       json_agg(
-                           json_build_object(
-                               'aster_code',    al.plant_id,
-                               'aster_name',    COALESCE(apm.aster_name, al.plant_id::text),
-                               'code_level',    al.code_level,
-                               'hard_good_type',al.hard_good_type
-                           )
-                           ORDER BY al.code_level DESC, al.plant_id
-                       ) AS codes
+            aster_raw AS (
+                -- DISTINCT ON (sku_id, plant_id) prevents duplicates from the
+                -- mapping join when the same aster_code has multiple active rows.
+                SELECT DISTINCT ON (al.sku_id, al.plant_id)
+                    al.sku_id,
+                    al.plant_id::text                                  AS aster_code,
+                    COALESCE(apm.aster_name, al.plant_id::text)        AS aster_name,
+                    al.code_level,
+                    al.hard_good_type
                 FROM availability_lines al
-                JOIN recommendation_runs rr ON rr.batch_id = al.batch_id
+                JOIN batch b ON b.batch_id = al.batch_id
                 LEFT JOIN aster_product_mapping apm
                        ON apm.aster_code = al.plant_id::text AND apm.active = true
-                WHERE rr.id = %s
-                  AND al.plant_id IS NOT NULL
-                GROUP BY al.sku_id
+                WHERE al.plant_id IS NOT NULL
+                ORDER BY al.sku_id, al.plant_id, apm.aster_name NULLS LAST
+            ),
+            aster AS (
+                -- Aggregate into one JSON array per HD SKU
+                SELECT sku_id AS hd_sku_id,
+                       json_agg(
+                           json_build_object(
+                               'aster_code',    aster_code,
+                               'aster_name',    aster_name,
+                               'code_level',    code_level,
+                               'hard_good_type',hard_good_type
+                           ) ORDER BY code_level DESC, aster_code
+                       ) AS codes
+                FROM aster_raw
+                GROUP BY sku_id
             )
             SELECT
                 a.sku_id,
@@ -406,7 +419,7 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
             LEFT JOIN alloc al  ON al.sku_id  = a.sku_id
             LEFT JOIN aster ast ON ast.hd_sku_id = a.sku_id
             ORDER BY pct_consumed DESC, a.units_available DESC
-        """, (run_id, run_id, run_id))
+        """, (run_id, run_id))
         rows = cur.fetchall()
 
     # Summary totals
