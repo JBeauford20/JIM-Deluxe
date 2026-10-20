@@ -55,7 +55,7 @@ CARTS_PER_TRUCK   = 45
 MIN_CARTS         = 2
 JUTE_CERAMIC_SPLIT = 0.5
 PACE_WINDOW_DAYS  = 42   # 6-week rolling window for pace / dynamic clock (was 84 / 12wk Oct 2026)
-MAX_CART_CONFIGS  = 25   # hard cap on unique cart config codes per run
+MAX_CART_CONFIGS  = 10   # hard cap on unique cart config codes per run (tighter = more diversity)
 
 TIER_TARGET_CARTS = {'AA': 3, 'A': 3, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 

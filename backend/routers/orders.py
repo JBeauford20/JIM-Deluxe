@@ -387,15 +387,18 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
                 GROUP BY ol.sku_id
             ) alloc ON alloc.sku_id = a.sku_id
             LEFT JOIN (
-                -- Aster dropdown: one JSON array per HD SKU, deduplicated
+                -- Aster dropdown: one JSON array per HD SKU, deduplicated.
+                -- Includes units_available per variety so the UI can show
+                -- "Alocasia has 15 units left — Variety A: 8, Variety B: 7"
                 SELECT sku_id,
                        json_agg(
                            json_build_object(
-                               'aster_code',    aster_code,
-                               'aster_name',    aster_name,
-                               'code_level',    code_level,
-                               'hard_good_type',hard_good_type
-                           ) ORDER BY code_level DESC, aster_code
+                               'aster_code',      aster_code,
+                               'aster_name',      aster_name,
+                               'code_level',      code_level,
+                               'hard_good_type',  hard_good_type,
+                               'units_available', units_available
+                           ) ORDER BY code_level DESC, units_available DESC, aster_code
                        ) AS codes
                 FROM (
                     SELECT DISTINCT ON (al.sku_id, al.plant_id)
@@ -403,7 +406,8 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
                         al.plant_id::text                               AS aster_code,
                         COALESCE(apm.aster_name, al.plant_id::text)     AS aster_name,
                         al.code_level,
-                        al.hard_good_type
+                        al.hard_good_type,
+                        al.units_available
                     FROM availability_lines al
                     LEFT JOIN aster_product_mapping apm
                            ON apm.aster_code = al.plant_id::text

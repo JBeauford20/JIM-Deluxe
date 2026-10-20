@@ -901,21 +901,24 @@ function drawRow(s,i){
     +'<div style="padding:10px 20px 14px">'
     +'<div style="font-size:12px;font-weight:700;color:var(--fd);margin-bottom:8px">'
     +'<i class="bi bi-upc-scan me-1"></i>Aster Variety Pool — '+codes.length+' code'+(codes.length!==1?'s':'')
-    +' <span style="font-weight:400;color:var(--is);font-size:11px">Specific variety assigned at pick time — all '+fmt(s.units_allocated||0)+' allocated units draw from this pool</span></div>'
+    +' <span style="font-weight:400;color:var(--is);font-size:11px">'+fmt(s.units_allocated||0)+' units allocated from this pool — variety quantities shown below</span></div>'
     +(codes.length?'<table style="font-size:11.5px;width:100%;border-collapse:collapse">'
     +'<thead><tr style="border-bottom:1px solid var(--line)">'
     +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Aster Code</th>'
     +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Variety Name</th>'
     +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Type</th>'
-    +'<th style="padding:3px 0 6px 0;color:var(--is);font-weight:600">Kit Format</th>'
+    +'<th style="padding:3px 10px 6px 0;color:var(--is);font-weight:600">Kit</th>'
+    +'<th style="padding:3px 0 6px 0;color:var(--is);font-weight:600;text-align:right">Units in Batch</th>'
     +'</tr></thead><tbody>'
     +codes.map(function(c){
       var is3m=c.code_level==='3M';
+      var u=c.units_available!=null?c.units_available:null;
       return '<tr style="border-bottom:1px solid #f0f4f0">'
         +'<td style="padding:4px 10px 4px 0;font-family:monospace;color:var(--fd);font-weight:700">'+c.aster_code+'</td>'
         +'<td style="padding:4px 10px 4px 0">'+(c.aster_name||'—')+'</td>'
         +'<td style="padding:4px 10px 4px 0"><span style="font-size:10px;padding:1px 6px;border-radius:4px;background:'+(is3m?'#e8f4e8':'#edf3ff')+';color:'+(is3m?'var(--fern)':'#3a6bc4')+'">'+(c.code_level||'')+'</span></td>'
-        +'<td style="padding:4px 0 4px 0;color:var(--is);font-size:11px">'+(c.hard_good_type||'—').replace('_',' ')+'</td>'
+        +'<td style="padding:4px 10px 4px 0;color:var(--is);font-size:11px">'+(c.hard_good_type||'—').replace(/_/g,' ')+'</td>'
+        +'<td style="padding:4px 0 4px 0;text-align:right;font-weight:700;color:var(--fd)">'+(u!=null?fmt(u):'—')+'</td>'
         +'</tr>';
     }).join('')+'</tbody></table>'
     :'<div style="color:var(--is);font-style:italic">No Aster codes mapped for this SKU</div>')
