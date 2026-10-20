@@ -321,15 +321,15 @@ def load_availability(filepath: str, shipping_week: date = None,
             line.get('origin'),
         ))
 
+    # One row per Aster code so the Inventory Draw can show the full variety
+    # breakdown. The engine aggregates with SUM(units_available) GROUP BY sku_id
+    # so multiple rows per HD SKU cause no issues for allocation.
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO availability_lines
             (batch_id, sku_id, units_available, plant_id, kit_id,
              hard_good_type, kit_selection_required, code_level,
              legacy_product_group, shipping_origin)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (batch_id, sku_id) DO UPDATE SET
-            units_available        = availability_lines.units_available + EXCLUDED.units_available,
-            kit_selection_required = EXCLUDED.kit_selection_required OR availability_lines.kit_selection_required
     """, line_rows, page_size=500)
 
     conn.commit()

@@ -367,19 +367,25 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
                 GROUP BY ol.sku_id
             ),
             aster AS (
-                SELECT hd_sku_id,
+                -- Read Aster codes directly from the availability batch so the
+                -- dropdown shows exactly what was uploaded, one row per Aster code.
+                SELECT al.sku_id AS hd_sku_id,
                        json_agg(
                            json_build_object(
-                               'aster_code',    apm.aster_code,
-                               'aster_name',    apm.aster_name,
-                               'code_level',    apm.code_level,
-                               'hard_good_type',apm.hard_good_type
+                               'aster_code',    al.plant_id,
+                               'aster_name',    COALESCE(apm.aster_name, al.plant_id::text),
+                               'code_level',    al.code_level,
+                               'hard_good_type',al.hard_good_type
                            )
-                           ORDER BY apm.code_level DESC, apm.aster_code
+                           ORDER BY al.code_level DESC, al.plant_id
                        ) AS codes
-                FROM aster_product_mapping apm
-                WHERE apm.active = true
-                GROUP BY apm.hd_sku_id
+                FROM availability_lines al
+                JOIN recommendation_runs rr ON rr.batch_id = al.batch_id
+                LEFT JOIN aster_product_mapping apm
+                       ON apm.aster_code = al.plant_id::text AND apm.active = true
+                WHERE rr.id = %s
+                  AND al.plant_id IS NOT NULL
+                GROUP BY al.sku_id
             )
             SELECT
                 a.sku_id,
@@ -400,7 +406,7 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
             LEFT JOIN alloc al  ON al.sku_id  = a.sku_id
             LEFT JOIN aster ast ON ast.hd_sku_id = a.sku_id
             ORDER BY pct_consumed DESC, a.units_available DESC
-        """, (run_id, run_id))
+        """, (run_id, run_id, run_id))
         rows = cur.fetchall()
 
     # Summary totals
