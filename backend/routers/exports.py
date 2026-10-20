@@ -149,6 +149,37 @@ COL_HEADERS  = [
     "Label Requirements:", "Notes:"
 ]
 
+# Column widths (A=1 … Q=17)
+_COL_WIDTHS = [8, 10, 8, 20, 18, 22, 12, 16, 12, 10, 14, 6, 14, 14, 8, 28, 12]
+# Bold columns in data rows: E=5, F=6, G=7
+_DATA_BOLD_COLS = {5, 6, 7}
+
+
+def _style_header(ws):
+    """Last appended row → all cells bold + centered."""
+    from openpyxl.styles import Font, Alignment
+    for cell in ws[ws.max_row]:
+        cell.font      = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center')
+
+
+def _style_data(ws):
+    """Last appended row → E/F/G bold+centered, rest centered."""
+    from openpyxl.styles import Font, Alignment
+    for i, cell in enumerate(ws[ws.max_row], 1):
+        cell.alignment = Alignment(horizontal='center')
+        if i in _DATA_BOLD_COLS:
+            cell.font = Font(bold=True)
+
+
+def _style_subtotal(ws):
+    """Last appended row → only columns H(8) and I(9) bold+centered."""
+    from openpyxl.styles import Font, Alignment
+    for i, cell in enumerate(ws[ws.max_row], 1):
+        if i in (8, 9):
+            cell.font      = Font(bold=True)
+            cell.alignment = Alignment(horizontal='center')
+
 
 def _distribute_trays(total_trays, aster_list):
     """
@@ -275,14 +306,18 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
     ws = wb.active
     ws.title = "Cart Configurations"
 
+    # Set column widths to match template proportions
+    from openpyxl.utils import get_column_letter
+    for i, w in enumerate(_COL_WIDTHS, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
     for cfg in configs:
         code       = cfg["config_code"] or "CC?"
-        cart_count = cfg["cart_count"]
+        cart_count = int(cfg["cart_count"] or 1)
         cart_key   = cfg["cart_key"] or code
         cart_id    = cfg["cart_id"]
         shelves    = shelves_by_cart.get(cart_id, [])
 
-        # Group by shelf position (already sorted DESC = top → bottom)
         shelf_groups = defaultdict(list)
         for s in shelves:
             shelf_groups[s["shelf_position"]].append(s)
@@ -296,46 +331,51 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                 tray_count = shelf_row["tray_count"] or 0
                 unit_count = shelf_row["unit_count"] or 0
 
-                upt       = profiles_upt.get(profile_id, 1)
-                tray_lbl  = f"{upt} pack tray"
+                upt      = profiles_upt.get(profile_id, 1)
+                tray_lbl = f"{upt} pack tray"
                 upc, retail = pricebook.get(sku_id, (None, None))
 
-                # Write block header
+                # ── Block header ───────────────────────────────────────
                 ws.append(COL_HEADERS)
+                _style_header(ws)
 
                 if family in H2O_FAMILIES:
-                    # H2O → single row at HD SKU level
                     h2o_items = family.replace("H2O ", "")
+                    total_qt  = unit_count * cart_count
                     ws.append([
                         code, cart_count, pos, family,
                         "H2O", h2o_items,
-                        sku_id, unit_count, unit_count,
+                        sku_id, unit_count, total_qt,
                         "", tray_lbl, "PW",
                         sku_id, upc, retail, LABEL_REQ, None
                     ])
-                    ws.append([None]*7 + [unit_count, unit_count] + [None]*8)
+                    _style_data(ws)
+                    ws.append([None]*7 + [unit_count, unit_count * cart_count] + [None]*8)
+                    _style_subtotal(ws)
 
                 else:
                     asters = aster_pool.get(sku_id, [])
                     if not asters:
-                        # Fallback — no batch data, show HD SKU row
+                        total_qt = unit_count * cart_count
                         ws.append([
                             code, cart_count, pos, family,
                             desc, desc,
-                            sku_id, unit_count, unit_count,
+                            sku_id, unit_count, total_qt,
                             "", tray_lbl, "PW",
                             sku_id, upc, retail, LABEL_REQ, None
                         ])
-                        ws.append([None]*7 + [unit_count, unit_count] + [None]*8)
+                        _style_data(ws)
+                        ws.append([None]*7 + [unit_count, unit_count * cart_count] + [None]*8)
+                        _style_subtotal(ws)
                     else:
                         distribution = _distribute_trays(tray_count, asters)
                         shelf_total  = 0
                         for aster_code, aster_trays in distribution:
                             if aster_trays <= 0:
                                 continue
-                            qty = aster_trays * upt
+                            qty      = aster_trays * upt
+                            total_qt = qty * cart_count
                             shelf_total += qty
-                            # variety_ref keys are bigint; plant_id stored as text
                             try:
                                 aster_int = int(aster_code)
                             except (ValueError, TypeError):
@@ -347,11 +387,13 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                             ws.append([
                                 code, cart_count, pos, family,
                                 genus, variety,
-                                aster_code, qty, qty,
+                                aster_code, qty, total_qt,
                                 "", tray_lbl, "PW",
                                 sku_id, upc, retail, LABEL_REQ, None
                             ])
-                        ws.append([None]*7 + [shelf_total, shelf_total] + [None]*8)
+                            _style_data(ws)
+                        ws.append([None]*7 + [shelf_total, shelf_total * cart_count] + [None]*8)
+                        _style_subtotal(ws)
 
     # Stream xlsx
     buf = io.BytesIO()

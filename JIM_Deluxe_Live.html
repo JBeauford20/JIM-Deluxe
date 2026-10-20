@@ -848,20 +848,31 @@ async function loadDraw(){
 
 function exportDrawAster(){
   if(!drawData||!(drawData.skus||[]).length){toast('No data to export','warn');return;}
-  var headers=['Aster Code','Aster Name','HD SKU','HD Description'];
+  var headers=['HD SKU','HD Description','Aster Code','Aster Name',
+               'Units Available','Units Used','% Allocation'];
   var rows=[];
   (drawData.skus||[]).forEach(function(s){
     var codes=s.aster_codes||[];
+    var totalAvail=s.units_available||1;
+    var totalAlloc=s.units_allocated||0;
     if(!codes.length){
-      // SKU with no Aster codes — still include the HD SKU row
-      rows.push(['','',(s.sku_id||''),(s.description||'')]);
+      rows.push([(s.sku_id||''),(s.description||''),'','',
+                 s.units_available||0, totalAlloc,
+                 totalAvail>0?(totalAlloc/totalAvail*100).toFixed(1)+'%':'0%']);
     } else {
       codes.forEach(function(c){
+        var avail=c.units_available||0;
+        var used=totalAlloc>0&&avail>0&&totalAvail>0
+                 ?Math.round(totalAlloc*(avail/totalAvail)):0;
+        var pct=avail>0?(used/avail*100).toFixed(1)+'%':'—';
         rows.push([
+          s.sku_id||'',
+          s.description||'',
           c.aster_code||'',
           c.aster_name||'',
-          s.sku_id||'',
-          s.description||''
+          avail,
+          used,
+          pct
         ]);
       });
     }
