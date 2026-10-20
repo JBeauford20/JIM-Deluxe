@@ -348,19 +348,35 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
     """
     with get_db() as conn:
         cur = cursor(conn)
+        # Flat subqueries — avoids CTE chaining issues that caused row multiplication.
+        # Three independent subqueries: avail (pivot on HD SKU), alloc, aster.
         cur.execute("""
-            WITH batch AS (
-                -- Resolve the batch for this run once, used by avail + aster
-                SELECT batch_id FROM recommendation_runs WHERE id = %s
-            ),
-            avail AS (
-                -- One row per HD SKU: total units from all Aster code rows
-                SELECT al.sku_id, SUM(al.units_available) AS units_available
-                FROM availability_lines al
-                JOIN batch b ON b.batch_id = al.batch_id
-                GROUP BY al.sku_id
-            ),
-            alloc AS (
+            SELECT
+                a.sku_id,
+                sk.description,
+                sk.family,
+                sk.legacy_product_group,
+                a.units_available,
+                COALESCE(alloc.units_allocated, 0)                              AS units_allocated,
+                a.units_available - COALESCE(alloc.units_allocated, 0)          AS units_remaining,
+                CASE WHEN a.units_available > 0
+                     THEN ROUND(COALESCE(alloc.units_allocated, 0)::numeric
+                                / a.units_available * 100, 1)
+                     ELSE 0 END                                                 AS pct_consumed,
+                COALESCE(alloc.store_count, 0)                                  AS store_count,
+                COALESCE(aster.codes, '[]'::json)                               AS aster_codes
+            FROM (
+                -- Pivot: one row per HD SKU, total units from all Aster code rows
+                SELECT sku_id, SUM(units_available) AS units_available
+                FROM availability_lines
+                WHERE batch_id = (
+                    SELECT batch_id FROM recommendation_runs WHERE id = %s
+                )
+                GROUP BY sku_id
+            ) a
+            JOIN skus sk ON sk.sku_id = a.sku_id
+            LEFT JOIN (
+                -- Allocated units and store count per SKU for this run
                 SELECT ol.sku_id,
                        SUM(COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty, 0))
                            AS units_allocated,
@@ -369,26 +385,10 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
                 JOIN orders o ON o.id = ol.order_id
                 WHERE o.run_id = %s
                 GROUP BY ol.sku_id
-            ),
-            aster_raw AS (
-                -- DISTINCT ON (sku_id, plant_id) prevents duplicates from the
-                -- mapping join when the same aster_code has multiple active rows.
-                SELECT DISTINCT ON (al.sku_id, al.plant_id)
-                    al.sku_id,
-                    al.plant_id::text                                  AS aster_code,
-                    COALESCE(apm.aster_name, al.plant_id::text)        AS aster_name,
-                    al.code_level,
-                    al.hard_good_type
-                FROM availability_lines al
-                JOIN batch b ON b.batch_id = al.batch_id
-                LEFT JOIN aster_product_mapping apm
-                       ON apm.aster_code = al.plant_id::text AND apm.active = true
-                WHERE al.plant_id IS NOT NULL
-                ORDER BY al.sku_id, al.plant_id, apm.aster_name NULLS LAST
-            ),
-            aster AS (
-                -- Aggregate into one JSON array per HD SKU
-                SELECT sku_id AS hd_sku_id,
+            ) alloc ON alloc.sku_id = a.sku_id
+            LEFT JOIN (
+                -- Aster dropdown: one JSON array per HD SKU, deduplicated
+                SELECT sku_id,
                        json_agg(
                            json_build_object(
                                'aster_code',    aster_code,
@@ -397,29 +397,27 @@ def inventory_draw(run_id: str, user=Depends(get_current_user)):
                                'hard_good_type',hard_good_type
                            ) ORDER BY code_level DESC, aster_code
                        ) AS codes
-                FROM aster_raw
+                FROM (
+                    SELECT DISTINCT ON (al.sku_id, al.plant_id)
+                        al.sku_id,
+                        al.plant_id::text                               AS aster_code,
+                        COALESCE(apm.aster_name, al.plant_id::text)     AS aster_name,
+                        al.code_level,
+                        al.hard_good_type
+                    FROM availability_lines al
+                    LEFT JOIN aster_product_mapping apm
+                           ON apm.aster_code = al.plant_id::text
+                          AND apm.active = true
+                    WHERE al.batch_id = (
+                        SELECT batch_id FROM recommendation_runs WHERE id = %s
+                    )
+                      AND al.plant_id IS NOT NULL
+                    ORDER BY al.sku_id, al.plant_id, apm.aster_name NULLS LAST
+                ) deduped
                 GROUP BY sku_id
-            )
-            SELECT
-                a.sku_id,
-                sk.description,
-                sk.family,
-                sk.legacy_product_group,
-                a.units_available,
-                COALESCE(al.units_allocated, 0)                          AS units_allocated,
-                a.units_available - COALESCE(al.units_allocated, 0)      AS units_remaining,
-                CASE WHEN a.units_available > 0
-                     THEN ROUND(COALESCE(al.units_allocated,0)::numeric
-                                / a.units_available * 100, 1)
-                     ELSE 0 END                                           AS pct_consumed,
-                COALESCE(al.store_count, 0)                              AS store_count,
-                COALESCE(ast.codes, '[]'::json)                          AS aster_codes
-            FROM avail a
-            JOIN skus sk ON sk.sku_id = a.sku_id
-            LEFT JOIN alloc al  ON al.sku_id  = a.sku_id
-            LEFT JOIN aster ast ON ast.hd_sku_id = a.sku_id
+            ) aster ON aster.sku_id = a.sku_id
             ORDER BY pct_consumed DESC, a.units_available DESC
-        """, (run_id, run_id))
+        """, (run_id, run_id, run_id))
         rows = cur.fetchall()
 
     # Summary totals
