@@ -277,6 +277,13 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
         if pid and pid in shelf_configs:
             profile_skus[pid].append((sku_id, score))
 
+    # Track size-group shelf counts per completed cart for diversity enforcement.
+    # Rule: 2-cart stores → 2 unique CC codes; 3-cart → at least 2 unique codes.
+    # For each subsequent cart, any size group that maxed out (hit
+    # MAX_SHELVES_SIZE_GROUP) on the previous cart gets a 0.1× score penalty,
+    # forcing genuinely different content and therefore different CC codes.
+    prev_cart_sg_counts: list = []   # list of {size_group: shelf_count} per cart
+
     for cart_num in range(1, target_carts + 1):
         shelves_left     = CART_SHELVES
         cart_contents    = []
@@ -300,13 +307,23 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
                     continue
                 for sku_id, score in skus:
                     if inventory.get(sku_id, 0) - committed[sku_id] > 0:
-                        # Guarantee first placement: profiles with zero run-level
-                        # allocation get maximum priority until they land somewhere.
+                        # Guarantee first placement for zero-allocated profiles
                         if (run_profiles_allocated is not None
                                 and run_profiles_allocated.get(pid, 0) == 0):
                             effective_score = 999.0
                         else:
                             effective_score = score
+                            # Cart diversity: if previous cart maxed out this
+                            # size group (used MAX_SHELVES_SIZE_GROUP shelves),
+                            # apply a hard 0.1× penalty so the next cart is
+                            # forced to lead with a different family.
+                            # This guarantees genuinely different cart content
+                            # → different CC codes after consolidation.
+                            if prev_cart_sg_counts:
+                                prev_counts = prev_cart_sg_counts[-1]
+                                sg = PROFILE_SIZE_GROUP.get(pid, pid)
+                                if prev_counts.get(sg, 0) >= MAX_SHELVES_SIZE_GROUP:
+                                    effective_score *= 0.1
                         if effective_score > best_score:
                             best_score = effective_score; best_pid = pid
                         break
@@ -392,6 +409,13 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             'flag_reason':  flags[-1] if not is_full else None,
             'contents':     cart_contents,
         })
+
+        # Record this cart's size-group shelf counts so the next cart can diverge
+        sg_counts: dict = {}
+        for _, _, _, _, _, pid in cart_contents:
+            sg = PROFILE_SIZE_GROUP.get(pid, pid)
+            sg_counts[sg] = sg_counts.get(sg, 0) + 1
+        prev_cart_sg_counts.append(sg_counts)
 
     return carts, dict(committed)
 
