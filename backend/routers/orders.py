@@ -34,13 +34,22 @@ def list_orders(run_id: str, user=Depends(get_current_user)):
                    s.dynamic_velocity_score,
                    l.load_name,
                    (SELECT array_agg(oc.config_code ORDER BY oc.cart_number)
-                    FROM order_carts oc WHERE oc.order_id = o.id) AS cart_codes
+                    FROM order_carts oc WHERE oc.order_id = o.id) AS cart_codes,
+                   it.cart_count    AS in_transit_carts,
+                   it.shipping_week AS in_transit_week,
+                   (it.store_id IS NOT NULL) AS is_in_transit
             FROM orders o
             JOIN stores s ON s.store_id = o.store_id
             LEFT JOIN load_assignments la ON la.order_cart_id IN (
                 SELECT id FROM order_carts WHERE order_id = o.id LIMIT 1
             )
             LEFT JOIN loads l ON l.id = la.load_id
+            LEFT JOIN (
+                SELECT DISTINCT ON (store_id) store_id, cart_count, shipping_week
+                FROM in_transit_loads
+                WHERE shipping_week >= CURRENT_DATE - INTERVAL '30 days'
+                ORDER BY store_id, shipping_week DESC
+            ) it ON it.store_id = o.store_id
             WHERE o.run_id = %s
             ORDER BY o.priority_score DESC
         """, (run_id,))

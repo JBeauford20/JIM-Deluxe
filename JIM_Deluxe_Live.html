@@ -152,6 +152,26 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
       </div>
     </div>
   </div>
+  <!-- IN TRANSIT CARD -->
+  <div class="col-12 col-lg-6">
+    <div class="card h-100">
+      <div class="ch" style="background:var(--ora,#bf8f00)"><i class="bi bi-truck me-2"></i>In Transit</div>
+      <div class="card-body">
+        <p class="text-muted mb-3" style="font-size:13px">Upload the week's dock manifest InTransit report before generating orders. Stores with product in transit will be deprioritized by the DUE gate — no hard exclusion, just accurate clock math.</p>
+        <div id="it-status" class="rounded p-3 mb-3" style="background:#fff8f0;border:1px solid var(--ora,#bf8f00);font-size:13px">
+          <i class="bi bi-info-circle me-2" style="color:var(--ora,#bf8f00)"></i><span id="it-msg">No in-transit data loaded for this week.</span>
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+          <label class="btn btn-outline-warning btn-sm" style="cursor:pointer">
+            <i class="bi bi-upload me-1"></i>Upload InTransit File
+            <input type="file" id="it-fi" accept=".xlsx,.xls,.csv" style="display:none" onchange="doUploadInTransit(this)">
+          </label>
+          <button class="btn btn-outline-secondary btn-sm" onclick="loadInTransitSummary()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>
+          <button class="btn btn-outline-danger btn-sm" id="it-clear-btn" style="display:none" onclick="clearInTransit()"><i class="bi bi-x me-1"></i>Clear</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div></div></div>
 
 <!-- PLAN -->
@@ -515,9 +535,10 @@ function buildTable(d){
     var edit='<button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1" style="font-size:10px" onclick="event.stopPropagation();openEd('+sid+')" title="Open in editor"><i class="bi bi-pencil"></i></button>';
     var vel=o.dynamic_velocity_score!=null?parseFloat(o.dynamic_velocity_score).toFixed(1):'--';
     var rowId='skur-'+o.id;
+    var itBadge=o.is_in_transit?'<span style="font-size:9px;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:4px;padding:1px 5px;font-weight:700;margin-left:4px">IN TRANSIT '+(o.in_transit_carts||'')+'ct</span>':'';
     return '<tr class="'+(o.status==='approved'?'ar':'')+'" style="cursor:pointer" onclick="toggleSKURow(\''+o.id+'\',\''+rowId+'\')">'
       +'<td><strong>'+sid+'</strong> <i class="bi bi-chevron-right" id="chv-'+o.id+'" style="font-size:9px;color:var(--is);transition:.15s"></i></td>'
-      +'<td style="font-size:12px">'+(o.store_name||o.name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span></td>'
+      +'<td style="font-size:12px">'+(o.store_name||o.name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span>'+itBadge+'</td>'
       +'<td>'+mkTB(tier)+'</td>'
       +'<td class="text-end"><span style="font-weight:700;font-size:13px;color:var(--fd)">'+vel+'</span></td>'
       +'<td><span style="font-size:12px;font-weight:700">'+grade+'</span></td>'
@@ -616,6 +637,53 @@ function exportPlanList(){
 
 function filterO(q){buildTable(orders.filter(function(o){return !q||String(o.store_id||o.id).includes(q)||(o.store_name||o.name||'').toLowerCase().includes(q.toLowerCase())||(o.city||'').toLowerCase().includes(q.toLowerCase());}));}
 function filterT(t){buildTable(t?orders.filter(function(o){return (o.dynamic_velocity_tier||o.tier||'').trim()===t;}):orders);}
+
+/* IN TRANSIT */
+var _itWeek=null;
+async function loadInTransitSummary(){
+  try{
+    var d=await api('/api/in-transit/summary');
+    var el=document.getElementById('it-msg');
+    var cb=document.getElementById('it-clear-btn');
+    if(d&&d.length){
+      var r=d[0];
+      _itWeek=r.shipping_week;
+      if(el)el.innerHTML='<strong>'+r.store_count+' stores</strong> in transit for week of '+(r.shipping_week||'?')+' ('+r.total_carts+' total carts)';
+      if(cb)cb.style.display='inline-flex';
+      document.getElementById('it-status').style.background='#fff3cd';
+      document.getElementById('it-status').style.borderColor='#ffc107';
+    } else {
+      _itWeek=null;
+      if(el)el.textContent='No in-transit data loaded for this week.';
+      if(cb)cb.style.display='none';
+      document.getElementById('it-status').style.background='#fff8f0';
+      document.getElementById('it-status').style.borderColor='var(--ora,#bf8f00)';
+    }
+  }catch(e){console.warn('In-transit summary load failed:', e.message);}
+}
+async function doUploadInTransit(inp){
+  var f=inp&&inp.files&&inp.files[0];if(!f)return;
+  var fd=new FormData();fd.append('file',f);
+  var w=new Date().toISOString().slice(0,10);
+  fd.append('shipping_week',w);
+  try{
+    var r=await fetch(B+'/api/in-transit/upload',{method:'POST',headers:{'X-Dev-Key':'jim-dev-2026'},body:fd});
+    if(!r.ok)throw new Error(await r.text());
+    var d=await r.json();
+    toast(d.stores_loaded+' stores loaded for week '+d.shipping_week,'ok');
+    loadInTransitSummary();
+  }catch(e){toast('Upload failed: '+e.message,'err');}
+  inp.value='';
+}
+async function clearInTransit(){
+  if(!_itWeek)return;
+  try{
+    await api('/api/in-transit/'+_itWeek,{method:'DELETE'});
+    toast('In-transit data cleared','ok');
+    loadInTransitSummary();
+  }catch(e){toast('Clear failed: '+e.message,'err');}
+}
+loadInTransitSummary();
 
 /* APPROVE */
 function doOpenApprove(enc){

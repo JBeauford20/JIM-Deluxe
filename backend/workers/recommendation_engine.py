@@ -580,13 +580,50 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             # JIM history takes precedence — it has exact SKU-level pricing
             last_delivery_whl[r['store_id']] = float(r['delivery_whl'])
 
+    # ── IN-TRANSIT OVERRIDE ──────────────────────────────────────
+    # Stores with product shipped but not yet reflected in DTS scan data.
+    # Uses in_transit_loads.shipping_week as the effective last delivery date
+    # and estimates WHL from cart_count × STATIC_CART_WHL.
+    # This causes the DUE gate to naturally deprioritize these stores without
+    # hard-excluding them — correct behaviour since they just received product.
+    log("Loading in-transit overrides...")
+    cur.execute("""
+        SELECT store_id, shipping_week, cart_count
+        FROM in_transit_loads
+        WHERE shipping_week >= CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY store_id, shipping_week DESC
+    """)
+    in_transit_override: dict = {}
+    for r in cur.fetchall():
+        sid = r['store_id']
+        if sid not in in_transit_override:   # keep most recent week
+            in_transit_override[sid] = {
+                'shipping_week': r['shipping_week'],
+                'est_whl':       float(r['cart_count']) * STATIC_CART_WHL,
+            }
+    if in_transit_override:
+        log(f"  {len(in_transit_override)} stores have in-transit loads "
+            f"(will use estimated WHL for DUE gate)")
+    else:
+        log("  No in-transit overrides active")
+
     # Compute clock values for every store
     store_clock = {}
     skipped_not_due = 0
     for store_id, meta in store_rows.items():
         scan_long, scan_6w = store_scan_whl.get(store_id, (0.0, 0.0))
-        del_whl = last_delivery_whl.get(store_id, 0.0)
-        last_del = last_delivery.get(store_id)
+
+        # In-transit override: if a more recent in-transit record exists,
+        # use it as the last delivery date and estimated WHL value.
+        transit = in_transit_override.get(store_id)
+        raw_last_del = last_delivery.get(store_id)
+        if (transit and
+                (raw_last_del is None or transit['shipping_week'] > raw_last_del)):
+            del_whl  = transit['est_whl']
+            last_del = transit['shipping_week']
+        else:
+            del_whl  = last_delivery_whl.get(store_id, 0.0)
+            last_del = raw_last_del
         days_ago = (today - last_del).days if last_del else None
         weeks_ago = (days_ago / 7.0) if days_ago is not None else None
 
