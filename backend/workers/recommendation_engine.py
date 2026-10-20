@@ -256,7 +256,8 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
 
 def build_carts_for_store(store_id, ranked_skus, inventory,
                            shelf_configs, sku_profiles,
-                           target_carts, avail_meta):
+                           target_carts, avail_meta,
+                           run_profiles_allocated=None):
     """
     Builds carts shelf-by-shelf, filling each physical shelf with varieties
     from the same profile group (e.g. a 12cm shelf holds Fittonia + Calathea
@@ -299,9 +300,16 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
                     continue
                 for sku_id, score in skus:
                     if inventory.get(sku_id, 0) - committed[sku_id] > 0:
-                        if score > best_score:
-                            best_score = score; best_pid = pid
-                        break  # top-scored SKU for this profile already checked
+                        # Guarantee first placement: profiles with zero run-level
+                        # allocation get maximum priority until they land somewhere.
+                        if (run_profiles_allocated is not None
+                                and run_profiles_allocated.get(pid, 0) == 0):
+                            effective_score = 999.0
+                        else:
+                            effective_score = score
+                        if effective_score > best_score:
+                            best_score = effective_score; best_pid = pid
+                        break
 
             if best_pid is None:
                 break   # nothing left to fill
@@ -748,6 +756,10 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     log("Stages 2+3: Allocating inventory and building carts...")
     all_orders    = {}
     avail_max     = total_available
+    # Tracks units placed per profile across the entire run.
+    # Passed into build_carts_for_store so zero-allocated profiles get
+    # guaranteed first-placement priority before normal scoring resumes.
+    run_profiles_allocated: dict = defaultdict(int)
 
     for store_id, score_meta in ranked_stores:
         if sum(inventory.values()) == 0:
@@ -792,7 +804,8 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         )
         carts, committed = build_carts_for_store(
             store_id, ranked_skus, inventory,
-            shelf_configs, sku_profiles, target_carts, avail_meta
+            shelf_configs, sku_profiles, target_carts, avail_meta,
+            run_profiles_allocated,
         )
         if not carts:
             continue
@@ -811,6 +824,12 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         for sku_id, units in committed.items():
             if '_jute' not in str(sku_id) and '_ceramic' not in str(sku_id):
                 inventory[sku_id] = max(0, inventory.get(sku_id, 0) - units)
+
+        # Update run-level profile tracker so future stores know this profile
+        # has been placed and no longer needs the guaranteed-priority boost.
+        for cart in carts:
+            for sp, sku_id, trays, units, kit, pid in cart['contents']:
+                run_profiles_allocated[pid] += units
 
         all_orders[store_id] = {
             'score_meta':  score_meta,
