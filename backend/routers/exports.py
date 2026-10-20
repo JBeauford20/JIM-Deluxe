@@ -342,22 +342,26 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
             shelf_groups[s["shelf_position"]].append(s)
 
         for pos in sorted(shelf_groups.keys(), reverse=True):
-            for shelf_row in shelf_groups[pos]:
+            sku_rows = shelf_groups[pos]
+
+            # ONE header per shelf position — all SKUs at this position share it
+            ws.append(COL_HEADERS)
+            _style_header(ws)
+
+            shelf_total_disp = 0
+            shelf_total_qt   = 0
+
+            for shelf_row in sku_rows:
                 sku_id     = shelf_row["sku_id"]
                 family     = shelf_row["family"] or ""
                 desc       = shelf_row["description"] or ""
                 profile_id = shelf_row["profile_id"] or ""
-                # Use actual total across all carts; avg per cart for display
                 unit_count      = int(shelf_row["avg_unit_count"] or 0)
                 actual_total    = int(shelf_row["actual_total_units"] or 0)
 
                 upt      = profiles_upt.get(profile_id, 1)
                 tray_lbl = f"{upt} pack tray"
                 upc, retail = pricebook.get(sku_id, (None, None))
-
-                # ── Block header ───────────────────────────────────────
-                ws.append(COL_HEADERS)
-                _style_header(ws)
 
                 if family in H2O_FAMILIES:
                     h2o_items = family.replace("H2O ", "")
@@ -369,8 +373,8 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                         sku_id, upc, retail, LABEL_REQ, None
                     ])
                     _style_data(ws)
-                    ws.append([None]*7 + [unit_count, actual_total] + [None]*8)
-                    _style_subtotal(ws)
+                    shelf_total_disp += unit_count
+                    shelf_total_qt   += actual_total
 
                 else:
                     asters = aster_pool.get(sku_id, [])
@@ -383,13 +387,9 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                             sku_id, upc, retail, LABEL_REQ, None
                         ])
                         _style_data(ws)
-                        ws.append([None]*7 + [unit_count, actual_total] + [None]*8)
-                        _style_subtotal(ws)
+                        shelf_total_disp += unit_count
+                        shelf_total_qt   += actual_total
                     else:
-                        # Distribute actual_total (sum across all carts in this config)
-                        # proportionally across Aster varieties — matches Availability exactly.
-                        # qty_per_display = round(avg_unit_count × aster_avail / total_sku_avail)
-                        # total_qt        = round(actual_total × aster_avail / total_sku_avail)
                         total_sku_avail = sum(u for _, u in asters) or 1
 
                         # Largest-remainder on actual_total for Total QT
@@ -412,8 +412,6 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                         for i in range(rem_d):
                             disp_map[fl_d[by_frac_d[i]][0]] += 1
 
-                        shelf_total_disp = 0
-                        shelf_total_qt   = 0
                         for aster_code, aster_avail in asters:
                             total_qt = qt_map.get(aster_code, 0)
                             qty      = disp_map.get(aster_code, 0)
@@ -437,8 +435,10 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
                                 sku_id, upc, retail, LABEL_REQ, None
                             ])
                             _style_data(ws)
-                        ws.append([None]*7 + [shelf_total_disp, shelf_total_qt] + [None]*8)
-                        _style_subtotal(ws)
+
+            # ONE subtotal for the entire shelf position (all SKUs combined)
+            ws.append([None]*7 + [shelf_total_disp, shelf_total_qt] + [None]*8)
+            _style_subtotal(ws)
 
     # Stream xlsx
     buf = io.BytesIO()
