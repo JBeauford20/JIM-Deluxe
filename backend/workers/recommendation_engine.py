@@ -79,6 +79,33 @@ PROFILE_SIZE_GROUP = {
     'spraybox': 'hardgood',
 }
 
+# ── Cart height ordering ───────────────────────────────────────
+# Rank 1 = tallest → bottom of cart (lowest shelf number, e.g. shelf 1).
+# Rank 4 = shortest → top of cart (highest shelf number, e.g. shelf 5).
+# After greedy fill, shelves are reordered by this rank so tall items always
+# sit at the bottom regardless of which order the engine selected them.
+#
+# Heights confirmed with TPC (Oct 2026):
+#   Rank 1 (29" clear): 17cm boxes, DocBlock 12cm
+#   Rank 2 (21" clear): 12cm standard, 12cm HB, Climb-itt, H2O Venti (same as 12cm)
+#   Rank 3 (~12-15"):   H2O Bowl (shorter than 12cm, taller than 9cm), 8" Dish Garden
+#   Rank 4 (~9cm):      9cm Littles, 9cm Ceramic, 9cm Canopy, H2O OPP (= 9cm height)
+PROFILE_HEIGHT_RANK = {
+    'box17':   1,   # 17cm — tallest, always bottom
+    'db12':    1,   # DocBlock 12cm — L height class, bottom with 17cm
+    'euro12':  2,   # 12cm standard
+    'hb12':    2,   # 12cm Hanging Basket
+    'climb':   2,   # 12cm Climb-itt
+    'venti':   2,   # H2O Venti — same height as 12cm
+    'terrEU':  2,   # Terrarium — 21" class
+    'bowlEU':  3,   # H2O Bowl — shorter than 12cm, taller than 9cm
+    'box8x2':  3,   # 8" Dish Garden
+    'littles': 4,   # 9cm Littles — short, always top
+    'cer9':    4,   # 9cm Ceramic
+    'canopy9': 4,   # 9cm Canopy/HB
+    'h2opp':   4,   # H2O OPP — same height as 9cm Littles
+}
+
 # ── Store Clock constants (manager-editable) ──────────────────
 # Ken's formula: clock = ROUNDUP(STATIC_DROP_CARTS × STATIC_CART_WHL × TARGET_PACE / scans_wk)
 # Josh's DUE gate: due = weeks_since_last >= CEIL(actual_delivery_whl × TARGET_PACE / scans_12wk)
@@ -319,6 +346,27 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
         if not cart_contents:
             flags.append(f"Cart {cart_num}: no inventory available to fill")
             break
+
+        # ── Height ordering: reorder shelf positions so tall items sit lower ──
+        # Group by current shelf_pos (each pos has exactly one profile_id)
+        shelf_profiles = {}
+        shelf_items_map = defaultdict(list)
+        for item in cart_contents:
+            sp, sku_id, trays, units, kit, pid = item
+            shelf_profiles[sp] = pid
+            shelf_items_map[sp].append(item)
+
+        # Sort shelf positions: lowest height rank (tallest) gets position 1
+        sorted_positions = sorted(
+            shelf_profiles.keys(),
+            key=lambda sp: PROFILE_HEIGHT_RANK.get(shelf_profiles[sp], 3)
+        )
+
+        # Rebuild cart_contents with reassigned positions
+        cart_contents = []
+        for new_pos, old_pos in enumerate(sorted_positions, start=1):
+            for sp, sku_id, trays, units, kit, pid in shelf_items_map[old_pos]:
+                cart_contents.append((new_pos, sku_id, trays, units, kit, pid))
 
         total_units  = sum(u for _, _, _, u, _, _ in cart_contents)
         shelves_used = shelf_pos
