@@ -165,14 +165,15 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <div class="ms-auto d-flex gap-2">
       <button class="btn btn-sm btn-outline-primary" onclick="approveAll()"><i class="bi bi-check-all me-1"></i>Approve All</button>
       <button class="btn btn-sm btn-outline-primary" id="psb" onclick="doPlanSummary()" disabled><i class="bi bi-stars me-1"></i>Plan Summary</button>
+      <button class="btn btn-sm btn-outline-success" id="elb" onclick="exportPlanList()" disabled><i class="bi bi-file-earmark-spreadsheet me-1"></i>Export List</button>
       <button class="btn btn-sm btn-cta" id="xb" onclick="doExport()" disabled><i class="bi bi-download me-1"></i>Export to Aster</button>
       <button class="btn btn-sm btn-primary" id="fb" onclick="doFinalizeWeek()" disabled title="Approve all remaining orders, lock week, and move to Order History"><i class="bi bi-archive me-1"></i>Finalize Week</button>
     </div>
   </div>
   <div class="card"><div class="table-responsive">
     <table class="table jt mb-0">
-      <thead><tr><th>Store</th><th>Location</th><th>Tier</th><th>Grade</th><th>Clock</th><th>Last Delivery</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody id="ot"><tr><td colspan="11" class="text-center py-4 text-muted">No plan generated yet</td></tr></tbody>
+      <thead><tr><th>Store</th><th>Location</th><th>Tier</th><th class="text-end">Velocity</th><th>Grade</th><th>Clock</th><th>Last Delivery</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody id="ot"><tr><td colspan="12" class="text-center py-4 text-muted">No plan generated yet</td></tr></tbody>
     </table>
   </div></div>
   <div class="mt-4"><h6 style="color:var(--fd)" class="mb-3"><i class="bi bi-truck me-2"></i>Truck Loads</h6><div class="row g-3" id="lg"></div></div>
@@ -394,6 +395,7 @@ function doClearBatch(){
   document.getElementById('rb').style.display='none';
   document.getElementById('gs').style.display='none';
   var xb=document.getElementById('xb');if(xb)xb.disabled=true;
+  var elb=document.getElementById('elb');if(elb)elb.disabled=true;
   var fb=document.getElementById('fb');if(fb)fb.disabled=true;
   var psb=document.getElementById('psb');if(psb)psb.disabled=true;
   var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='none';
@@ -453,6 +455,7 @@ function doPoll(jid,gb,gs,retries){
 
 async function loadPlan(){
   if(!rId)return;
+  _skuCache={};  // reset SKU dropdown cache on new plan load
   try{
     var r=await Promise.all([api('/api/orders/runs/'+rId),api('/api/orders/runs/'+rId+'/loads'),api('/api/orders/runs/'+rId+'/summary').catch(function(){return null;})]);
     orders=Array.isArray(r[0])?r[0]:[];
@@ -477,11 +480,18 @@ function buildStats(sum){
 
 /* TABLE */
 var _ofs=[];
+var _skuCache={};  // order_id → lines array (cached after first fetch)
+
 function buildTable(d){
   _ofs=d||orders;
   var c=document.getElementById('oc');if(c)c.textContent=_ofs.length+' orders';
   var tb=document.getElementById('ot');if(!tb)return;
-  if(!_ofs.length){tb.innerHTML='<tr><td colspan="11" class="text-center py-4 text-muted">'+(orders.length?'No orders match filter':'No plan generated yet')+'</td></tr>';var xb=document.getElementById('xb');if(xb)xb.disabled=true;return;}
+  if(!_ofs.length){
+    tb.innerHTML='<tr><td colspan="12" class="text-center py-4 text-muted">'+(orders.length?'No orders match filter':'No plan generated yet')+'</td></tr>';
+    var xb=document.getElementById('xb');if(xb)xb.disabled=true;
+    var elb=document.getElementById('elb');if(elb)elb.disabled=true;
+    return;
+  }
   tb.innerHTML=_ofs.map(function(o){
     var sid=o.store_id||o.id;var tier=(o.dynamic_velocity_tier||o.tier||'').trim();
     var days=o.days_since_last_delivery!=null?o.days_since_last_delivery+'d ago':'--';
@@ -492,18 +502,104 @@ function buildTable(d){
     var oenc=encodeURIComponent(JSON.stringify({id:o.id,sid:sid,name:o.store_name||o.name||'',state:o.state||'',carts:o.cart_count||0,units:o.total_units||0,load:o.load_name||o.load||'--',v:o.version||1}));
     var act=o.status==='draft'?'<button class="btn btn-sm btn-cta py-0 px-2" style="font-size:11px" onclick="event.stopPropagation();doOpenApprove(\''+oenc+'\')">Approve</button>':'<i class="bi bi-check-circle-fill text-success"></i>';
     var why='<button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1" style="font-size:10px" onclick="event.stopPropagation();doWhyStore(\''+o.id+'\',\''+sid+'\')" title="AI explanation"><i class="bi bi-stars"></i></button>';
-    return '<tr class="'+(o.status==='approved'?'ar':'')+'" onclick="openEd('+sid+')">'
-      +'<td><strong>'+sid+'</strong></td><td style="font-size:12px">'+(o.store_name||o.name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span></td>'
+    var edit='<button class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1" style="font-size:10px" onclick="event.stopPropagation();openEd('+sid+')" title="Open in editor"><i class="bi bi-pencil"></i></button>';
+    var vel=o.dynamic_velocity_score!=null?parseFloat(o.dynamic_velocity_score).toFixed(1):'--';
+    var rowId='skur-'+o.id;
+    return '<tr class="'+(o.status==='approved'?'ar':'')+'" style="cursor:pointer" onclick="toggleSKURow(\''+o.id+'\',\''+rowId+'\')">'
+      +'<td><strong>'+sid+'</strong> <i class="bi bi-chevron-right" id="chv-'+o.id+'" style="font-size:9px;color:var(--is);transition:.15s"></i></td>'
+      +'<td style="font-size:12px">'+(o.store_name||o.name||'')+'<br><span class="text-muted">'+(o.city||'')+', '+(o.state||'')+'</span></td>'
       +'<td>'+mkTB(tier)+'</td>'
+      +'<td class="text-end"><span style="font-weight:700;font-size:13px;color:var(--fd)">'+vel+'</span></td>'
       +'<td><span style="font-size:12px;font-weight:700">'+grade+'</span></td>'
       +'<td>'+clockCell+'</td>'
       +'<td style="font-size:12px">'+days+'</td>'
       +'<td class="text-center fw-bold">'+(o.cart_count||0)+'</td><td class="text-center">'+fmt(o.total_units||0)+'</td>'
       +'<td style="font-size:12px">'+(o.load_name||o.load||'--')+'</td><td>'+mkSP(o.status||'draft')+'</td>'
-      +'<td>'+act+why+'</td></tr>';
+      +'<td onclick="event.stopPropagation()">'+act+why+edit+'</td></tr>'
+      +'<tr id="'+rowId+'" style="display:none;background:#f8faf8"><td colspan="12" style="padding:0"><div id="sku-inner-'+o.id+'" class="p-3 text-muted" style="font-size:12px"><span class="spinner-border spinner-border-sm me-2"></span>Loading...</div></td></tr>';
   }).join('');
   var xb=document.getElementById('xb');if(xb)xb.disabled=!orders.some(function(o){return o.status==='approved';});
+  var elb=document.getElementById('elb');if(elb)elb.disabled=false;
 }
+
+async function toggleSKURow(orderId, rowId){
+  var row=document.getElementById(rowId);
+  var chv=document.getElementById('chv-'+orderId);
+  if(!row)return;
+  var open=row.style.display!=='none'&&row.style.display!=='';
+  row.style.display=open?'none':'table-row';
+  if(chv){chv.className=open?'bi bi-chevron-right':'bi bi-chevron-down';chv.style.transform='';}
+  if(!open){
+    var inner=document.getElementById('sku-inner-'+orderId);
+    if(!inner)return;
+    if(_skuCache[orderId]){renderSKUDropdown(inner,_skuCache[orderId]);return;}
+    try{
+      var d=await api('/api/orders/'+orderId);
+      var lines=(d.lines||[]).filter(function(l){return (l.draft_qty||l.recommended_qty||0)>0;});
+      _skuCache[orderId]=lines;
+      renderSKUDropdown(inner,lines);
+    }catch(e){inner.innerHTML='<span class="text-danger">Failed to load: '+e.message+'</span>';}
+  }
+}
+
+function renderSKUDropdown(el, lines){
+  if(!lines.length){el.innerHTML='<em class="text-muted">No order lines found</em>';return;}
+  var sorted=lines.slice().sort(function(a,b){return (b.draft_qty||0)-(a.draft_qty||0);});
+  el.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<thead><tr style="border-bottom:1px solid var(--line)">'
+    +'<th style="padding:4px 12px 6px 0;color:var(--is);font-weight:600">Description</th>'
+    +'<th style="padding:4px 12px 6px 0;color:var(--is);font-weight:600">SKU</th>'
+    +'<th style="padding:4px 0 6px 0;color:var(--is);font-weight:600;text-align:right">Units</th>'
+    +'</tr></thead><tbody>'
+    +sorted.map(function(l){
+      return '<tr style="border-bottom:1px solid #f0f4f0">'
+        +'<td style="padding:4px 12px 4px 0;font-weight:600">'+(l.description||l.desc||'SKU '+l.sku_id)+'</td>'
+        +'<td style="padding:4px 12px 4px 0;font-family:monospace;color:var(--is)">'+l.sku_id+'</td>'
+        +'<td style="padding:4px 0 4px 0;text-align:right;font-weight:700;color:var(--fd)">'+fmt(l.draft_qty||l.recommended_qty||0)+'</td>'
+        +'</tr>';
+    }).join('')
+    +'</tbody></table>';
+}
+
+function exportPlanList(){
+  if(!_ofs||!_ofs.length){toast('No orders to export','warn');return;}
+  var headers=['Store #','Store Name','City','State','Merchant','Tier','Velocity Score',
+               'Grade','Static Clock (wk)','Dynamic Clock (wk)','Days Since Last Delivery',
+               'Carts','Units','Load','Status'];
+  var rows=_ofs.map(function(o){
+    return [
+      o.store_id||o.id,
+      o.store_name||o.name||'',
+      o.city||'',
+      o.state||'',
+      o.merchant||'',
+      (o.dynamic_velocity_tier||o.tier||'').trim(),
+      o.dynamic_velocity_score!=null?parseFloat(o.dynamic_velocity_score).toFixed(1):'',
+      o.static_grade||'',
+      o.static_clock_weeks!=null?o.static_clock_weeks:'',
+      o.dynamic_clock_weeks!=null?o.dynamic_clock_weeks:'',
+      o.days_since_last_delivery!=null?o.days_since_last_delivery:'',
+      o.cart_count||0,
+      o.total_units||0,
+      o.load_name||o.load||'',
+      o.status||'',
+    ];
+  });
+  var csv=[headers].concat(rows).map(function(row){
+    return row.map(function(v){
+      var s=String(v==null?'':v);
+      return s.includes(',')||s.includes('"')||s.includes('\n')?'"'+s.replace(/"/g,'""')+'"':s;
+    }).join(',');
+  }).join('\r\n');
+  var blob=new Blob([csv],{type:'text/csv'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='JIM_Plan_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Exported '+_ofs.length+' orders','ok');
+}
+
 function filterO(q){buildTable(orders.filter(function(o){return !q||String(o.store_id||o.id).includes(q)||(o.store_name||o.name||'').toLowerCase().includes(q.toLowerCase())||(o.city||'').toLowerCase().includes(q.toLowerCase());}));}
 function filterT(t){buildTable(t?orders.filter(function(o){return (o.dynamic_velocity_tier||o.tier||'').trim()===t;}):orders);}
 
@@ -1051,6 +1147,7 @@ async function doFinalizeWeek(){
     var gb=document.getElementById('gb');if(gb){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';}
     var rb=document.getElementById('rb');if(rb)rb.style.display='none';
     var xb=document.getElementById('xb');if(xb)xb.disabled=true;
+    var elb2=document.getElementById('elb');if(elb2)elb2.disabled=true;
     if(fb){fb.disabled=true;fb.innerHTML='<i class="bi bi-archive me-1"></i>Finalize Week';}
     var ap=document.getElementById('ap');if(ap)ap.style.display='none';
     var uz=document.getElementById('uz');if(uz)uz.style.display='block';
