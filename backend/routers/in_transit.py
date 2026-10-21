@@ -119,25 +119,32 @@ async def upload_in_transit(
 
     # Parse file
     raw_rows = []
-    if ext in ('.xlsx', '.xls'):
-        import openpyxl
-        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-        tmp.write(contents); tmp.close()
-        try:
-            wb = openpyxl.load_workbook(tmp.name, read_only=True, data_only=True)
-            raw_rows = list(wb.active.iter_rows(values_only=True))
-            wb.close()
-        finally:
-            os.unlink(tmp.name)
-    else:
-        import csv, io as _io
-        reader = csv.reader(_io.StringIO(contents.decode('utf-8-sig', errors='replace')))
-        raw_rows = list(reader)
-
     try:
+        if ext in ('.xlsx', '.xls'):
+            import openpyxl
+            tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+            tmp.write(contents); tmp.close()
+            try:
+                wb = openpyxl.load_workbook(tmp.name, read_only=True, data_only=True)
+                ws = wb.active
+                if ws is None:
+                    raise HTTPException(400, "Excel file has no active sheet. Save the file and try again.")
+                raw_rows = list(ws.iter_rows(values_only=True))
+                wb.close()
+            finally:
+                os.unlink(tmp.name)
+        else:
+            import csv, io as _io
+            reader = csv.reader(_io.StringIO(contents.decode('utf-8-sig', errors='replace')))
+            raw_rows = list(reader)
+
         parsed = _parse_rows(raw_rows)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}")
 
     if not parsed:
         raise HTTPException(400, "No valid store rows found.")
