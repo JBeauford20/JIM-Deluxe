@@ -175,6 +175,14 @@ async def upload_in_transit(
 
             if filtered:
                 email = user.get("email", "system") if isinstance(user, dict) else "system"
+                # Deduplicate by store_id — sum cart counts if the same store appears multiple times
+                deduped: dict = {}
+                for s, v, c in filtered:
+                    if s in deduped:
+                        deduped[s] = (v, deduped[s][1] + c)
+                    else:
+                        deduped[s] = (v, c)
+                rows = [(s, week, c, v, email) for s, (v, c) in deduped.items()]
                 psycopg2.extras.execute_values(cur, """
                     INSERT INTO in_transit_loads
                         (store_id, shipping_week, cart_count, vol_code, uploaded_by)
@@ -184,8 +192,7 @@ async def upload_in_transit(
                             vol_code    = EXCLUDED.vol_code,
                             uploaded_by = EXCLUDED.uploaded_by,
                             uploaded_at = now()
-                """, [(s, week, c, v, email) for s, v, c in filtered],
-                    page_size=500)
+                """, rows, page_size=500)
     except HTTPException:
         raise
     except Exception as e:
