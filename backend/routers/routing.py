@@ -3,6 +3,7 @@ import urllib.request, urllib.parse, json, time
 from fastapi import APIRouter, Depends
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
+from us_cities import lookup_coords
 
 router = APIRouter()
 
@@ -93,36 +94,57 @@ def routing_run(run_id: str, user=Depends(get_current_user)):
 
 @router.post("/geocode-batch")
 def geocode_batch(user=Depends(require_role("order_writer", "manager", "admin"))):
-    """Geocode up to 20 stores that have no lat/lng using Nominatim."""
+    """Geocode all stores that have no lat/lng.
+
+    Uses a static US cities dict for instant lookups. Falls back to
+    Nominatim (with 1.1s rate-limit sleep) only for cities not in the dict.
+    """
     with get_db() as conn:
         cur = cursor(conn)
 
-        # Fetch up to 20 stores missing coordinates
+        # Fetch ALL stores missing coordinates (no LIMIT — static lookup is instant)
         cur.execute("""
             SELECT store_id, city, state
             FROM stores
             WHERE lat IS NULL AND city IS NOT NULL AND state IS NOT NULL
-            LIMIT 20
         """)
         rows = cur.fetchall()
 
         if not rows:
             return {"geocoded": 0, "remaining": 0}
 
-        # Deduplicate by (city, state)
+        # Deduplicate by (city, state) — normalize key for dedup only
         seen = {}
         for row in rows:
             key = (row["city"].strip().lower(), row["state"].strip().upper())
             if key not in seen:
-                seen[key] = (row["city"], row["state"])
+                seen[key] = (row["city"].strip(), row["state"].strip())
 
         geocoded = 0
-        for key, (city, state) in seen.items():
+        nominatim_queue = []  # cities that weren't in the static dict
+
+        for _key, (city, state) in seen.items():
+            lat, lng = lookup_coords(city, state)
+            if lat is not None:
+                cur.execute("""
+                    UPDATE stores SET lat = %s, lng = %s
+                    WHERE LOWER(TRIM(city)) = LOWER(%s)
+                      AND UPPER(TRIM(state)) = UPPER(%s)
+                      AND lat IS NULL
+                """, (lat, lng, city, state))
+                geocoded += cur.rowcount
+            else:
+                nominatim_queue.append((city, state))
+
+        # Fall back to Nominatim for any cities not covered by the static dict
+        for city, state in nominatim_queue:
             lat, lng = _nominatim(city, state)
             if lat is not None and lng is not None:
                 cur.execute("""
                     UPDATE stores SET lat = %s, lng = %s
-                    WHERE city = %s AND state = %s AND lat IS NULL
+                    WHERE LOWER(TRIM(city)) = LOWER(%s)
+                      AND UPPER(TRIM(state)) = UPPER(%s)
+                      AND lat IS NULL
                 """, (lat, lng, city, state))
                 geocoded += cur.rowcount
             time.sleep(1.1)  # Nominatim rate limit: 1 request/second
