@@ -80,6 +80,8 @@ class NewStoreRequest(BaseModel):
 
 class EditStoreRequest(BaseModel):
     store_name:   Optional[str] = None
+    city:         Optional[str] = None
+    state:        Optional[str] = None
     merchant:     Optional[str] = None
     volume_code:  Optional[str] = None
     store_status: Optional[str] = None
@@ -372,6 +374,16 @@ def edit_store(
         if not body.store_name:
             raise HTTPException(400, "store_name must not be empty")
 
+    if body.city is not None:
+        body.city = body.city.strip()
+        if not body.city:
+            raise HTTPException(400, "city must not be empty")
+
+    if body.state is not None:
+        body.state = body.state.upper().strip()
+        if body.state not in VALID_US_STATES:
+            raise HTTPException(400, "state must be a valid 2-letter US abbreviation")
+
     if body.volume_code is not None:
         if body.volume_code not in VALID_VOLUME_CODES:
             raise HTTPException(400, f"volume_code must be one of: AA, A, B, C, D")
@@ -408,6 +420,14 @@ def edit_store(
         if body.store_name is not None:
             set_parts.append("store_name = %s")
             params.append(body.store_name)
+
+        if body.city is not None:
+            set_parts.append("city = %s")
+            params.append(body.city)
+
+        if body.state is not None:
+            set_parts.append("state = %s")
+            params.append(body.state)
 
         if body.merchant is not None:
             set_parts.append("merchant = %s")

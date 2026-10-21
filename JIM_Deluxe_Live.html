@@ -345,6 +345,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <div class="modal-header"><h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit Store <span id="es-title" style="font-size:14px;opacity:.7"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
   <div class="modal-body">
     <div class="mb-3"><label class="form-label" style="font-size:13px;font-weight:600">Store Name</label><input type="text" class="form-control form-control-sm" id="es-name" placeholder="Store name"></div>
+    <div class="row g-2 mb-3"><div class="col-8"><label class="form-label" style="font-size:13px;font-weight:600">City</label><input type="text" class="form-control form-control-sm" id="es-city" placeholder="City"></div><div class="col-4"><label class="form-label" style="font-size:13px;font-weight:600">State</label><input type="text" class="form-control form-control-sm" id="es-state" placeholder="TX" maxlength="2" style="text-transform:uppercase"></div></div>
     <div class="mb-3"><label class="form-label" style="font-size:13px;font-weight:600">Status</label>
       <select class="form-select form-select-sm" id="es-status">
         <option value="active">Active</option>
@@ -1184,15 +1185,15 @@ async function openSt(id){
     var maxW=Math.max.apply(null,weekly.concat([1]));
     var cats=[['9cm',s.tier_9cm],['12cm',s.tier_12cm],['17cm',s.tier_17cm],['H2O',s.tier_h2o],['Collectors',s.tier_collectors]].filter(function(c){return c[1];});
     var storeSt=s.store_status||'active';
-    var stColors={active:'var(--fern)',paused:'#856404',do_not_ship:'#C00000',inactive:'#808080',opening:'var(--fern)',promotion:'#3a6bc4',store_walk:'#ffc107',fenceline:'#6c757d',hold:'#856404'};
-    var stBadge=storeSt!=='active'?'<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:'+(stColors[storeSt]||'#808080')+';color:#fff;font-weight:700;margin-left:6px">'+storeSt.replace(/_/g,' ').toUpperCase()+'</span>':'';
+    var stColors={active:'var(--fern)',paused:'#856404',do_not_ship:'#C00000',inactive:'#808080',opening:'#198754',promotion:'#3a6bc4',store_walk:'#ffc107',fenceline:'#6c757d',hold:'#856404'};
+    var stBadge='<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:'+(stColors[storeSt]||'#808080')+';color:'+(storeSt==='store_walk'?'#000':'#fff')+';font-weight:700;margin-left:6px">'+storeSt.replace(/_/g,' ').toUpperCase()+'</span>';
     var recent4=weekly.slice(-4).reduce(function(s,v){return s+v;},0);
     var prior4=weekly.slice(-8,-4).reduce(function(s,v){return s+v;},0);
     var pct=prior4>0?Math.round((recent4-prior4)/prior4*100):0;
     var trendColor=pct>=0?'var(--fern)':'#C00000';
     var trendStr=(pct>=0?'+':'')+pct+'% vs prior 4 weeks';
     sp.innerHTML='<div class="d-flex justify-content-between mb-3"><div><h5 class="mb-1" style="color:var(--fd)">Store '+s.store_id+' -- '+(s.store_name||'')+'</h5><p class="text-muted mb-0" style="font-size:13px">'+(s.city||'')+', '+(s.state||'')+' - '+(s.merchant||'')+'</p></div><div class="text-end">'+mkTB(tier)+stBadge+'<div style="font-size:11px;color:var(--is);margin-top:3px">Static: '+(s.volume_code||'').trim()+'</div>'
-      +'<button onclick="openEditStore('+s.store_id+',\''+(s.store_name||'').replace(/\'/g,"\\'")+'\',\''+(s.store_status||'active')+'\',\''+(s.merchant||'')+'\',\''+(s.volume_code||'A')+'\')" class="btn btn-sm btn-outline-secondary py-1 px-2 ms-2 mt-2" style="font-size:11px"><i class="bi bi-pencil me-1"></i>Edit Store</button>'
+      +'<button onclick="openEditStore('+s.store_id+',\''+(s.store_name||'').replace(/\'/g,"\\'")+'\',\''+(s.store_status||'active')+'\',\''+(s.merchant||'')+'\',\''+(s.volume_code||'A')+'\',\''+(s.city||'')+'\',\''+(s.state||'')+'\')" class="btn btn-sm btn-outline-secondary py-1 px-2 ms-2 mt-2" style="font-size:11px"><i class="bi bi-pencil me-1"></i>Edit Store</button>'
       +'</div></div>'
       +'<div class="row g-2 mb-3"><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+parseFloat(s.dynamic_velocity_score||0).toFixed(1)+'</div><div class="l">Velocity Score</div></div></div><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+(s.region||'--')+'</div><div class="l">Region</div></div></div></div>'
       +(cats.length?'<div class="mb-3">'+cats.map(function(c){return '<span style="background:#f0f9f0;border:1px solid var(--mp);border-radius:8px;padding:5px 10px;display:inline-flex;align-items:center;gap:5px;font-size:12px;margin:3px"><span style="color:var(--is)">'+c[0]+'</span>'+mkTB(c[1].trim())+'</span>';}).join('')+'</div>':'')
@@ -1281,10 +1282,12 @@ async function doAddStore(){
 var _editStoreMod=null; var _editStoreId=null;
 function _getEditStoreMod(){if(!_editStoreMod)_editStoreMod=new bootstrap.Modal(document.getElementById('editStoreM'));return _editStoreMod;}
 
-async function openEditStore(storeId, storeName, currentStatus, currentMerchant, currentVc){
+async function openEditStore(storeId, storeName, currentStatus, currentMerchant, currentVc, currentCity, currentState){
   _editStoreId=storeId;
   document.getElementById('es-title').textContent='#'+storeId+' — '+storeName;
   document.getElementById('es-name').value=storeName||'';
+  document.getElementById('es-city').value=currentCity||'';
+  document.getElementById('es-state').value=currentState||'';
   document.getElementById('es-status').value=currentStatus||'active';
   document.getElementById('es-vc').value=currentVc||'A';
   document.getElementById('es-note').value='';
@@ -1300,6 +1303,8 @@ async function doEditStore(){
   if(!_editStoreId){return;}
   var body={
     store_name: document.getElementById('es-name').value.trim()||null,
+    city: document.getElementById('es-city').value.trim()||null,
+    state: document.getElementById('es-state').value.trim().toUpperCase()||null,
     store_status: document.getElementById('es-status').value||null,
     merchant: document.getElementById('es-merchant').value||null,
     volume_code: document.getElementById('es-vc').value||null,
