@@ -33,7 +33,7 @@ def list_stores(
             SELECT store_id, store_name, city, state, region, merchant,
                    volume_code, dynamic_velocity_tier, dynamic_velocity_score,
                    tier_9cm, tier_12cm, tier_h2o, tier_collectors, tier_boutique,
-                   merch_partner
+                   merch_partner, store_status
             FROM stores
             WHERE {' AND '.join(where)}
             ORDER BY dynamic_velocity_score DESC NULLS LAST

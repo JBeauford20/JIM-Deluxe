@@ -631,6 +631,17 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     else:
         log("  No in-transit overrides active")
 
+    # Load store status overrides
+    log("Loading store status overrides...")
+    cur.execute("""
+        SELECT store_id, store_status
+        FROM stores
+        WHERE store_status != 'active' AND store_status IS NOT NULL AND active = true
+    """)
+    status_overrides = {r['store_id']: r['store_status'] for r in cur.fetchall()}
+    if status_overrides:
+        log(f"  {len(status_overrides)} stores with non-active status")
+
     # Compute clock values for every store
     store_clock = {}
     skipped_not_due = 0
@@ -766,6 +777,11 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
 
         priority = min(1.0, priority + playbook.stage1_priority_bonus(store_id))
 
+        if status_overrides.get(store_id) == 'opening':
+            priority = min(1.0, priority + 0.30)  # treat like AA
+        if status_overrides.get(store_id) == 'promotion':
+            priority = min(1.0, priority + 0.15)
+
         clk = store_clock.get(store_id, {})
         store_scores[store_id] = {
             'priority':        round(priority, 6),
@@ -831,6 +847,11 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         # This is a hard binary gate — not a scoring penalty.
         if not score_meta.get('is_due', True):
             continue
+
+        # Store status gate
+        store_st = status_overrides.get(store_id, 'active')
+        if store_st in ('paused', 'do_not_ship', 'inactive', 'hold'):
+            continue  # hard exclude
 
         tier = score_meta['tier']
 
