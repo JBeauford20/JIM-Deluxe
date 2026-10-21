@@ -78,6 +78,14 @@ class NewStoreRequest(BaseModel):
     volume_code: str
 
 
+class EditStoreRequest(BaseModel):
+    store_name:   Optional[str] = None
+    merchant:     Optional[str] = None
+    volume_code:  Optional[str] = None
+    store_status: Optional[str] = None
+    status_note:  Optional[str] = None
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/")
@@ -349,3 +357,89 @@ def add_store(
         "status": "opening",
         "message": "Store added successfully. Status set to Opening — will be prioritized as AA until sales data accumulates.",
     }
+
+
+@router.put("/{store_id}/edit")
+def edit_store(
+    store_id: int,
+    body: EditStoreRequest,
+    user=Depends(require_role("manager", "admin"))
+):
+    """Update name, merchant, volume_code, status, and/or note on an existing store."""
+    # Validate fields if provided
+    if body.store_name is not None:
+        body.store_name = body.store_name.strip()
+        if not body.store_name:
+            raise HTTPException(400, "store_name must not be empty")
+
+    if body.volume_code is not None:
+        if body.volume_code not in VALID_VOLUME_CODES:
+            raise HTTPException(400, f"volume_code must be one of: AA, A, B, C, D")
+
+    if body.store_status is not None:
+        if body.store_status not in VALID_STATUSES:
+            raise HTTPException(400, f"store_status must be one of: {sorted(VALID_STATUSES)}")
+
+    email = user.get("email", "system") if isinstance(user, dict) else "system"
+
+    with get_db() as conn:
+        cur = cursor(conn)
+
+        # Check store exists
+        cur.execute("SELECT store_id FROM stores WHERE store_id = %s", (store_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, f"Store {store_id} not found")
+
+        # Validate merchant against DB values if provided
+        if body.merchant is not None:
+            cur.execute("""
+                SELECT DISTINCT merchant FROM stores
+                WHERE merchant IS NOT NULL AND merchant != ''
+                ORDER BY merchant
+            """)
+            valid_merchants_list = [r["merchant"] for r in cur.fetchall()]
+            if body.merchant not in valid_merchants_list:
+                raise HTTPException(400, f"Invalid merchant. Valid merchants: {valid_merchants_list}")
+
+        # Build dynamic SET clause — only update what was provided
+        set_parts = []
+        params = []
+
+        if body.store_name is not None:
+            set_parts.append("store_name = %s")
+            params.append(body.store_name)
+
+        if body.merchant is not None:
+            set_parts.append("merchant = %s")
+            params.append(body.merchant)
+
+        if body.volume_code is not None:
+            set_parts.append("volume_code = %s")
+            params.append(body.volume_code)
+            # Keep dynamic_velocity_tier in sync for manually-managed stores
+            set_parts.append("dynamic_velocity_tier = %s")
+            params.append(body.volume_code)
+
+        if body.store_status is not None:
+            set_parts.append("store_status = %s")
+            params.append(body.store_status)
+
+        if body.status_note is not None:
+            set_parts.append("status_note = %s")
+            params.append(body.status_note)
+
+        # Always stamp who/when
+        set_parts.append("status_updated_at = now()")
+        set_parts.append("status_updated_by = %s")
+        params.append(email)
+
+        params.append(store_id)
+        cur.execute(
+            f"UPDATE stores SET {', '.join(set_parts)} WHERE store_id = %s "
+            "RETURNING store_id, store_name, city, state, merchant, volume_code, "
+            "store_status, status_note, status_updated_at, status_updated_by",
+            params
+        )
+        row = cur.fetchone()
+
+    return row
