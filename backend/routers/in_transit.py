@@ -159,32 +159,37 @@ async def upload_in_transit(
         today = date.today()
         week = today - timedelta(days=today.weekday())  # Monday of current week
 
-    # Validate store IDs exist
-    with get_db() as conn:
-        cur = cursor(conn)
-        store_ids = [s for s, _, _ in parsed]
-        cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s)", (store_ids,))
-        valid = {r["store_id"] for r in cur.fetchall()}
-        filtered = [(s, v, c) for s, v, c in parsed if s in valid]
-        skipped = len(parsed) - len(filtered)
+    # Validate store IDs exist and insert
+    try:
+        with get_db() as conn:
+            cur = cursor(conn)
+            store_ids = [s for s, _, _ in parsed]
+            cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s)", (store_ids,))
+            valid = {r["store_id"] for r in cur.fetchall()}
+            filtered = [(s, v, c) for s, v, c in parsed if s in valid]
+            skipped = len(parsed) - len(filtered)
 
-        # Replace this week's data
-        cur.execute("DELETE FROM in_transit_loads WHERE shipping_week = %s", (week,))
-        deleted = cur.rowcount
+            # Replace this week's data
+            cur.execute("DELETE FROM in_transit_loads WHERE shipping_week = %s", (week,))
+            deleted = cur.rowcount
 
-        if filtered:
-            email = user.get("email", "system") if isinstance(user, dict) else "system"
-            psycopg2.extras.execute_values(cur, """
-                INSERT INTO in_transit_loads
-                    (store_id, shipping_week, cart_count, vol_code, uploaded_by)
-                VALUES %s
-                ON CONFLICT (store_id, shipping_week) DO UPDATE
-                    SET cart_count  = EXCLUDED.cart_count,
-                        vol_code    = EXCLUDED.vol_code,
-                        uploaded_by = EXCLUDED.uploaded_by,
-                        uploaded_at = now()
-            """, [(s, week, c, v, email) for s, v, c in filtered],
-                page_size=500)
+            if filtered:
+                email = user.get("email", "system") if isinstance(user, dict) else "system"
+                psycopg2.extras.execute_values(cur, """
+                    INSERT INTO in_transit_loads
+                        (store_id, shipping_week, cart_count, vol_code, uploaded_by)
+                    VALUES %s
+                    ON CONFLICT (store_id, shipping_week) DO UPDATE
+                        SET cart_count  = EXCLUDED.cart_count,
+                            vol_code    = EXCLUDED.vol_code,
+                            uploaded_by = EXCLUDED.uploaded_by,
+                            uploaded_at = now()
+                """, [(s, week, c, v, email) for s, v, c in filtered],
+                    page_size=500)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Database error: {e}")
 
     return {
         "shipping_week": str(week),
