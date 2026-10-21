@@ -48,6 +48,16 @@ STATUS_ALIASES = {
 }
 
 
+VALID_US_STATES = {
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+    'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+    'VA','WA','WV','WI','WY','DC',
+}
+
+VALID_VOLUME_CODES = {'AA', 'A', 'B', 'C', 'D'}
+
+
 class StatusUpdate(BaseModel):
     status: str
     note: Optional[str] = None
@@ -57,6 +67,15 @@ class BulkStatusItem(BaseModel):
     store_id: int
     status: str
     note: Optional[str] = None
+
+
+class NewStoreRequest(BaseModel):
+    store_id:    int
+    store_name:  str
+    city:        str
+    state:       str
+    merchant:    str
+    volume_code: str
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -258,4 +277,75 @@ async def upload_status_file(
         "updated": updated,
         "skipped": skipped,
         "invalid_status": invalid_status_vals,
+    }
+
+
+@router.get("/valid-merchants")
+def valid_merchants(user=Depends(get_current_user)):
+    """Sorted list of distinct non-null merchant values from the stores table."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT DISTINCT merchant FROM stores
+            WHERE merchant IS NOT NULL AND merchant != ''
+            ORDER BY merchant
+        """)
+        return [r["merchant"] for r in cur.fetchall()]
+
+
+@router.post("/add-store", status_code=201)
+def add_store(
+    body: NewStoreRequest,
+    user=Depends(require_role("manager", "admin"))
+):
+    """Add a new store with Opening status."""
+    # Validate store_name
+    store_name = body.store_name.strip()
+    if not store_name:
+        raise HTTPException(400, "store_name must not be empty")
+
+    # Validate city
+    city = body.city.strip()
+    if not city:
+        raise HTTPException(400, "city must not be empty")
+
+    # Validate state
+    state = body.state.upper().strip()
+    if state not in VALID_US_STATES:
+        raise HTTPException(400, "State must be a valid 2-letter US abbreviation")
+
+    # Validate volume_code
+    if body.volume_code not in VALID_VOLUME_CODES:
+        raise HTTPException(400, f"Volume code must be one of: AA, A, B, C, D")
+
+    with get_db() as conn:
+        cur = cursor(conn)
+
+        # Check for duplicate store_id
+        cur.execute("SELECT 1 FROM stores WHERE store_id = %s", (body.store_id,))
+        if cur.fetchone():
+            raise HTTPException(409, f"Store {body.store_id} already exists")
+
+        # Validate merchant against DB values
+        cur.execute("""
+            SELECT DISTINCT merchant FROM stores
+            WHERE merchant IS NOT NULL AND merchant != ''
+            ORDER BY merchant
+        """)
+        valid_merchants = [r["merchant"] for r in cur.fetchall()]
+        if body.merchant not in valid_merchants:
+            raise HTTPException(400, f"Invalid merchant. Valid merchants: {valid_merchants}")
+
+        # Insert new store
+        cur.execute("""
+            INSERT INTO stores (store_id, store_name, city, state, merchant, volume_code,
+                                store_status, active, dynamic_velocity_tier, dynamic_velocity_score)
+            VALUES (%s, %s, %s, %s, %s, %s, 'opening', true, %s, 0.0)
+        """, (body.store_id, store_name, city, state, body.merchant, body.volume_code, body.volume_code))
+
+    return {
+        "store_id": body.store_id,
+        "store_name": store_name,
+        "status": "opening",
+        "message": "Store added successfully. Status set to Opening — will be prioritized as AA until sales data accumulates.",
     }
