@@ -6,6 +6,7 @@
 <title>JIM Deluxe - TPC Order Writer</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 :root{--fern:#2F4A3E;--fd:#213631;--fl:#3d6150;--moss:#6B7D52;--mp:#DCE3CC;--paper:#F5F7F4;--ink:#232A20;--is:#5B6152;--line:#E2E6DF;--ora:#B5502D;--ok:#3F7A4F;}
 body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe UI",system-ui,sans-serif;}
@@ -73,6 +74,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" id="nl-cfg" onclick="go('configs',this)" style="display:none"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
   <span class="nl" id="nl-draw" onclick="go('draw',this);loadDraw()" style="display:none"><i class="bi bi-boxes me-1"></i>Inventory Draw</span>
   <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
+  <span class="nl" id="nl-routing" style="display:none" onclick="go('routing',this)"><i class="bi bi-geo-alt me-1"></i>Routing</span>
   <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
   <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
 </nav>
@@ -265,6 +267,30 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   </div>
 </div></div>
 
+<!-- ROUTING MAP -->
+<div id="screen-routing" class="screen" style="height:calc(100vh - 114px)">
+  <div style="display:flex;height:100%;gap:0">
+    <!-- Loads sidebar -->
+    <div id="rt-sidebar" style="width:280px;min-width:240px;border-right:1px solid var(--line);overflow-y:auto;padding:1rem;flex-shrink:0">
+      <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.75rem"><i class="bi bi-truck me-1"></i>Loads</div>
+      <div id="rt-load-list" style="font-size:12px;color:var(--is)">No run loaded. Generate orders first.</div>
+    </div>
+    <!-- Map -->
+    <div style="flex:1;position:relative">
+      <div id="rt-map" style="width:100%;height:100%;min-height:500px"></div>
+      <div id="rt-legend" style="position:absolute;bottom:12px;left:12px;background:rgba(255,255,255,.9);padding:8px 12px;border-radius:6px;font-size:11px;z-index:1000;display:none">
+        <div style="font-weight:700;margin-bottom:4px">Selected Load</div>
+        <div id="rt-legend-name" style="color:var(--fd)"></div>
+        <div id="rt-legend-detail" style="color:var(--is)"></div>
+      </div>
+      <div id="rt-geocode-bar" style="position:absolute;top:8px;right:8px;z-index:1000;display:none">
+        <button class="btn btn-sm btn-outline-secondary py-1 px-2" style="font-size:11px;background:#fff" onclick="doGeocodeRun()"><i class="bi bi-geo-alt me-1"></i>Fill Missing Coordinates</button>
+        <span id="rt-missing-badge" style="font-size:11px;color:#856404;margin-left:4px"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- STORES -->
 <div id="screen-stores" class="screen">
 <div style="display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 114px);overflow:hidden">
@@ -376,6 +402,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 <div id="tc"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 /* JIM Deluxe - Complete JS - ASCII only - single block */
 var B='', DH={'X-Dev-Key':'jim-dev-2026','Content-Type':'application/json'};
@@ -398,6 +425,7 @@ function go(n,el){
   document.querySelectorAll('.nl').forEach(function(l){l.classList.remove('active');});
   var s=document.getElementById('screen-'+n);if(s)s.classList.add('active');
   var nav=el?(el.closest('.nl')||el):null;if(nav)nav.classList.add('active');
+  if(n==='routing')loadRoutingTab();
 }
 
 /* TOAST */
@@ -493,6 +521,8 @@ function doClearBatch(){
   var psb=document.getElementById('psb');if(psb)psb.disabled=true;
   var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='none';
   var nld=document.getElementById('nl-draw');if(nld)nld.style.display='none';
+  var nlr=document.getElementById('nl-routing');if(nlr)nlr.style.display='none';
+  _rtData=null;_rtSelLoad=null;
   drawData=null;
   setStrip(null,null);
   buildStats();buildTable();buildLoads();buildEL();
@@ -529,6 +559,7 @@ function doPoll(jid,gb,gs,retries){
         document.getElementById('rb').style.display='block';
         var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='flex';
         var nld=document.getElementById('nl-draw');if(nld)nld.style.display='flex';
+        var nlr=document.getElementById('nl-routing');if(nlr)nlr.style.display='flex';
         var fb=document.getElementById('fb');if(fb)fb.disabled=false;
         var psb=document.getElementById('psb');if(psb)psb.disabled=false;
         setStrip(wk,null,'Draft Plan');
@@ -1479,6 +1510,7 @@ async function doFinalizeWeek(){
     var ap=document.getElementById('ap');if(ap)ap.style.display='none';
     var uz=document.getElementById('uz');if(uz)uz.style.display='block';
     var nlc=document.getElementById('nl-cfg');if(nlc)nlc.style.display='none';
+    var nlr2=document.getElementById('nl-routing');if(nlr2)nlr2.style.display='none';
     setStrip(null,null);
     var histTab=Array.from(document.querySelectorAll('.nl')).find(function(el){return el.textContent.trim().includes('Order History');});
     go('history',histTab);
@@ -1506,6 +1538,148 @@ async function doHistExport(runId){
     a.click();URL.revokeObjectURL(u);
     toast('Downloaded','ok');
   }catch(e){toast('Export failed: '+e.message,'err');}
+}
+
+/* ROUTING MAP */
+var _rtMap=null,_rtMarkers={},_rtLines=[],_rtData=null,_rtSelLoad=null;
+var RT_COLORS=['#e63946','#2a9d8f','#e9c46a','#f4a261','#264653','#8ecae6','#219ebc','#fb8500','#023047','#ffb703','#606c38','#283618'];
+
+function _initRtMap(){
+  if(_rtMap)return;
+  _rtMap=L.map('rt-map',{center:[38,-96],zoom:4});
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    attribution:'© OpenStreetMap contributors',maxZoom:18
+  }).addTo(_rtMap);
+}
+
+function _clearRtLayers(){
+  _rtLines.forEach(function(l){_rtMap.removeLayer(l);});
+  _rtLines=[];
+  Object.values(_rtMarkers).forEach(function(m){_rtMap.removeLayer(m);});
+  _rtMarkers={};
+}
+
+function _mkIcon(color,size){
+  size=size||8;
+  return L.divIcon({
+    className:'',
+    html:'<div style="width:'+size+'px;height:'+size+'px;border-radius:50%;background:'+color+';border:2px solid rgba(0,0,0,.35);"></div>',
+    iconSize:[size,size],iconAnchor:[size/2,size/2]
+  });
+}
+
+function rtRenderAll(){
+  if(!_rtData||!_rtMap)return;
+  _clearRtLayers();
+  var stores=_rtData.stores;
+  // Show all stores as small gray dots
+  Object.values(stores).forEach(function(s){
+    if(!s.lat||!s.lng)return;
+    var m=L.marker([s.lat,s.lng],{icon:_mkIcon('#9ca3af',7)});
+    m.bindTooltip('<strong>'+s.store_id+'</strong> '+s.store_name+'<br>'+s.city+', '+s.state,{direction:'top'});
+    m.addTo(_rtMap);
+    _rtMarkers[s.store_id]=m;
+  });
+}
+
+function rtSelectLoad(loadIdx){
+  _rtSelLoad=loadIdx;
+  if(!_rtData||!_rtMap)return;
+  _clearRtLayers();
+  var stores=_rtData.stores;
+  var load=_rtData.loads[loadIdx];
+  var color=RT_COLORS[loadIdx%RT_COLORS.length];
+
+  // All stores gray first
+  Object.values(stores).forEach(function(s){
+    if(!s.lat||!s.lng)return;
+    var m=L.marker([s.lat,s.lng],{icon:_mkIcon('#d1d5db',6)});
+    m.bindTooltip('<strong>'+s.store_id+'</strong> '+s.store_name+'<br>'+s.city+', '+s.state,{direction:'top'});
+    m.addTo(_rtMap);
+    _rtMarkers[s.store_id]=m;
+  });
+
+  // Highlight this load's stores and draw path
+  var coords=[];
+  (load.store_ids||[]).forEach(function(sid){
+    var s=stores[String(sid)];
+    if(!s||!s.lat||!s.lng)return;
+    coords.push([s.lat,s.lng]);
+    if(_rtMarkers[sid])_rtMap.removeLayer(_rtMarkers[sid]);
+    var m=L.marker([s.lat,s.lng],{icon:_mkIcon(color,11),zIndexOffset:1000});
+    m.bindTooltip('<strong>'+sid+'</strong> '+s.store_name+'<br>'+s.city+', '+s.state,{direction:'top'});
+    m.addTo(_rtMap);
+    _rtMarkers[sid]=m;
+  });
+
+  if(coords.length>1){
+    var line=L.polyline(coords,{color:color,weight:2,opacity:0.7,dashArray:'4 4'});
+    line.addTo(_rtMap);
+    _rtLines.push(line);
+    _rtMap.fitBounds(line.getBounds().pad(0.15));
+  } else if(coords.length===1){
+    _rtMap.setView(coords[0],7);
+  }
+
+  // Update legend
+  var leg=document.getElementById('rt-legend');
+  var ln=document.getElementById('rt-legend-name');
+  var ld=document.getElementById('rt-legend-detail');
+  if(leg){leg.style.display='block';leg.style.borderLeft='4px solid '+color;}
+  if(ln)ln.textContent=load.load_name||('Load '+loadIdx);
+  if(ld)ld.textContent=(load.store_count||0)+' stores \xb7 '+(load.cart_count||0)+' carts \xb7 '+(load.region||'');
+
+  // Sidebar highlight
+  document.querySelectorAll('.rt-load-item').forEach(function(el,i){
+    el.style.background=i===loadIdx?'rgba(99,102,241,.1)':'';
+    el.style.borderLeft=i===loadIdx?'3px solid '+color:'3px solid transparent';
+  });
+}
+
+function rtRenderSidebar(){
+  var el=document.getElementById('rt-load-list');
+  if(!_rtData||!_rtData.loads||!_rtData.loads.length){
+    if(el)el.innerHTML='<span style="color:var(--is)">No loads. Generate orders first.</span>';
+    return;
+  }
+  if(el)el.innerHTML=_rtData.loads.map(function(l,i){
+    var color=RT_COLORS[i%RT_COLORS.length];
+    return '<div class="rt-load-item" onclick="rtSelectLoad('+i+')" style="padding:8px;border-radius:6px;cursor:pointer;margin-bottom:4px;border-left:3px solid transparent;transition:.15s">'
+      +'<div style="font-weight:700;color:var(--fd)">'+(l.load_name||'Load '+i)+'</div>'
+      +'<div style="color:var(--is);margin-top:2px">'+(l.store_count||0)+' stores \xb7 '+(l.cart_count||0)+' carts</div>'
+      +'<div style="color:var(--is)">'+(l.region||'')+(l.merchant?' \xb7 '+l.merchant:'')+'</div>'
+      +'</div>';
+  }).join('');
+}
+
+async function loadRoutingTab(){
+  if(!rId)return;
+  _initRtMap();
+  setTimeout(function(){if(_rtMap)_rtMap.invalidateSize();},100);
+  try{
+    _rtData=await api('/api/routing/run/'+rId);
+    rtRenderSidebar();
+    rtRenderAll();
+    var mb=document.getElementById('rt-missing-badge');
+    var gb=document.getElementById('rt-geocode-bar');
+    if(_rtData.stores_missing_coords>0){
+      if(mb)mb.textContent=_rtData.stores_missing_coords+' stores missing coords';
+      if(gb)gb.style.display='block';
+    } else {
+      if(gb)gb.style.display='none';
+    }
+  }catch(e){toast('Could not load routing data','err');}
+}
+
+async function doGeocodeRun(){
+  var btn=document.querySelector('#rt-geocode-bar button');
+  if(btn){btn.disabled=true;btn.textContent='Geocoding...';}
+  try{
+    var r=await api('/api/routing/geocode-batch',{method:'POST'});
+    toast('Geocoded '+r.geocoded+' locations. '+r.remaining+' remaining.','ok');
+    await loadRoutingTab();
+  }catch(e){toast('Geocode failed: '+e.message,'err');}
+  finally{if(btn){btn.disabled=false;btn.innerHTML='<i class="bi bi-geo-alt me-1"></i>Fill Missing Coordinates';}}
 }
 </script>
 </body>

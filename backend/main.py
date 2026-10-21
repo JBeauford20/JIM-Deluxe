@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from db import init_pool
-from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations, in_transit, store_status
+from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations, in_transit, store_status, routing
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,7 +33,7 @@ _allowed_origins = [o.strip() for o in _raw_origins.split(",")] if _raw_origins 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -47,6 +47,7 @@ app.include_router(exports.router,         prefix="/api/exports",      tags=["Ex
 app.include_router(ai_explanations.router, prefix="/api/ai",           tags=["AI"])
 app.include_router(in_transit.router,      prefix="/api/in-transit",   tags=["InTransit"])
 app.include_router(store_status.router,    prefix="/api/store-status", tags=["StoreStatus"])
+app.include_router(routing.router,         prefix="/api/routing",      tags=["Routing"])
 
 @app.get("/api/health")
 def health():
