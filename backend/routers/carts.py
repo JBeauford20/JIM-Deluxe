@@ -32,7 +32,7 @@ class MoveShelfRequest(BaseModel):
 
 def get_shelf_config(cur, profile_id: str) -> dict:
     cur.execute("""
-        SELECT units_per_shelf, max_shelves, units_per_cart
+        SELECT units_per_shelf, units_per_tray, trays_per_shelf, max_shelves, units_per_cart
         FROM shelf_configurations
         WHERE profile_id = %s AND cart_type_id = 'cc' AND approved = true
     """, (profile_id,))
@@ -158,8 +158,9 @@ def add_trays(
         # Get profile, config, and compute units for this shelf
         profile_id = get_sku_profile(cur, req.sku_id)
         cfg = get_shelf_config(cur, profile_id)
-        cur.execute("SELECT units_per_tray FROM packing_profiles WHERE id = %s", (profile_id,))
-        units_per_tray = cur.fetchone()["units_per_tray"]
+        units_per_tray = cfg["units_per_tray"] or cfg["trays_per_shelf"] or 1
+        if not units_per_tray:
+            raise HTTPException(400, f"No units_per_tray configured for profile {profile_id}")
         units = req.tray_count * units_per_tray
 
         # Check availability — availability_line_id strongly recommended to prevent double-spend
