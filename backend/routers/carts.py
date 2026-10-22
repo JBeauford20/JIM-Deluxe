@@ -164,9 +164,13 @@ def add_trays(
 
         # Check availability — availability_line_id strongly recommended to prevent double-spend
         if req.availability_line_id:
+            # Lock the underlying row (FOR UPDATE on aggregate views is illegal in PostgreSQL)
+            cur.execute("""
+                SELECT id FROM availability_lines WHERE id = %s FOR UPDATE
+            """, (req.availability_line_id,))
             cur.execute("""
                 SELECT remaining FROM availability_remaining
-                WHERE availability_line_id = %s FOR UPDATE
+                WHERE availability_line_id = %s
             """, (req.availability_line_id,))
             avail = cur.fetchone()
             if not avail or avail["remaining"] < units:
