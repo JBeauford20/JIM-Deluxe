@@ -198,18 +198,12 @@ def get_template_inventory(template_id: str, user=Depends(get_current_user)):
                    sk.description,
                    sk.family,
                    sk.legacy_product_group
-            FROM availability_remaining ar
-            JOIN recommendation_runs rr ON rr.batch_id = ar.batch_id
-            JOIN cart_config_templates t ON t.run_id = rr.id
-            JOIN availability_lines al
-                   ON al.availability_line_id = ar.availability_line_id
+            FROM cart_config_templates t
+            JOIN recommendation_runs rr ON rr.id = t.run_id
+            JOIN availability_remaining ar ON ar.batch_id = rr.batch_id
+            JOIN availability_lines al ON al.id = ar.availability_line_id
             JOIN skus sk ON sk.sku_id = ar.sku_id
             WHERE t.id = %s
-              AND ar.batch_id = rr.batch_id
-            GROUP BY ar.availability_line_id, ar.sku_id, ar.units_available,
-                     ar.remaining, ar.draft_reserved, ar.approved_reserved,
-                     al.code_level, al.hard_good_type,
-                     sk.description, sk.family, sk.legacy_product_group
             ORDER BY sk.family, ar.units_available DESC
         """, (template_id,))
         return cur.fetchall()

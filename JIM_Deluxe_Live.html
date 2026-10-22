@@ -1001,10 +1001,9 @@ async function loadCfgs(){
   try{
     _ceTemplates=await api('/api/config-editor/run/'+rId);
     ceRenderList();
-    // Also load inventory pool for this run's batch
-    if(_ceTemplates.length>0){
-      ceLoadInventory(_ceTemplates[0].id);
-    }
+    // Load inventory pool — use template if available, else fall back to batch direct
+    if(_ceTemplates.length>0){ceLoadInventory(_ceTemplates[0].id);}
+    else if(bId){ceLoadInventoryDirect();}
   }catch(e){if(el)el.innerHTML='<span style="font-size:12px;color:#C00000">'+e.message+'</span>';}
 }
 
@@ -1081,6 +1080,17 @@ async function ceLoadInventory(tid){
   if(el)el.innerHTML='<span style="font-size:11px;color:var(--is)">Loading...</span>';
   try{
     _ceInvData=await api('/api/config-editor/templates/'+tid+'/inventory');
+    if(!_ceInvData||!_ceInvData.length){ceLoadInventoryDirect();return;}
+    ceRenderInventory();
+  }catch(e){ceLoadInventoryDirect();}
+}
+
+async function ceLoadInventoryDirect(){
+  var el=document.getElementById('ce-inv-body');
+  if(!bId){if(el)el.innerHTML='<span style="font-size:11px;color:var(--is)">No batch loaded.</span>';return;}
+  try{
+    var r=await api('/api/orders/runs/'+rId+'/availability/'+bId);
+    _ceInvData=Array.isArray(r)?r:(r.lines||[]);
     ceRenderInventory();
   }catch(e){if(el)el.innerHTML='<span style="font-size:11px;color:#C00000">'+e.message+'</span>';}
 }
