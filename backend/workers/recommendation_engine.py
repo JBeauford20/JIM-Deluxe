@@ -1039,6 +1039,60 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         log(f"  Diversity fix: reassigned CC codes for {diversity_fixes} stores "
             f"(2-cart: 2 unique codes, 3-cart: ≥2 unique codes)")
 
+    # ── STAGE 4.7: WRITE CART CONFIG TEMPLATES ───────────────────
+    # Build template structures from the consolidated cart config codes.
+    # One template per unique CC code — stores the shelf recipe once.
+    # All physical carts reference their template via template_id.
+    log(f"\nStage 4.7: Building cart config templates...")
+
+    # Group carts by config_code to build templates
+    # Structure: {config_code: {shelves: {shelf_pos: {profile_id, units_per_shelf, tray_count,
+    #   varieties: [(sku_id, avail_line_id, trays, units)]}}, cart_count, store_count, total_units}}
+    template_map = {}  # config_code → template data
+
+    for store_id, order_data in all_orders.items():
+        for cart_idx, cart in enumerate(order_data['carts']):
+            cc = cart_config_codes.get((store_id, cart_idx), 'CC1')
+            if cc not in template_map:
+                template_map[cc] = {
+                    'cart_count': 0,
+                    'store_ids': set(),
+                    'total_units': 0,
+                    'shelves': {},  # shelf_pos → {profile_id, total_units, total_trays, varieties}
+                }
+            t = template_map[cc]
+            t['cart_count'] += 1
+            t['store_ids'].add(store_id)
+            t['total_units'] += cart['total_units']
+
+            # Build shelf recipe from first cart seen for this CC code
+            # (all carts with same CC code have identical content by definition)
+            if not t['shelves']:
+                shelf_contents = {}
+                for shelf_pos, sku_id, tray_count, unit_count, kit_type, profile_id \
+                        in cart['contents']:
+                    if shelf_pos not in shelf_contents:
+                        shelf_contents[shelf_pos] = {
+                            'profile_id':  profile_id,
+                            'total_trays': 0,
+                            'total_units': 0,
+                            'varieties':   []
+                        }
+                    shelf_contents[shelf_pos]['total_trays'] += tray_count
+                    shelf_contents[shelf_pos]['total_units'] += unit_count
+                    # avail_line_id resolved during DB write via sku_avail_line_map
+                    shelf_contents[shelf_pos]['varieties'].append({
+                        'sku_id':    sku_id,
+                        'tray_count': tray_count,
+                        'unit_count': unit_count,
+                    })
+                t['shelves'] = shelf_contents
+
+    log(f"  {len(template_map)} unique CC templates built")
+    for cc, t in sorted(template_map.items()):
+        log(f"  {cc}: {t['cart_count']} carts, {len(t['store_ids'])} stores, "
+            f"{t['total_units']} units, {len(t['shelves'])} shelves")
+
     # ── STAGE 5: BUILD LOADS ──────────────────────────────────
     log("\nStage 5: Building truck loads...")
 
@@ -1251,6 +1305,87 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     """, line_rows, page_size=500)
 
     log(f"  {len(cart_rows)} carts | {len(shelf_rows)} shelves | {len(line_rows)} order lines")
+
+    # ── WRITE CART CONFIG TEMPLATES ──────────────────────────────
+    log("  Writing cart config templates...")
+
+    # Fetch availability line IDs for sku_id → avail_line lookup
+    cur.execute("""
+        SELECT id, sku_id FROM availability_lines WHERE batch_id = %s
+    """, (batch_id,))
+    sku_avail_line_map = {r['sku_id']: str(r['id']) for r in cur.fetchall()}
+
+    template_id_map = {}  # config_code → template UUID
+
+    for cc, t in template_map.items():
+        tmpl_id     = str(uuid.uuid4())
+        store_count = len(t['store_ids'])
+
+        cur.execute("""
+            INSERT INTO cart_config_templates
+                (id, run_id, config_code, cart_count, store_count, total_units)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, config_code) DO UPDATE
+                SET cart_count  = EXCLUDED.cart_count,
+                    store_count = EXCLUDED.store_count,
+                    total_units = EXCLUDED.total_units,
+                    updated_at  = now()
+            RETURNING id
+        """, (tmpl_id, str(run_id), cc, t['cart_count'], store_count, t['total_units']))
+        row = cur.fetchone()
+        if row:
+            tmpl_id = str(row['id'])
+        template_id_map[cc] = tmpl_id
+
+        # Write shelves
+        for shelf_pos, shelf_data in sorted(t['shelves'].items()):
+            shelf_id = str(uuid.uuid4())
+            cur.execute("""
+                INSERT INTO cart_config_template_shelves
+                    (id, template_id, shelf_position, profile_id, units_per_shelf, tray_count)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (
+                shelf_id, tmpl_id, shelf_pos,
+                shelf_data['profile_id'],
+                shelf_data['total_units'],
+                shelf_data['total_trays'],
+            ))
+
+            # Write varieties
+            for sort_idx, v in enumerate(shelf_data['varieties']):
+                avail_line_id = sku_avail_line_map.get(int(v['sku_id']))
+                cur.execute("""
+                    INSERT INTO cart_config_template_varieties
+                        (shelf_id, availability_line_id, sku_id, tray_count, unit_count, sort_order)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    shelf_id,
+                    avail_line_id,
+                    int(v['sku_id']),
+                    v['tray_count'],
+                    v['unit_count'],
+                    sort_idx,
+                ))
+
+    # Update order_carts.template_id for every cart
+    for store_id, order_data in all_orders.items():
+        order_id = order_id_map.get(store_id)
+        if not order_id:
+            continue
+        for cart_idx, cart in enumerate(order_data['carts']):
+            cc      = cart_config_codes.get((store_id, cart_idx), 'CC1')
+            tmpl_id = template_id_map.get(cc)
+            if tmpl_id:
+                cart_id = cart_id_map.get((store_id, cart['cart_number']))
+                if cart_id:
+                    cur.execute(
+                        "UPDATE order_carts SET template_id = %s WHERE id = %s",
+                        (tmpl_id, cart_id)
+                    )
+
+    log(f"  {len(template_id_map)} templates written with shelves and varieties")
 
     # Loads + assignments
     load_id_map = {}
