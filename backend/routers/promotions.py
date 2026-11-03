@@ -46,8 +46,10 @@ class PromotionPatch(BaseModel):
     sku_ids:     Optional[List[int]] = None
 
 
-def _metrics(cur, regions, sku_ids, start_date):
-    """Compute scope / landed / in_transit / left (+ per-division breakdown)."""
+def _metrics(cur, pid, regions, sku_ids, start_date):
+    """Compute scope / landed / in_transit / left (+ per-division breakdown).
+    in_transit counts only in-transit loads TAGGED to this promotion (promotion_id),
+    so an everyday load to a store never checks off its promo status."""
     nationwide = (not regions) or ('ALL' in regions)
     if nationwide:
         cur.execute("""
@@ -81,9 +83,10 @@ def _metrics(cur, regions, sku_ids, start_date):
         cur.execute("""
             SELECT DISTINCT store_id FROM in_transit_loads
             WHERE store_id = ANY(%s)
+              AND promotion_id = %s
               AND (shipping_week >= CURRENT_DATE - INTERVAL '45 days'
                    OR delivery_date >= CURRENT_DATE - INTERVAL '7 days')
-        """, (scope_ids,))
+        """, (scope_ids, pid))
         in_transit = {r["store_id"] for r in cur.fetchall()} & set(scope_ids)
     in_transit -= landed
     left = set(scope_ids) - landed - in_transit
@@ -127,7 +130,7 @@ def list_promotions(user=Depends(get_current_user)):
         out = []
         for p in promos:
             p["sku_ids"] = sk.get(p["id"], [])
-            p["metrics"] = _metrics(cur, p["regions"], p["sku_ids"], p["start_date"])
+            p["metrics"] = _metrics(cur, p["id"], p["regions"], p["sku_ids"], p["start_date"])
             out.append(p)
         return out
 
@@ -150,7 +153,7 @@ def get_promotion(pid: int, user=Depends(get_current_user)):
     with get_db() as conn:
         cur = cursor(conn)
         p = _load_promo(cur, pid)
-        p["metrics"] = _metrics(cur, p["regions"], p["sku_ids"], p["start_date"])
+        p["metrics"] = _metrics(cur, p["id"], p["regions"], p["sku_ids"], p["start_date"])
         if p["sku_ids"]:
             cur.execute("SELECT sku_id, description, family FROM skus WHERE sku_id = ANY(%s)", (p["sku_ids"],))
             p["skus"] = cur.fetchall()

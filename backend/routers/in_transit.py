@@ -63,6 +63,7 @@ def _parse_rows(raw_rows: list) -> list:
     cart_col  = _detect_col(header, ['sum of carts', 'carts', 'cart_count', 'sum of cart'])
     date_col  = _detect_col(header, ['delivery date', 'deliv date', 'del date',
                                      'delivery', 'ship date', 'arrival', 'date'])
+    promo_col = _detect_col(header, ['promotion', 'promo'])
 
     if store_col is None or (cart_col is None and date_col is None):
         raise ValueError("Need a 'Store' column and either a 'Delivery Date' or a "
@@ -84,8 +85,9 @@ def _parse_rows(raw_rows: list) -> list:
                 carts = None
         ddate = _parse_date(r[date_col]) if (date_col is not None and date_col < len(r)) else None
         vol = str(r[vol_col]).strip() if vol_col is not None and vol_col < len(r) and r[vol_col] else ''
+        promo = (str(r[promo_col]).strip() if promo_col is not None and promo_col < len(r) and r[promo_col] else '')
         if store_id > 0 and ((carts and carts > 0) or ddate is not None):
-            parsed.append((store_id, vol, carts, ddate))
+            parsed.append((store_id, vol, carts, ddate, promo))
     return parsed
 
 
@@ -192,11 +194,25 @@ async def upload_in_transit(
     try:
         with get_db() as conn:
             cur = cursor(conn)
-            store_ids = [s for s, _, _, _ in parsed]
+            store_ids = [s for s, _, _, _, _ in parsed]
             cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s)", (store_ids,))
             valid = {r["store_id"] for r in cur.fetchall()}
-            filtered = [(s, v, c, d) for s, v, c, d in parsed if s in valid]
+            filtered = [(s, v, c, d, pr) for s, v, c, d, pr in parsed if s in valid]
             skipped = len(parsed) - len(filtered)
+
+            # Resolve the Promotion column to a promotion_id (0 = untagged/general).
+            # Fuzzy, case-insensitive: a file value of "Holiday" matches "Holiday 2026".
+            cur.execute("SELECT id, lower(name) AS nm FROM promotions")
+            promos = cur.fetchall()
+            def resolve_promo(val):
+                if not val:
+                    return 0
+                v = val.lower().strip()
+                for p in promos:
+                    if v == p["nm"] or v in p["nm"] or p["nm"] in v:
+                        return p["id"]
+                return 0
+            unmatched_promos = sorted({pr for _, _, _, _, pr in filtered if pr and resolve_promo(pr) == 0})
 
             # Replace this week's data
             cur.execute("DELETE FROM in_transit_loads WHERE shipping_week = %s", (week,))
@@ -204,13 +220,16 @@ async def upload_in_transit(
 
             if filtered:
                 email = user.get("email", "system") if isinstance(user, dict) else "system"
-                # Deduplicate by store_id — sum real cart counts; keep a delivery date.
+                # Deduplicate by (store_id, promotion_id) — a store can be in-transit for
+                # more than one promo in a week (e.g. holiday + Black Friday on one truck).
                 deduped: dict = {}
-                for s, v, c, d in filtered:
-                    if s not in deduped:
-                        deduped[s] = {"vol": v, "carts": c, "date": d}
+                for s, v, c, d, pr in filtered:
+                    pid = resolve_promo(pr)
+                    key = (s, pid)
+                    if key not in deduped:
+                        deduped[key] = {"vol": v, "carts": c, "date": d}
                     else:
-                        e = deduped[s]
+                        e = deduped[key]
                         if c:
                             e["carts"] = (e["carts"] or 0) + c
                         if v and not e["vol"]:
@@ -218,13 +237,13 @@ async def upload_in_transit(
                         if d and not e["date"]:
                             e["date"] = d
                 # cart_count is NOT NULL — default to 2 when only a delivery date was given
-                rows = [(s, week, (e["carts"] if e["carts"] else 2), e["vol"], e["date"], email)
-                        for s, e in deduped.items()]
+                rows = [(s, week, (e["carts"] if e["carts"] else 2), e["vol"], e["date"], pid, email)
+                        for (s, pid), e in deduped.items()]
                 psycopg2.extras.execute_values(cur, """
                     INSERT INTO in_transit_loads
-                        (store_id, shipping_week, cart_count, vol_code, delivery_date, uploaded_by)
+                        (store_id, shipping_week, cart_count, vol_code, delivery_date, promotion_id, uploaded_by)
                     VALUES %s
-                    ON CONFLICT (store_id, shipping_week) DO UPDATE
+                    ON CONFLICT (store_id, shipping_week, promotion_id) DO UPDATE
                         SET cart_count    = EXCLUDED.cart_count,
                             vol_code      = EXCLUDED.vol_code,
                             delivery_date = EXCLUDED.delivery_date,
@@ -241,6 +260,7 @@ async def upload_in_transit(
         "stores_loaded": len(filtered),
         "stores_skipped": skipped,
         "prior_records_replaced": deleted,
+        "unmatched_promotions": unmatched_promos,
     }
 
 
