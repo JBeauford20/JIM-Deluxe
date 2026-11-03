@@ -74,6 +74,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" id="nl-cfg" onclick="go('configs',this)" style="display:none"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
   <span class="nl" id="nl-draw" onclick="go('draw',this);loadDraw()" style="display:none"><i class="bi bi-boxes me-1"></i>Inventory Draw</span>
   <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
+  <span class="nl" onclick="go('promos',this);loadPromos()"><i class="bi bi-megaphone me-1"></i>Promotions</span>
   <span class="nl" id="nl-routing" style="display:none" onclick="go('routing',this)"><i class="bi bi-geo-alt me-1"></i>Routing</span>
   <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
   <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
@@ -343,7 +344,45 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <div id="hist-detail-view" style="display:none"></div>
 </div>
 
+<!-- PROMOTIONS -->
+<div id="screen-promos" class="screen">
+  <div class="p-4">
+    <div class="d-flex align-items-center mb-3">
+      <h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-megaphone me-2"></i>Promotions</h5>
+      <button class="btn btn-sm btn-cta ms-auto" onclick="openAddPromo()"><i class="bi bi-plus-lg me-1"></i>Add Promotion</button>
+    </div>
+    <div class="row g-3" id="promo-list"><div class="text-muted p-2" style="font-size:13px">Loading…</div></div>
+    <div id="promo-detail" class="mt-4"></div>
+  </div>
+</div>
+
 <!-- MODALS -->
+<div class="modal fade" id="promoM" tabindex="-1"><div class="modal-dialog modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
+  <div class="modal-header"><h5 class="modal-title"><i class="bi bi-megaphone me-2"></i><span id="promoMT">Add Promotion</span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body">
+    <input type="hidden" id="pm-id">
+    <div class="mb-2"><label class="form-label" style="font-size:13px;font-weight:600">Name <span class="text-danger">*</span></label><input class="form-control form-control-sm" id="pm-name" placeholder="e.g. Holiday 2026"></div>
+    <div class="mb-2"><label class="form-label" style="font-size:13px;font-weight:600">Description</label><input class="form-control form-control-sm" id="pm-desc" placeholder="short description"></div>
+    <div class="mb-2"><label class="form-label" style="font-size:13px;font-weight:600">Regions</label>
+      <div style="font-size:13px"><label class="me-3"><input type="checkbox" id="pm-r-all" onchange="pmAllToggle()"> Nationwide</label>
+      <label class="me-3"><input type="checkbox" class="pm-reg" value="North"> North</label>
+      <label class="me-3"><input type="checkbox" class="pm-reg" value="South"> South</label>
+      <label class="me-3"><input type="checkbox" class="pm-reg" value="West"> West</label></div>
+    </div>
+    <div class="row g-2 mb-2">
+      <div class="col"><label class="form-label" style="font-size:13px;font-weight:600">Start date</label><input type="date" class="form-control form-control-sm" id="pm-start"></div>
+      <div class="col"><label class="form-label" style="font-size:13px;font-weight:600">End date</label><input type="date" class="form-control form-control-sm" id="pm-end"></div>
+    </div>
+    <div class="mb-2"><label class="form-check" style="font-size:13px"><input type="checkbox" id="pm-active"> <b>Active</b> — actively shipping now (engine front-loads these stores)</label></div>
+    <div class="mb-1"><label class="form-label" style="font-size:13px;font-weight:600">Promo SKUs</label>
+      <input class="form-control form-control-sm mb-1" id="pm-sku-search" placeholder="search SKU / description…" oninput="pmRenderSkuPicker()">
+      <div id="pm-sku-picker" style="max-height:170px;overflow-y:auto;border:1px solid var(--line);border-radius:4px"></div>
+    </div>
+  </div>
+  <div class="modal-footer"><div id="pm-val" style="flex:1;font-size:12px;color:#C00000"></div>
+    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+    <button type="button" class="btn btn-cta" onclick="savePromo()"><i class="bi bi-check-circle me-1"></i>Save</button></div>
+</div></div></div>
 <div class="modal fade" id="aiM" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
   <div class="modal-header"><h5 class="modal-title" id="aiMT"><i class="bi bi-stars me-2"></i>AI Explanation</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
   <div class="modal-body" id="aiMB" style="font-size:14px;line-height:1.7"></div>
@@ -2024,6 +2063,92 @@ async function doGeocodeRun(){
     await loadRoutingTab();
   }catch(e){toast('Geocode failed: '+e.message,'err');}
   finally{if(btn){btn.disabled=false;btn.innerHTML='<i class="bi bi-geo-alt me-1"></i>Fill Missing Coordinates';}}
+}
+
+/* ── PROMOTIONS ─────────────────────────────────────────── */
+var _promos=[], _promoSkus=[], _pmSelSkus=new Set();
+function pmMod(){return bootstrap.Modal.getOrCreateInstance(document.getElementById('promoM'));}
+function pctOf(n,d){return d?Math.round(n/d*100):0;}
+function fmtD(d){if(!d)return '—';var p=String(d).slice(0,10).split('-');return p.length===3?(p[1]+'.'+p[2]+'.'+p[0]):d;}
+
+async function loadPromos(){
+  try{_promos=await api('/api/promotions/');}catch(e){_promos=[];}
+  renderPromos();
+}
+function renderPromos(){
+  var el=document.getElementById('promo-list');if(!el)return;
+  if(!_promos.length){el.innerHTML='<div class="text-muted p-2" style="font-size:13px">No promotions yet. Click "Add Promotion".</div>';return;}
+  el.innerHTML=_promos.map(function(p){
+    var m=p.metrics||{scope:0,landed:0,in_transit:0,left:0};
+    var reg=(p.regions||[]).indexOf('ALL')>=0?'Nationwide':(p.regions||[]).join(', ');
+    return '<div class="col-md-6 col-lg-4"><div class="card h-100" style="cursor:pointer" onclick="openPromo('+p.id+')"><div class="card-body">'
+      +'<div class="d-flex align-items-start"><div><div style="font-weight:700">'+escH(p.name)+'</div>'
+      +'<div style="font-size:11px;color:var(--is)"><i class="bi bi-geo me-1"></i>'+escH(reg)+' · '+fmtD(p.start_date)+'–'+fmtD(p.end_date)+'</div></div>'
+      +'<div class="form-check form-switch ms-auto" onclick="event.stopPropagation()"><input class="form-check-input" type="checkbox" '+(p.is_active?'checked':'')+' onchange="toggleActivePromo('+p.id+',this.checked)" title="Active (engine front-loads these stores)"></div></div>'
+      +'<div class="progress mt-2" style="height:8px"><div class="progress-bar bg-success" style="width:'+pctOf(m.landed,m.scope)+'%"></div><div class="progress-bar bg-warning" style="width:'+pctOf(m.in_transit,m.scope)+'%"></div></div>'
+      +'<div style="font-size:11px;color:var(--is);margin-top:4px">'+fmt(m.landed)+' landed · '+fmt(m.in_transit)+' in transit · <b>'+fmt(m.left)+' left</b> of '+fmt(m.scope)+'</div>'
+      +'<div class="mt-2"><span class="badge '+(p.is_active?'bg-success':'bg-secondary')+'" style="font-size:10px">'+(p.is_active?'ACTIVE':'inactive')+'</span>'
+      +'<button class="btn btn-sm btn-link p-0 ms-2" style="font-size:11px" onclick="event.stopPropagation();editPromo('+p.id+')">edit</button></div>'
+      +'</div></div></div>';
+  }).join('');
+}
+async function openPromo(id){
+  var p; try{p=await api('/api/promotions/'+id);}catch(e){toast('Load failed','err');return;}
+  var m=p.metrics||{scope:0,landed:0,in_transit:0,left:0};
+  var reg=(p.regions||[]).indexOf('ALL')>=0?'Nationwide':(p.regions||[]).join(', ');
+  function tile(lab,val,sub,color){return '<div class="col"><div class="card"><div class="card-body text-center py-3"><div style="font-size:30px;font-weight:700;color:'+color+'">'+fmt(val)+'</div><div style="font-size:12px;font-weight:600">'+lab+'</div><div style="font-size:11px;color:var(--is)">'+sub+'</div></div></div></div>';}
+  var bd=m.by_division||[];
+  var tbl=bd.length>1?'<table class="table jt mb-2" style="font-size:12px"><thead><tr><th>Division</th><th class="text-end">Scope</th><th class="text-end">Landed</th><th class="text-end">In Transit</th><th class="text-end">Left</th></tr></thead><tbody>'
+    +bd.map(function(d){return '<tr><td>'+escH(d.division)+'</td><td class="text-end">'+fmt(d.scope)+'</td><td class="text-end">'+fmt(d.landed)+'</td><td class="text-end">'+fmt(d.in_transit)+'</td><td class="text-end"><b>'+fmt(d.left)+'</b></td></tr>';}).join('')+'</tbody></table>':'';
+  var skus=(p.skus||[]).map(function(s){return '<span class="badge bg-light text-dark border me-1 mb-1" style="font-weight:500">'+s.sku_id+' '+escH((s.description||'').slice(0,28))+'</span>';}).join('');
+  document.getElementById('promo-detail').innerHTML='<div class="card"><div class="card-body">'
+    +'<div class="d-flex align-items-center mb-1"><h6 class="mb-0" style="color:var(--fd)">'+escH(p.name)+' <span class="badge '+(p.is_active?'bg-success':'bg-secondary')+'">'+(p.is_active?'ACTIVE':'inactive')+'</span></h6>'
+    +'<button class="btn btn-sm btn-outline-secondary ms-auto" onclick="editPromo('+p.id+')"><i class="bi bi-pencil me-1"></i>Edit</button></div>'
+    +'<div style="font-size:12px;color:var(--is);margin-bottom:12px"><i class="bi bi-geo me-1"></i>'+escH(reg)+' · '+fmtD(p.start_date)+' – '+fmtD(p.end_date)+(p.description?' · '+escH(p.description):'')+'</div>'
+    +'<div class="row g-3 mb-3">'
+    +tile('Landed',m.landed,pctOf(m.landed,m.scope)+'% of '+fmt(m.scope),'#15803d')
+    +tile('In Transit',m.in_transit,pctOf(m.in_transit,m.scope)+'% on the road','#b45309')
+    +tile('Left to Hit',m.left,pctOf(m.left,m.scope)+'% remaining','#475569')
+    +'</div>'+tbl
+    +'<div style="font-size:11px;color:var(--is);margin-top:6px"><b>Promo SKUs:</b> '+(skus||'none set')+'</div>'
+    +'</div></div>';
+  document.getElementById('promo-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function toggleActivePromo(id,val){
+  try{await api('/api/promotions/'+id,{method:'PATCH',body:JSON.stringify({is_active:val})});toast(val?'Promotion activated':'Promotion deactivated','ok');}
+  catch(e){toast('Failed','err');}
+  loadPromos();
+}
+async function ensurePromoSkus(){if(!_promoSkus.length){try{_promoSkus=await api('/api/promotions/skus');}catch(e){_promoSkus=[];}}}
+function pmReset(){document.getElementById('pm-id').value='';document.getElementById('pm-name').value='';document.getElementById('pm-desc').value='';
+  document.getElementById('pm-r-all').checked=false;document.querySelectorAll('.pm-reg').forEach(function(c){c.checked=false;c.disabled=false;});
+  document.getElementById('pm-start').value='';document.getElementById('pm-end').value='';document.getElementById('pm-active').checked=false;
+  _pmSelSkus=new Set();document.getElementById('pm-sku-search').value='';document.getElementById('pm-val').textContent='';}
+async function openAddPromo(){await ensurePromoSkus();document.getElementById('promoMT').textContent='Add Promotion';pmReset();pmRenderSkuPicker();pmMod().show();}
+async function editPromo(id){await ensurePromoSkus();var p=_promos.find(function(x){return x.id===id;});if(!p)return;
+  document.getElementById('promoMT').textContent='Edit Promotion';pmReset();
+  document.getElementById('pm-id').value=p.id;document.getElementById('pm-name').value=p.name||'';document.getElementById('pm-desc').value=p.description||'';
+  var all=(p.regions||[]).indexOf('ALL')>=0;document.getElementById('pm-r-all').checked=all;
+  document.querySelectorAll('.pm-reg').forEach(function(c){c.checked=(p.regions||[]).indexOf(c.value)>=0;c.disabled=all;});
+  document.getElementById('pm-start').value=p.start_date||'';document.getElementById('pm-end').value=p.end_date||'';document.getElementById('pm-active').checked=!!p.is_active;
+  _pmSelSkus=new Set(p.sku_ids||[]);pmRenderSkuPicker();pmMod().show();}
+function pmAllToggle(){var all=document.getElementById('pm-r-all').checked;document.querySelectorAll('.pm-reg').forEach(function(c){c.disabled=all;if(all)c.checked=false;});}
+function pmRenderSkuPicker(){var q=(document.getElementById('pm-sku-search').value||'').toLowerCase();
+  var list=_promoSkus.filter(function(s){return !q||String(s.sku_id).includes(q)||(s.description||'').toLowerCase().includes(q);}).slice(0,200);
+  document.getElementById('pm-sku-picker').innerHTML=list.map(function(s){var ck=_pmSelSkus.has(s.sku_id)?'checked':'';var hol=s.is_holiday?' <span style="color:#b45309;font-size:10px">holiday</span>':'';
+    return '<label style="display:flex;gap:6px;padding:3px 8px;font-size:12px;border-bottom:1px solid var(--line)"><input type="checkbox" '+ck+' onchange="pmToggleSku('+s.sku_id+',this.checked)"><span><b>'+s.sku_id+'</b> '+escH(s.description||'')+hol+'</span></label>';}).join('');}
+function pmToggleSku(id,ck){if(ck)_pmSelSkus.add(id);else _pmSelSkus.delete(id);}
+async function savePromo(){var name=document.getElementById('pm-name').value.trim();if(!name){document.getElementById('pm-val').textContent='Name required';return;}
+  var all=document.getElementById('pm-r-all').checked;
+  var regions=all?['ALL']:Array.from(document.querySelectorAll('.pm-reg')).filter(function(c){return c.checked;}).map(function(c){return c.value;});
+  if(!regions.length)regions=['ALL'];
+  var body={name:name,description:document.getElementById('pm-desc').value.trim()||null,regions:regions,
+    start_date:document.getElementById('pm-start').value||null,end_date:document.getElementById('pm-end').value||null,
+    is_active:document.getElementById('pm-active').checked,sku_ids:Array.from(_pmSelSkus)};
+  var id=document.getElementById('pm-id').value;
+  try{if(id){await api('/api/promotions/'+id,{method:'PATCH',body:JSON.stringify(body)});}else{await api('/api/promotions/',{method:'POST',body:JSON.stringify(body)});}
+    pmMod().hide();toast('Promotion saved','ok');loadPromos();}
+  catch(e){var msg=e.message||'error';try{var j=JSON.parse(msg);msg=j.detail||msg;}catch(x){}document.getElementById('pm-val').textContent='Failed: '+msg;}
 }
 </script>
 </body>
