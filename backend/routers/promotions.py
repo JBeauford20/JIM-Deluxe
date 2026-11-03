@@ -11,11 +11,12 @@ Metrics are data-driven:
 
 An Active promo is the signal for the engine to front-load those stores (scenario hook).
 """
-from datetime import date
+import io, os, tempfile
+from datetime import date, datetime
 from collections import defaultdict
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import BaseModel
 
 from db import get_db, cursor
@@ -24,6 +25,23 @@ from routers.auth import get_current_user, require_role
 router = APIRouter()
 
 EXCLUDED_STATUS = ('paused', 'do_not_ship', 'inactive', 'hold')
+
+
+def _parse_date(v):
+    if v is None or str(v).strip() == '':
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%m-%d-%Y",
+                "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 class PromotionInput(BaseModel):
@@ -295,3 +313,87 @@ def remove_promo_store(pid: int, store_id: int,
         cur.execute("DELETE FROM promotion_store_shipments WHERE promotion_id = %s AND store_id = %s",
                     (pid, store_id))
         return {"deleted": cur.rowcount}
+
+
+@router.post("/{pid}/stores/upload", status_code=201)
+async def upload_promo_stores(pid: int, file: UploadFile = File(...),
+                              user=Depends(require_role("order_writer", "manager", "admin"))):
+    """
+    Upload an Excel/CSV of stores that got this promo's product.
+    Columns: Store | Delivery Date. Landed vs In-Transit is deduced automatically
+    from the delivery date (past/today = landed, future = in transit) — no manual flag.
+    """
+    import pathlib
+    ext = pathlib.Path(file.filename or "").suffix.lower()
+    if ext not in ('.xlsx', '.xls', '.csv'):
+        raise HTTPException(400, "Unsupported file type. Use .xlsx or .csv")
+    contents = await file.read(20 * 1024 * 1024)
+
+    raw = []
+    if ext in ('.xlsx', '.xls'):
+        import openpyxl
+        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+        tmp.write(contents); tmp.close()
+        try:
+            wb = openpyxl.load_workbook(tmp.name, read_only=True, data_only=True)
+            raw = list(wb.active.iter_rows(values_only=True))
+            wb.close()
+        finally:
+            os.unlink(tmp.name)
+    else:
+        import csv
+        raw = list(csv.reader(io.StringIO(contents.decode('utf-8-sig', errors='replace'))))
+    if not raw:
+        raise HTTPException(400, "File is empty")
+
+    hdr_i = 0
+    for i, r in enumerate(raw[:5]):
+        if r and any(str(v or '').strip() for v in r):
+            hdr_i = i; break
+    header = [str(v or '').lower().strip() for v in raw[hdr_i]]
+    store_c = date_c = None
+    for i, h in enumerate(header):
+        if 'store' in h and store_c is None: store_c = i
+        if ('delivery' in h or 'del date' in h or 'ship date' in h or h == 'date') and date_c is None: date_c = i
+    if store_c is None:
+        raise HTTPException(400, "Need a 'Store' column.")
+
+    parsed = {}  # store_id -> delivery_date (last wins)
+    for r in raw[hdr_i + 1:]:
+        if not r or all(v is None for v in r): continue
+        try: sid = int(float(str(r[store_c] or '')))
+        except (ValueError, TypeError, IndexError): continue
+        if sid <= 0: continue
+        d = _parse_date(r[date_c]) if (date_c is not None and date_c < len(r)) else None
+        parsed[sid] = d
+    if not parsed:
+        raise HTTPException(400, "No valid store rows found.")
+
+    today = date.today()
+    email = user.get("email", "system") if isinstance(user, dict) else "system"
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT id FROM promotions WHERE id = %s", (pid,))
+        if not cur.fetchone():
+            raise HTTPException(404, "Promotion not found")
+        cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s)", (list(parsed),))
+        valid = {r["store_id"] for r in cur.fetchall()}
+        not_found = [s for s in parsed if s not in valid]
+        added = landed = in_transit = no_date = 0
+        for sid, d in parsed.items():
+            if sid not in valid: continue
+            # status is deduced from the delivery date (metrics also recompute by date)
+            st = 'landed' if (d is not None and d <= today) else 'in_transit'
+            if d is None: no_date += 1
+            elif d <= today: landed += 1
+            else: in_transit += 1
+            cur.execute("""
+                INSERT INTO promotion_store_shipments (promotion_id, store_id, status, received_date, source, added_by)
+                VALUES (%s,%s,%s,%s,'manual',%s)
+                ON CONFLICT (promotion_id, store_id) DO UPDATE
+                    SET status = EXCLUDED.status, received_date = EXCLUDED.received_date,
+                        added_by = EXCLUDED.added_by, added_at = now()
+            """, (pid, sid, st, d, email))
+            added += 1
+        return {"added": added, "landed": landed, "in_transit": in_transit,
+                "missing_date": no_date, "not_found": not_found}

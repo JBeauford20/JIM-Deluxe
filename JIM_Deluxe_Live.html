@@ -384,20 +384,16 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <button type="button" class="btn btn-cta" onclick="savePromo()"><i class="bi bi-check-circle me-1"></i>Save</button></div>
 </div></div></div>
 <div class="modal fade" id="addStoresM" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
-  <div class="modal-header"><h5 class="modal-title"><i class="bi bi-plus-circle me-2"></i>Add Stores — <span id="as2-title"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-header"><h5 class="modal-title"><i class="bi bi-upload me-2"></i>Add Stores — <span id="as2-title"></span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
   <div class="modal-body">
-    <div class="row g-2 mb-2">
-      <div class="col"><label class="form-label" style="font-size:13px;font-weight:600">Status</label>
-        <select class="form-select form-select-sm" id="as2-status"><option value="landed">Received (landed)</option><option value="in_transit">In Transit (on the road)</option></select></div>
-      <div class="col"><label class="form-label" style="font-size:13px;font-weight:600">Date (optional)</label><input type="date" class="form-control form-control-sm" id="as2-date"></div>
-    </div>
-    <label class="form-label" style="font-size:13px;font-weight:600">Store numbers</label>
-    <textarea class="form-control form-control-sm" id="as2-stores" rows="6" placeholder="Paste store numbers — any separator (comma, space, new line). e.g. 3012, 6804, 627 …"></textarea>
+    <p style="font-size:13px;margin-bottom:8px">Upload an Excel/CSV with a <b>Store</b> column and a <b>Delivery Date</b> column.</p>
+    <input type="file" class="form-control form-control-sm" id="as2-file" accept=".xlsx,.xls,.csv">
+    <div style="font-size:12px;color:var(--is);margin-top:8px"><i class="bi bi-magic me-1"></i><b>Landed vs In-Transit is set automatically from the delivery date</b> — a past/today date = landed, a future date = in transit (and flips to landed on its date as days pass).</div>
     <div style="font-size:11px;color:var(--is);margin-top:4px">Only stores in this promotion's region(s) count toward its cards.</div>
   </div>
   <div class="modal-footer"><div id="as2-val" style="flex:1;font-size:12px;color:#C00000"></div>
     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-    <button type="button" class="btn btn-cta" onclick="saveAddStores()"><i class="bi bi-check-circle me-1"></i>Add Stores</button></div>
+    <button type="button" class="btn btn-cta" onclick="uploadPromoStores()"><i class="bi bi-upload me-1"></i>Upload</button></div>
 </div></div></div>
 <div class="modal fade" id="aiM" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
   <div class="modal-header"><h5 class="modal-title" id="aiMT"><i class="bi bi-stars me-2"></i>AI Explanation</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
@@ -2153,25 +2149,27 @@ async function removePromoStore(sid){
 function openAddStores(){
   if(!_curPromo)return;
   document.getElementById('as2-title').textContent=_curPromo.name;
-  document.getElementById('as2-status').value='landed';
-  document.getElementById('as2-date').value='';
-  document.getElementById('as2-stores').value='';
+  document.getElementById('as2-file').value='';
   document.getElementById('as2-val').textContent='';
   bootstrap.Modal.getOrCreateInstance(document.getElementById('addStoresM')).show();
 }
-async function saveAddStores(){
+async function uploadPromoStores(){
   if(!_curPromo)return;
-  var raw=document.getElementById('as2-stores').value||'';
-  var ids=(raw.match(/\d{2,6}/g)||[]).map(Number);
-  if(!ids.length){document.getElementById('as2-val').textContent='Enter at least one store number';return;}
-  var body={store_ids:ids,status:document.getElementById('as2-status').value,received_date:document.getElementById('as2-date').value||null};
+  var fi=document.getElementById('as2-file');
+  if(!fi.files||!fi.files.length){document.getElementById('as2-val').textContent='Choose a file first';return;}
+  var fd=new FormData();fd.append('file',fi.files[0]);
+  document.getElementById('as2-val').textContent='Uploading…';
   try{
-    var r=await api('/api/promotions/'+_curPromo.id+'/stores',{method:'POST',body:JSON.stringify(body)});
+    var r=await fetch(B+'/api/promotions/'+_curPromo.id+'/stores/upload',{method:'POST',headers:{'X-Dev-Key':'jim-dev-2026'},body:fd});
+    if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
+    var j=await r.json();
     bootstrap.Modal.getOrCreateInstance(document.getElementById('addStoresM')).hide();
-    var msg='Added '+r.added+' store(s)';if(r.not_found&&r.not_found.length)msg+=' · '+r.not_found.length+' not found';
+    var msg='Added '+j.added+' ('+j.landed+' landed, '+j.in_transit+' in transit)';
+    if(j.missing_date)msg+=' · '+j.missing_date+' no date';
+    if(j.not_found&&j.not_found.length)msg+=' · '+j.not_found.length+' not found';
     toast(msg,'ok');
     openPromo(_curPromo.id); loadPromos();
-  }catch(e){var m=e.message||'error';try{var j=JSON.parse(m);m=j.detail||m;}catch(x){}document.getElementById('as2-val').textContent='Failed: '+m;}
+  }catch(e){document.getElementById('as2-val').textContent='Failed: '+(e.message||'error');}
 }
 async function toggleActivePromo(id,val){
   try{await api('/api/promotions/'+id,{method:'PATCH',body:JSON.stringify({is_active:val})});toast(val?'Promotion activated':'Promotion deactivated','ok');}
