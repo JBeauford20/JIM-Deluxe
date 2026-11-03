@@ -72,40 +72,48 @@ def _metrics(cur, pid, regions, sku_ids, start_date):
         """, (EXCLUDED_STATUS, regions))
     scope = {r["store_id"]: (r["division"] or "—") for r in cur.fetchall()}
     scope_ids = list(scope)
+    scope_set = set(scope_ids)
     since = start_date or date(2000, 1, 1)
+    today = date.today()
 
     landed = set()
+    in_transit = set()
+
+    # (1) DTS deliveries of a promo SKU since the start -> landed
     if sku_ids and scope_ids:
         cur.execute("""
             SELECT DISTINCT store_id FROM deliveries
             WHERE store_id = ANY(%s) AND sku_id = ANY(%s) AND delivery_date >= %s
         """, (scope_ids, sku_ids, since))
-        landed = {r["store_id"] for r in cur.fetchall()}
+        landed |= {r["store_id"] for r in cur.fetchall()}
 
-    in_transit = set()
+    # (2) In-transit loads TAGGED to this promo — classify by DELIVERY DATE so cards
+    # update automatically as days pass: on/before today = landed, future = in transit.
     if scope_ids:
-        # "Currently on the road" — recent in-transit records, not tied to the promo
-        # start (a store on a truck right now counts toward the active promo).
         cur.execute("""
-            SELECT DISTINCT store_id FROM in_transit_loads
-            WHERE store_id = ANY(%s)
-              AND promotion_id = %s
-              AND (shipping_week >= CURRENT_DATE - INTERVAL '45 days'
-                   OR delivery_date >= CURRENT_DATE - INTERVAL '7 days')
+            SELECT store_id, delivery_date FROM in_transit_loads
+            WHERE store_id = ANY(%s) AND promotion_id = %s
         """, (scope_ids, pid))
-        in_transit = {r["store_id"] for r in cur.fetchall()} & set(scope_ids)
+        for r in cur.fetchall():
+            if r["store_id"] not in scope_set:
+                continue
+            d = r["delivery_date"]
+            if d is not None and d <= today:
+                landed.add(r["store_id"])
+            else:
+                in_transit.add(r["store_id"])
 
-    # Manually-added shipments entered directly on the promotion ("these stores
-    # received/are getting holiday product") — authoritative, union with the data.
-    cur.execute("SELECT store_id, status FROM promotion_store_shipments WHERE promotion_id = %s", (pid,))
-    scope_set = set(scope_ids)
+    # (3) Manually-added shipments — same date rule; if no date, fall back to status.
+    cur.execute("SELECT store_id, status, received_date FROM promotion_store_shipments WHERE promotion_id = %s", (pid,))
     for r in cur.fetchall():
         if r["store_id"] not in scope_set:
             continue
-        if r["status"] == "landed":
-            landed.add(r["store_id"])
+        d = r["received_date"]
+        if d is not None:
+            (landed if d <= today else in_transit).add(r["store_id"])
         else:
-            in_transit.add(r["store_id"])
+            (landed if r["status"] == "landed" else in_transit).add(r["store_id"])
+
     in_transit -= landed
     left = scope_set - landed - in_transit
 
