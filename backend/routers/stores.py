@@ -31,7 +31,8 @@ def list_stores(
 
         sql = f"""
             SELECT store_id, store_name, city, state, region, merchant,
-                   volume_code, dynamic_velocity_tier, dynamic_velocity_score,
+                   volume_code, volume_code_updated_at, volume_code_updated_by,
+                   dynamic_velocity_tier, dynamic_velocity_score,
                    tier_9cm, tier_12cm, tier_h2o, tier_collectors, tier_boutique,
                    merch_partner, store_status
             FROM stores

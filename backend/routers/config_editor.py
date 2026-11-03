@@ -209,6 +209,84 @@ def get_template_inventory(template_id: str, user=Depends(get_current_user)):
         return cur.fetchall()
 
 
+@router.get("/templates/{template_id}/sku/{sku_id}/alternatives")
+def get_sku_alternatives(template_id: str, sku_id: int, user=Depends(get_current_user)):
+    """
+    One-to-many Aster->SKU swap options. A plant (product_code / aster input) can be
+    potted into different hardgoods and become different HD SKUs. This returns the
+    ALTERNATIVE HD SKUs reachable from the plants that make up `sku_id`, joined to this
+    template's batch inventory so only SKUs we actually have stock for are offered
+    (with the availability_line_id the writer needs to swap). Flags tier downgrades
+    (Collector/Specialty/Boutique/Rare must never drop to Premium).
+    """
+    DOWNGRADE_RANK = {"premium": 0, "collectors": 1, "collector": 1, "specialty": 2,
+                      "boutique": 3, "rare collectors": 4, "rare": 4}
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT rr.batch_id FROM cart_config_templates t
+            JOIN recommendation_runs rr ON rr.id = t.run_id WHERE t.id = %s
+        """, (template_id,))
+        meta = cur.fetchone()
+        if not meta:
+            raise HTTPException(404, "Template not found")
+        batch_id = meta["batch_id"]
+
+        # current SKU's tier (for downgrade check)
+        cur.execute("SELECT legacy_product_group FROM skus WHERE sku_id = %s", (sku_id,))
+        crow = cur.fetchone()
+        cur_tier = (crow["legacy_product_group"] or "").strip().lower() if crow else ""
+
+        cur.execute("""
+            WITH plants AS (
+                SELECT DISTINCT product_code
+                FROM aster_sku_options
+                WHERE hd_sku_id = %s AND active
+            ),
+            alts AS (
+                SELECT o.hd_sku_id,
+                       count(*) AS shared_plants
+                FROM aster_sku_options o
+                JOIN plants p ON p.product_code = o.product_code
+                WHERE o.hd_sku_id <> %s AND o.active
+                GROUP BY o.hd_sku_id
+            )
+            SELECT a.hd_sku_id,
+                   a.shared_plants,
+                   sk.description,
+                   sk.family,
+                   sk.legacy_product_group,
+                   sk.is_holiday,
+                   ar.availability_line_id,
+                   ar.remaining
+            FROM alts a
+            JOIN skus sk ON sk.sku_id = a.hd_sku_id
+            LEFT JOIN availability_remaining ar
+                   ON ar.batch_id = %s AND ar.sku_id = a.hd_sku_id
+            ORDER BY (ar.remaining IS NULL), ar.remaining DESC NULLS LAST, a.shared_plants DESC
+        """, (sku_id, sku_id, batch_id))
+        rows = cur.fetchall()
+
+    out = []
+    for r in rows:
+        alt_tier = (r["legacy_product_group"] or "").strip().lower()
+        is_downgrade = (cur_tier in DOWNGRADE_RANK and alt_tier in DOWNGRADE_RANK
+                        and DOWNGRADE_RANK[alt_tier] < DOWNGRADE_RANK[cur_tier])
+        out.append({
+            "sku_id":               r["hd_sku_id"],
+            "description":          r["description"],
+            "family":               r["family"],
+            "legacy_product_group": r["legacy_product_group"],
+            "is_holiday":           r["is_holiday"],
+            "shared_plants":        r["shared_plants"],
+            "availability_line_id": r["availability_line_id"],
+            "remaining":            r["remaining"] or 0,
+            "in_stock":             r["availability_line_id"] is not None and (r["remaining"] or 0) > 0,
+            "tier_downgrade":       is_downgrade,
+        })
+    return out
+
+
 @router.post("/templates/{template_id}/preview")
 def preview_variety_change(
     template_id: str,

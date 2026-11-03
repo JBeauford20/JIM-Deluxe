@@ -1143,6 +1143,8 @@ function ceOpenVarietyEditor(templateId, shelfPos){
   _getCevMod().show();
 }
 
+var _cevSwapIdx=null, _cevSwapAlts=[];
+
 function cevRenderCurrent(){
   var el=document.getElementById('cev-current');
   if(!el)return;
@@ -1151,14 +1153,66 @@ function cevRenderCurrent(){
     return;
   }
   el.innerHTML=_cevVarieties.map(function(v,i){
-    return '<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;border-radius:4px;background:#f8f9fa;margin-bottom:3px;font-size:12px">'
+    var row='<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;border-radius:4px;background:#f8f9fa;margin-bottom:3px;font-size:12px">'
       +'<span><strong>'+v.sku_id+'</strong> '+escH(v.description||'')+'</span>'
       +'<div style="display:flex;align-items:center;gap:6px">'
       +'<span style="color:var(--is)">'+v.tray_count+' tray</span>'
+      +'<button class="btn btn-sm py-0 px-1" title="Change which SKU this plant goes into" style="font-size:11px;color:#1F4E79;border:none;background:none" onclick="cevOpenSwap('+i+')"><i class="bi bi-arrow-left-right"></i></button>'
       +'<button class="btn btn-sm py-0 px-1" style="font-size:10px;color:#C00000;border:none;background:none" onclick="cevRemove('+i+')"><i class="bi bi-x-lg"></i></button>'
       +'</div></div>';
+    if(_cevSwapIdx===i) row+=cevSwapPanel(i);
+    return row;
   }).join('');
   cevRunPreview();
+}
+
+function cevSwapPanel(i){
+  var h='<div style="margin:0 0 6px;padding:7px 9px;border-left:3px solid #1F4E79;background:#eef3f9;border-radius:0 4px 4px 0;font-size:11px">'
+    +'<div style="font-weight:600;margin-bottom:5px">Same plant can ship as a different SKU (by hardgood). Pick one:</div>';
+  if(_cevSwapAlts===null){ return h+'<div style="color:var(--is)">Loading…</div></div>'; }
+  var stock=_cevSwapAlts.filter(function(a){return a.in_stock;});
+  if(!stock.length){ return h+'<div style="color:var(--is)">No in-stock alternatives for this plant in this batch.</div></div>'; }
+  h+=stock.map(function(a,k){
+    var kk=_cevSwapAlts.indexOf(a);
+    var hol=a.is_holiday?' <span style="color:#b45309">holiday</span>':'';
+    if(a.tier_downgrade){
+      return '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;opacity:.6">'
+        +'<span><strong>'+a.sku_id+'</strong> '+escH(a.description||'')+hol+'</span>'
+        +'<span style="color:#C00000;font-weight:600" title="Blocked: would downgrade the pricing tier">⚠ tier downgrade</span></div>';
+    }
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0">'
+      +'<span><strong>'+a.sku_id+'</strong> '+escH(a.description||'')+hol
+      +' <span style="color:var(--is)">('+fmt(a.remaining)+' avail)</span></span>'
+      +'<button class="btn btn-sm btn-outline-primary py-0 px-2" style="font-size:10px" onclick="cevPickSwap('+i+','+kk+')">Use this</button></div>';
+  }).join('');
+  h+='<div style="margin-top:4px"><button class="btn btn-sm py-0 px-1" style="font-size:10px;border:none;background:none;color:var(--is)" onclick="cevCloseSwap()">cancel</button></div>';
+  return h+'</div>';
+}
+
+async function cevOpenSwap(i){
+  if(_cevSwapIdx===i){cevCloseSwap();return;}   // toggle off
+  _cevSwapIdx=i; _cevSwapAlts=null; cevRenderCurrent();
+  try{
+    _cevSwapAlts=await api('/api/config-editor/templates/'+_cevTemplateId+'/sku/'+_cevVarieties[i].sku_id+'/alternatives');
+  }catch(e){ _cevSwapAlts=[]; }
+  cevRenderCurrent();
+}
+
+function cevCloseSwap(){ _cevSwapIdx=null; _cevSwapAlts=[]; cevRenderCurrent(); }
+
+function cevPickSwap(i,k){
+  var a=_cevSwapAlts[k]; if(!a)return;
+  if(a.tier_downgrade){toast('Blocked: that SKU would downgrade the pricing tier','warn');return;}
+  if(_cevVarieties.some(function(v,j){return j!==i && v.sku_id===a.sku_id;})){
+    toast('That SKU is already on this shelf','warn');return;
+  }
+  _cevVarieties[i].sku_id=a.sku_id;
+  _cevVarieties[i].availability_line_id=a.availability_line_id;
+  _cevVarieties[i].description=a.description;
+  _cevVarieties[i].family=a.family;
+  cevCloseSwap();
+  cevRenderPicker();
+  toast('Swapped to SKU '+a.sku_id,'ok');
 }
 
 function cevRenderPicker(){

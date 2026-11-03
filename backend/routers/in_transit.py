@@ -23,11 +23,34 @@ def _detect_col(header: list, keywords: list):
     return None
 
 
+def _parse_date(v):
+    """Parse a delivery date from an Excel datetime or common string formats."""
+    from datetime import datetime, date as _d
+    if v is None or str(v).strip() == '':
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, _d):
+        return v
+    s = str(v).strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%m-%d-%Y",
+                "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S %p"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_rows(raw_rows: list) -> list:
-    """Return list of (store_id, vol_code, cart_count) from raw Excel/CSV rows."""
+    """
+    Return list of (store_id, vol_code, cart_count, delivery_date) from raw rows.
+    Accepts the simple 2-column format (Store | Delivery Date) OR the older
+    (Store | Vol | Sum of Carts). A row counts as in-transit if it has a Store and
+    EITHER a delivery date OR a cart count.
+    """
     if not raw_rows:
         return []
-    # Find header row (first row with text)
     header_idx = 0
     for i, r in enumerate(raw_rows[:5]):
         if r and any(str(v or '').strip() for v in r):
@@ -38,10 +61,12 @@ def _parse_rows(raw_rows: list) -> list:
     store_col = _detect_col(header, ['store', 'store_id', 'storeidnum', 'store #', 'store#'])
     vol_col   = _detect_col(header, ['vol', 'volume', 'vol code', 'volume code'])
     cart_col  = _detect_col(header, ['sum of carts', 'carts', 'cart_count', 'sum of cart'])
+    date_col  = _detect_col(header, ['delivery date', 'deliv date', 'del date',
+                                     'delivery', 'ship date', 'arrival', 'date'])
 
-    if store_col is None or cart_col is None:
-        raise ValueError("Could not find Store and Carts columns. "
-                         "Expected headers: Store, Vol, Sum of Carts")
+    if store_col is None or (cart_col is None and date_col is None):
+        raise ValueError("Need a 'Store' column and either a 'Delivery Date' or a "
+                         "'Sum of Carts' column.")
 
     parsed = []
     for r in raw_rows[header_idx + 1:]:
@@ -51,13 +76,16 @@ def _parse_rows(raw_rows: list) -> list:
             store_id = int(float(str(r[store_col] or '')))
         except (ValueError, TypeError, IndexError):
             continue
-        try:
-            carts = int(float(str(r[cart_col] or 0)))
-        except (ValueError, TypeError, IndexError):
-            continue
+        carts = None
+        if cart_col is not None and cart_col < len(r):
+            try:
+                carts = int(float(str(r[cart_col] or 0)))
+            except (ValueError, TypeError):
+                carts = None
+        ddate = _parse_date(r[date_col]) if (date_col is not None and date_col < len(r)) else None
         vol = str(r[vol_col]).strip() if vol_col is not None and vol_col < len(r) and r[vol_col] else ''
-        if store_id > 0 and carts > 0:
-            parsed.append((store_id, vol, carts))
+        if store_id > 0 and ((carts and carts > 0) or ddate is not None):
+            parsed.append((store_id, vol, carts, ddate))
     return parsed
 
 
@@ -69,7 +97,7 @@ def list_in_transit(user=Depends(get_current_user)):
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
-            SELECT itl.store_id, itl.shipping_week, itl.cart_count, itl.vol_code,
+            SELECT itl.store_id, itl.shipping_week, itl.delivery_date, itl.cart_count, itl.vol_code,
                    itl.uploaded_at,
                    s.store_name, s.city, s.state,
                    TRIM(s.dynamic_velocity_tier) AS tier
@@ -107,8 +135,9 @@ async def upload_in_transit(
 ):
     """
     Upload In-Transit stores report (Excel or CSV).
-    Expected columns: Store | Vol | Sum of Carts
-    Replaces all existing records for the specified shipping_week.
+    Simple format: Store | Delivery Date  (tells JIM to hold these stores off orders).
+    Also accepts the older Store | Vol | Sum of Carts. Carts default to 2 when only a
+    date is given. Replaces all existing records for the specified shipping_week.
     """
     import pathlib
     ext = pathlib.Path(file.filename or "").suffix.lower()
@@ -163,10 +192,10 @@ async def upload_in_transit(
     try:
         with get_db() as conn:
             cur = cursor(conn)
-            store_ids = [s for s, _, _ in parsed]
+            store_ids = [s for s, _, _, _ in parsed]
             cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s)", (store_ids,))
             valid = {r["store_id"] for r in cur.fetchall()}
-            filtered = [(s, v, c) for s, v, c in parsed if s in valid]
+            filtered = [(s, v, c, d) for s, v, c, d in parsed if s in valid]
             skipped = len(parsed) - len(filtered)
 
             # Replace this week's data
@@ -175,23 +204,32 @@ async def upload_in_transit(
 
             if filtered:
                 email = user.get("email", "system") if isinstance(user, dict) else "system"
-                # Deduplicate by store_id — sum cart counts if the same store appears multiple times
+                # Deduplicate by store_id — sum real cart counts; keep a delivery date.
                 deduped: dict = {}
-                for s, v, c in filtered:
-                    if s in deduped:
-                        deduped[s] = (v, deduped[s][1] + c)
+                for s, v, c, d in filtered:
+                    if s not in deduped:
+                        deduped[s] = {"vol": v, "carts": c, "date": d}
                     else:
-                        deduped[s] = (v, c)
-                rows = [(s, week, c, v, email) for s, (v, c) in deduped.items()]
+                        e = deduped[s]
+                        if c:
+                            e["carts"] = (e["carts"] or 0) + c
+                        if v and not e["vol"]:
+                            e["vol"] = v
+                        if d and not e["date"]:
+                            e["date"] = d
+                # cart_count is NOT NULL — default to 2 when only a delivery date was given
+                rows = [(s, week, (e["carts"] if e["carts"] else 2), e["vol"], e["date"], email)
+                        for s, e in deduped.items()]
                 psycopg2.extras.execute_values(cur, """
                     INSERT INTO in_transit_loads
-                        (store_id, shipping_week, cart_count, vol_code, uploaded_by)
+                        (store_id, shipping_week, cart_count, vol_code, delivery_date, uploaded_by)
                     VALUES %s
                     ON CONFLICT (store_id, shipping_week) DO UPDATE
-                        SET cart_count  = EXCLUDED.cart_count,
-                            vol_code    = EXCLUDED.vol_code,
-                            uploaded_by = EXCLUDED.uploaded_by,
-                            uploaded_at = now()
+                        SET cart_count    = EXCLUDED.cart_count,
+                            vol_code      = EXCLUDED.vol_code,
+                            delivery_date = EXCLUDED.delivery_date,
+                            uploaded_by   = EXCLUDED.uploaded_by,
+                            uploaded_at   = now()
                 """, rows, page_size=500)
     except HTTPException:
         raise

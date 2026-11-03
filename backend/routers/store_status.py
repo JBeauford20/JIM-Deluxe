@@ -365,9 +365,11 @@ def add_store(
 def edit_store(
     store_id: int,
     body: EditStoreRequest,
-    user=Depends(require_role("manager", "admin"))
+    user=Depends(require_role("order_writer", "manager", "admin"))
 ):
-    """Update name, merchant, volume_code, status, and/or note on an existing store."""
+    """Update name, merchant, volume_code (Velo Code), status, and/or note on a store.
+    Velo Code is now user-owned: changing it stamps who/when and logs to velo_code_history.
+    The advisory dynamic_velocity_tier is left alone (JIM no longer dictates the code)."""
     # Validate fields if provided
     if body.store_name is not None:
         body.store_name = body.store_name.strip()
@@ -397,10 +399,12 @@ def edit_store(
     with get_db() as conn:
         cur = cursor(conn)
 
-        # Check store exists
-        cur.execute("SELECT store_id FROM stores WHERE store_id = %s", (store_id,))
-        if not cur.fetchone():
+        # Check store exists + capture current Velo Code (for history)
+        cur.execute("SELECT volume_code FROM stores WHERE store_id = %s", (store_id,))
+        _cur = cur.fetchone()
+        if not _cur:
             raise HTTPException(404, f"Store {store_id} not found")
+        old_volume_code = (_cur["volume_code"] or "").strip()
 
         # Validate merchant against DB values if provided
         if body.merchant is not None:
@@ -433,12 +437,16 @@ def edit_store(
             set_parts.append("merchant = %s")
             params.append(body.merchant)
 
+        velo_changed = body.volume_code is not None and body.volume_code != old_volume_code
         if body.volume_code is not None:
             set_parts.append("volume_code = %s")
             params.append(body.volume_code)
-            # Keep dynamic_velocity_tier in sync for manually-managed stores
-            set_parts.append("dynamic_velocity_tier = %s")
-            params.append(body.volume_code)
+            # Velo Code is user-owned now: stamp when/who it was updated.
+            set_parts.append("volume_code_updated_at = now()")
+            set_parts.append("volume_code_updated_by = %s")
+            params.append(email)
+            # NOTE: dynamic_velocity_tier is intentionally NOT synced — it stays as JIM's
+            # advisory signal so the GUI can show drift between the user code and the data.
 
         if body.store_status is not None:
             set_parts.append("store_status = %s")
@@ -462,4 +470,97 @@ def edit_store(
         )
         row = cur.fetchone()
 
+        if velo_changed:
+            cur.execute("""
+                INSERT INTO velo_code_history (store_id, old_code, new_code, source, changed_by)
+                VALUES (%s, %s, %s, 'manual', %s)
+            """, (store_id, old_volume_code, body.volume_code, email))
+
     return row
+
+
+@router.post("/velo-upload", status_code=200)
+async def upload_velo_codes(
+    file: UploadFile = File(...),
+    user=Depends(require_role("order_writer", "manager", "admin"))
+):
+    """
+    Bulk-update store Velo Codes from an Excel/CSV.
+    Expected columns: Store (number) | Velo Code (AA|A|B|C|D).
+    Each change is date-stamped (volume_code_updated_at/by) and logged to velo_code_history.
+    """
+    import pathlib
+    ext = pathlib.Path(file.filename or "").suffix.lower()
+    if ext not in ('.xlsx', '.xls', '.csv'):
+        raise HTTPException(400, "Unsupported file type. Use .xlsx or .csv")
+    contents = await file.read(20 * 1024 * 1024)
+
+    raw_rows = []
+    if ext in ('.xlsx', '.xls'):
+        import openpyxl
+        tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+        tmp.write(contents); tmp.close()
+        try:
+            wb = openpyxl.load_workbook(tmp.name, read_only=True, data_only=True)
+            raw_rows = list(wb.active.iter_rows(values_only=True))
+            wb.close()
+        finally:
+            os.unlink(tmp.name)
+    else:
+        import csv
+        raw_rows = list(csv.reader(io.StringIO(contents.decode('utf-8-sig', errors='replace'))))
+    if not raw_rows:
+        raise HTTPException(400, "File is empty")
+
+    # header + column detection
+    header_idx = 0
+    for i, r in enumerate(raw_rows[:5]):
+        if r and any(str(v or '').strip() for v in r):
+            header_idx = i; break
+    header = [str(v or '').lower().strip() for v in raw_rows[header_idx]]
+    store_col = velo_col = None
+    for i, h in enumerate(header):
+        if 'store' in h and store_col is None: store_col = i
+        if ('velo' in h or 'volume' in h or 'code' in h or 'tier' in h) and velo_col is None: velo_col = i
+    if store_col is None or velo_col is None:
+        raise HTTPException(400, "Need a 'Store' column and a 'Velo Code' column.")
+
+    parsed, invalid_codes = [], []
+    for r in raw_rows[header_idx + 1:]:
+        if not r or all(v is None for v in r): continue
+        try: sid = int(float(str(r[store_col] or '')))
+        except (ValueError, TypeError, IndexError): continue
+        if sid <= 0: continue
+        code = str(r[velo_col]).strip().upper() if velo_col < len(r) and r[velo_col] else ''
+        if code not in VALID_VOLUME_CODES:
+            if code and code not in invalid_codes: invalid_codes.append(code)
+            continue
+        parsed.append((sid, code))
+    if not parsed:
+        raise HTTPException(400, "No valid rows (need Store + Velo Code of AA/A/B/C/D).")
+
+    email = user.get("email", "system") if isinstance(user, dict) else "system"
+    with get_db() as conn:
+        cur = cursor(conn)
+        ids = [s for s, _ in parsed]
+        cur.execute("SELECT store_id, volume_code FROM stores WHERE store_id = ANY(%s)", (ids,))
+        existing = {r['store_id']: (r['volume_code'] or '').strip() for r in cur.fetchall()}
+        updated = unchanged = 0
+        not_found = []
+        for sid, code in parsed:
+            if sid not in existing:
+                not_found.append(sid); continue
+            if existing[sid] == code:
+                unchanged += 1; continue
+            cur.execute("""
+                UPDATE stores
+                   SET volume_code = %s, volume_code_updated_at = now(), volume_code_updated_by = %s
+                 WHERE store_id = %s
+            """, (code, email, sid))
+            cur.execute("""
+                INSERT INTO velo_code_history (store_id, old_code, new_code, source, changed_by)
+                VALUES (%s, %s, %s, 'import', %s)
+            """, (sid, existing[sid], code, email))
+            updated += 1
+    return {"updated": updated, "unchanged": unchanged,
+            "not_found": not_found, "invalid_codes": invalid_codes}
