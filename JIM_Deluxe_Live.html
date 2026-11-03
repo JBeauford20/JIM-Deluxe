@@ -2110,7 +2110,7 @@ async function openPromo(id){
   _curPromo=p;
   var m=p.metrics||{scope:0,landed:0,in_transit:0,left:0};
   var reg=(p.regions||[]).indexOf('ALL')>=0?'Nationwide':(p.regions||[]).join(', ');
-  function tile(lab,val,sub,color){return '<div class="col"><div class="card"><div class="card-body text-center py-3"><div style="font-size:30px;font-weight:700;color:'+color+'">'+fmt(val)+'</div><div style="font-size:12px;font-weight:600">'+lab+'</div><div style="font-size:11px;color:var(--is)">'+sub+'</div></div></div></div>';}
+  function tile(lab,val,sub,color,bucket){return '<div class="col"><div class="card" style="cursor:pointer" title="Click to see these stores" onclick="openPromoBucket(\''+bucket+'\',\''+lab+'\')"><div class="card-body text-center py-3"><div style="font-size:30px;font-weight:700;color:'+color+'">'+fmt(val)+'</div><div style="font-size:12px;font-weight:600">'+lab+' <i class="bi bi-chevron-down" style="font-size:9px;opacity:.5"></i></div><div style="font-size:11px;color:var(--is)">'+sub+'</div></div></div></div>';}
   var bd=m.by_division||[];
   var tbl=bd.length>1?'<table class="table jt mb-2" style="font-size:12px"><thead><tr><th>Division</th><th class="text-end">Scope</th><th class="text-end">Landed</th><th class="text-end">In Transit</th><th class="text-end">Left</th></tr></thead><tbody>'
     +bd.map(function(d){return '<tr><td>'+escH(d.division)+'</td><td class="text-end">'+fmt(d.scope)+'</td><td class="text-end">'+fmt(d.landed)+'</td><td class="text-end">'+fmt(d.in_transit)+'</td><td class="text-end"><b>'+fmt(d.left)+'</b></td></tr>';}).join('')+'</tbody></table>':'';
@@ -2121,30 +2121,39 @@ async function openPromo(id){
     +'<button class="btn btn-sm btn-outline-secondary" onclick="editPromo('+p.id+')"><i class="bi bi-pencil me-1"></i>Edit</button></div>'
     +'<div style="font-size:12px;color:var(--is);margin-bottom:12px"><i class="bi bi-geo me-1"></i>'+escH(reg)+' · '+fmtD(p.start_date)+' – '+fmtD(p.end_date)+(p.description?' · '+escH(p.description):'')+'</div>'
     +'<div class="row g-3 mb-3">'
-    +tile('Landed',m.landed,pctOf(m.landed,m.scope)+'% of '+fmt(m.scope),'#15803d')
-    +tile('In Transit',m.in_transit,pctOf(m.in_transit,m.scope)+'% on the road','#b45309')
-    +tile('Left to Hit',m.left,pctOf(m.left,m.scope)+'% remaining','#475569')
+    +tile('Landed',m.landed,pctOf(m.landed,m.scope)+'% of '+fmt(m.scope),'#15803d','landed')
+    +tile('In Transit',m.in_transit,pctOf(m.in_transit,m.scope)+'% on the road','#b45309','in_transit')
+    +tile('Left to Hit',m.left,pctOf(m.left,m.scope)+'% remaining','#475569','left')
     +'</div>'+tbl
-    +'<div id="promo-manual" style="margin:6px 0"></div>'
-    +'<div style="font-size:11px;color:var(--is);margin-top:6px"><b>Promo SKUs:</b> '+(skus||'none set')+'</div>'
+    +'<div id="promo-bucket" class="mt-2"></div>'
+    +'<div style="font-size:11px;color:var(--is);margin-top:10px"><b>Promo SKUs:</b> '+(skus||'none set')+'</div>'
     +'</div></div>';
   document.getElementById('promo-detail').scrollIntoView({behavior:'smooth',block:'nearest'});
-  loadPromoManual(id);
 }
-async function loadPromoManual(id){
-  var el=document.getElementById('promo-manual');if(!el)return;
-  var rows;try{rows=await api('/api/promotions/'+id+'/stores');}catch(e){return;}
-  if(!rows.length){el.innerHTML='';return;}
-  el.innerHTML='<div style="font-size:11px;color:var(--is);margin-bottom:3px"><b>Manually added ('+rows.length+'):</b></div>'
-    +'<div style="max-height:120px;overflow-y:auto">'+rows.map(function(r){
-      var tag=r.status==='landed'?'<span style="color:#15803d">received</span>':'<span style="color:#b45309">in transit</span>';
-      return '<span class="badge bg-light text-dark border me-1 mb-1" style="font-weight:500">'+r.store_id+' '+escH((r.store_name||'').slice(0,18))+' · '+tag
-        +' <i class="bi bi-x" style="cursor:pointer;color:#C00000" onclick="removePromoStore('+r.store_id+')"></i></span>';}).join('')+'</div>';
+var _curBucket=null,_curBucketLabel='';
+async function openPromoBucket(bucket,label){
+  if(!_curPromo)return;
+  _curBucket=bucket;_curBucketLabel=label;
+  var el=document.getElementById('promo-bucket');if(!el)return;
+  el.innerHTML='<div class="text-muted" style="font-size:12px;padding:6px">Loading…</div>';
+  var rows;try{rows=await api('/api/promotions/'+_curPromo.id+'/stores-by-status?bucket='+bucket);}catch(e){el.innerHTML='';return;}
+  if(!rows.length){el.innerHTML='<div class="text-muted" style="font-size:12px;padding:6px">No stores in '+escH(label)+'.</div>';return;}
+  var body=rows.map(function(r){
+    var dd=r.delivery_date?fmtD(r.delivery_date):(r.source==='dts'?'delivered (DTS)':'—');
+    var rm=r.source==='manual'?'<i class="bi bi-x" style="cursor:pointer;color:#C00000" title="Remove" onclick="removePromoStore('+r.store_id+')"></i>':'';
+    return '<tr><td>'+r.store_id+'</td><td>'+escH(r.store_name||'')+'</td><td>'+escH(r.city||'')+'</td><td>'+escH(r.state||'')+'</td><td>'+escH(r.division||'')+'</td><td>'+dd+'</td><td class="text-end">'+rm+'</td></tr>';
+  }).join('');
+  el.innerHTML='<div style="font-weight:600;font-size:13px;margin:10px 0 4px">'+escH(label)+' — '+rows.length+' stores</div>'
+    +'<div class="table-responsive" style="max-height:360px;overflow-y:auto;border:1px solid var(--line);border-radius:4px"><table class="table jt mb-0" style="font-size:12px">'
+    +'<thead><tr><th>Store</th><th>Name</th><th>City</th><th>ST</th><th>Division</th><th>Delivery</th><th></th></tr></thead>'
+    +'<tbody>'+body+'</tbody></table></div>';
+  el.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 async function removePromoStore(sid){
-  if(!_curPromo)return;
-  try{await api('/api/promotions/'+_curPromo.id+'/stores/'+sid,{method:'DELETE'});toast('Removed','ok');openPromo(_curPromo.id);loadPromos();}
-  catch(e){toast('Failed','err');}
+  if(!_curPromo)return;var pid=_curPromo.id,b=_curBucket,bl=_curBucketLabel;
+  try{await api('/api/promotions/'+pid+'/stores/'+sid,{method:'DELETE'});toast('Removed','ok');}
+  catch(e){toast('Failed','err');return;}
+  await openPromo(pid); loadPromos(); if(b)openPromoBucket(b,bl);
 }
 function openAddStores(){
   if(!_curPromo)return;

@@ -70,22 +70,20 @@ class AddStoresRequest(BaseModel):
     received_date: Optional[str] = None
 
 
-def _metrics(cur, pid, regions, sku_ids, start_date):
-    """Compute scope / landed / in_transit / left (+ per-division breakdown).
-    in_transit counts only in-transit loads TAGGED to this promotion (promotion_id),
-    so an everyday load to a store never checks off its promo status."""
+def _classify(cur, pid, regions, sku_ids, start_date):
+    """Classify every in-scope store into landed / in_transit / left, deducing status
+    from delivery date (past/today=landed, future=in transit). Returns the store SETS
+    plus per-store info {store_id: {date, source}} for the detail lists."""
     nationwide = (not regions) or ('ALL' in regions)
     if nationwide:
         cur.execute("""
             SELECT store_id, division FROM stores
-            WHERE active = true
-              AND (store_status IS NULL OR store_status NOT IN %s)
+            WHERE active = true AND (store_status IS NULL OR store_status NOT IN %s)
         """, (EXCLUDED_STATUS,))
     else:
         cur.execute("""
             SELECT store_id, division FROM stores
-            WHERE active = true
-              AND (store_status IS NULL OR store_status NOT IN %s)
+            WHERE active = true AND (store_status IS NULL OR store_status NOT IN %s)
               AND division = ANY(%s)
         """, (EXCLUDED_STATUS, regions))
     scope = {r["store_id"]: (r["division"] or "—") for r in cur.fetchall()}
@@ -94,56 +92,53 @@ def _metrics(cur, pid, regions, sku_ids, start_date):
     since = start_date or date(2000, 1, 1)
     today = date.today()
 
-    landed = set()
-    in_transit = set()
+    landed, in_transit, info = set(), set(), {}
 
-    # (1) DTS deliveries of a promo SKU since the start -> landed
     if sku_ids and scope_ids:
         cur.execute("""
             SELECT DISTINCT store_id FROM deliveries
             WHERE store_id = ANY(%s) AND sku_id = ANY(%s) AND delivery_date >= %s
         """, (scope_ids, sku_ids, since))
-        landed |= {r["store_id"] for r in cur.fetchall()}
+        for r in cur.fetchall():
+            landed.add(r["store_id"]); info[r["store_id"]] = {"date": None, "source": "dts"}
 
-    # (2) In-transit loads TAGGED to this promo — classify by DELIVERY DATE so cards
-    # update automatically as days pass: on/before today = landed, future = in transit.
     if scope_ids:
         cur.execute("""
             SELECT store_id, delivery_date FROM in_transit_loads
             WHERE store_id = ANY(%s) AND promotion_id = %s
         """, (scope_ids, pid))
         for r in cur.fetchall():
-            if r["store_id"] not in scope_set:
-                continue
+            if r["store_id"] not in scope_set: continue
             d = r["delivery_date"]
-            if d is not None and d <= today:
-                landed.add(r["store_id"])
-            else:
-                in_transit.add(r["store_id"])
+            (landed if (d is not None and d <= today) else in_transit).add(r["store_id"])
+            info[r["store_id"]] = {"date": d, "source": "in_transit"}
 
-    # (3) Manually-added shipments — same date rule; if no date, fall back to status.
     cur.execute("SELECT store_id, status, received_date FROM promotion_store_shipments WHERE promotion_id = %s", (pid,))
     for r in cur.fetchall():
-        if r["store_id"] not in scope_set:
-            continue
+        if r["store_id"] not in scope_set: continue
         d = r["received_date"]
         if d is not None:
             (landed if d <= today else in_transit).add(r["store_id"])
         else:
             (landed if r["status"] == "landed" else in_transit).add(r["store_id"])
+        info[r["store_id"]] = {"date": d, "source": "manual"}
 
     in_transit -= landed
     left = scope_set - landed - in_transit
+    return scope, landed, in_transit, left, info
 
+
+def _metrics(cur, pid, regions, sku_ids, start_date):
+    """scope / landed / in_transit / left counts + per-division breakdown."""
+    scope, landed, in_transit, left, _ = _classify(cur, pid, regions, sku_ids, start_date)
     bd = defaultdict(lambda: {"scope": 0, "landed": 0, "in_transit": 0, "left": 0})
     for sid, div in scope.items():
         bd[div]["scope"] += 1
         if sid in landed:        bd[div]["landed"] += 1
         elif sid in in_transit:  bd[div]["in_transit"] += 1
         else:                    bd[div]["left"] += 1
-
     return {
-        "scope": len(scope_ids), "landed": len(landed),
+        "scope": len(scope), "landed": len(landed),
         "in_transit": len(in_transit), "left": len(left),
         "by_division": [{"division": d, **v} for d, v in sorted(bd.items())],
     }
@@ -270,6 +265,28 @@ def list_promo_stores(pid: int, user=Depends(get_current_user)):
             ORDER BY pss.added_at DESC
         """, (pid,))
         return cur.fetchall()
+
+
+@router.get("/{pid}/stores-by-status")
+def promo_stores_by_status(pid: int, bucket: str, user=Depends(get_current_user)):
+    """Stores in a rollout bucket (landed | in_transit | left) for the detail list."""
+    if bucket not in ("landed", "in_transit", "left"):
+        raise HTTPException(400, "bucket must be landed, in_transit, or left")
+    with get_db() as conn:
+        cur = cursor(conn)
+        p = _load_promo(cur, pid)
+        _scope, landed, in_transit, left, info = _classify(cur, pid, p["regions"], p["sku_ids"], p["start_date"])
+        ids = list({"landed": landed, "in_transit": in_transit, "left": left}[bucket])
+        if not ids:
+            return []
+        cur.execute("SELECT store_id, store_name, city, state, division FROM stores WHERE store_id = ANY(%s)", (ids,))
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            inf = info.get(r["store_id"]) or {}
+            r["delivery_date"] = str(inf["date"]) if inf.get("date") else None
+            r["source"] = inf.get("source")
+        rows.sort(key=lambda r: ((r["division"] or ""), (r["store_name"] or "")))
+        return rows
 
 
 @router.post("/{pid}/stores", status_code=201)
