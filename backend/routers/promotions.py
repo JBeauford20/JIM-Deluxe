@@ -46,6 +46,12 @@ class PromotionPatch(BaseModel):
     sku_ids:     Optional[List[int]] = None
 
 
+class AddStoresRequest(BaseModel):
+    store_ids:     List[int]
+    status:        str = "landed"            # 'landed' (received) | 'in_transit'
+    received_date: Optional[str] = None
+
+
 def _metrics(cur, pid, regions, sku_ids, start_date):
     """Compute scope / landed / in_transit / left (+ per-division breakdown).
     in_transit counts only in-transit loads TAGGED to this promotion (promotion_id),
@@ -88,8 +94,20 @@ def _metrics(cur, pid, regions, sku_ids, start_date):
                    OR delivery_date >= CURRENT_DATE - INTERVAL '7 days')
         """, (scope_ids, pid))
         in_transit = {r["store_id"] for r in cur.fetchall()} & set(scope_ids)
+
+    # Manually-added shipments entered directly on the promotion ("these stores
+    # received/are getting holiday product") — authoritative, union with the data.
+    cur.execute("SELECT store_id, status FROM promotion_store_shipments WHERE promotion_id = %s", (pid,))
+    scope_set = set(scope_ids)
+    for r in cur.fetchall():
+        if r["store_id"] not in scope_set:
+            continue
+        if r["status"] == "landed":
+            landed.add(r["store_id"])
+        else:
+            in_transit.add(r["store_id"])
     in_transit -= landed
-    left = set(scope_ids) - landed - in_transit
+    left = scope_set - landed - in_transit
 
     bd = defaultdict(lambda: {"scope": 0, "landed": 0, "in_transit": 0, "left": 0})
     for sid, div in scope.items():
@@ -209,4 +227,63 @@ def delete_promotion(pid: int, user=Depends(require_role("manager", "admin"))):
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("DELETE FROM promotions WHERE id = %s", (pid,))
+        return {"deleted": cur.rowcount}
+
+
+@router.get("/{pid}/stores")
+def list_promo_stores(pid: int, user=Depends(get_current_user)):
+    """Stores manually added to this promotion (received / in-transit)."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT pss.store_id, pss.status, pss.received_date, pss.added_by, pss.added_at,
+                   s.store_name, s.city, s.state, s.division
+            FROM promotion_store_shipments pss
+            JOIN stores s ON s.store_id = pss.store_id
+            WHERE pss.promotion_id = %s
+            ORDER BY pss.added_at DESC
+        """, (pid,))
+        return cur.fetchall()
+
+
+@router.post("/{pid}/stores", status_code=201)
+def add_promo_stores(pid: int, body: AddStoresRequest,
+                     user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Mark a list of stores as having received (landed) or shipped (in-transit) the
+    promo product. Updates the promotion's metrics/cards immediately."""
+    status = body.status if body.status in ("landed", "in_transit") else "landed"
+    email = user.get("email", "system") if isinstance(user, dict) else "system"
+    ids = list({int(s) for s in body.store_ids if s})
+    if not ids:
+        raise HTTPException(400, "No store ids provided")
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT id FROM promotions WHERE id = %s", (pid,))
+        if not cur.fetchone():
+            raise HTTPException(404, "Promotion not found")
+        cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s)", (ids,))
+        valid = {r["store_id"] for r in cur.fetchall()}
+        not_found = [s for s in ids if s not in valid]
+        added = 0
+        for s in ids:
+            if s not in valid:
+                continue
+            cur.execute("""
+                INSERT INTO promotion_store_shipments (promotion_id, store_id, status, received_date, source, added_by)
+                VALUES (%s,%s,%s,%s,'manual',%s)
+                ON CONFLICT (promotion_id, store_id) DO UPDATE
+                    SET status = EXCLUDED.status, received_date = EXCLUDED.received_date,
+                        added_by = EXCLUDED.added_by, added_at = now()
+            """, (pid, s, status, body.received_date or None, email))
+            added += 1
+        return {"added": added, "not_found": not_found, "status": status}
+
+
+@router.delete("/{pid}/stores/{store_id}")
+def remove_promo_store(pid: int, store_id: int,
+                       user=Depends(require_role("order_writer", "manager", "admin"))):
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("DELETE FROM promotion_store_shipments WHERE promotion_id = %s AND store_id = %s",
+                    (pid, store_id))
         return {"deleted": cur.rowcount}
