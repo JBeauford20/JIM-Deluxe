@@ -71,6 +71,7 @@ ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 async def upload_availability(
     file: UploadFile = File(...),
     shipping_week: str = Form(...),
+    include_holiday: str = Form("true"),
     user=Depends(require_role("order_writer", "manager", "admin"))
 ):
     """Accept an Excel availability file and run the loader."""
@@ -97,7 +98,8 @@ async def upload_availability(
         batch_id = load_availability(
             tmp_path,
             shipping_week=date.fromisoformat(shipping_week),
-            verbose=False
+            verbose=False,
+            include_holiday=str(include_holiday).lower() != "false"
         )
         return {"batch_id": str(batch_id), "status": "uploaded"}
     finally:

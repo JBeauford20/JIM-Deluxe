@@ -81,7 +81,8 @@ def safe_int(val):
         return None
 
 def load_availability(filepath: str, shipping_week: date = None,
-                      preview: bool = False, verbose: bool = True):
+                      preview: bool = False, verbose: bool = True,
+                      include_holiday: bool = True):
     log = print if verbose else lambda *a, **k: None
 
     filepath = Path(filepath)
@@ -198,7 +199,7 @@ def load_availability(filepath: str, shipping_week: date = None,
             if not sk:
                 unmatched.append(line)
                 continue
-            if sk['is_holiday']:
+            if sk['is_holiday'] and not include_holiday:
                 log(f"  Skipping holiday SKU {line['hd_sku_id']} ({sk['family']})")
                 continue
 
@@ -225,14 +226,15 @@ def load_availability(filepath: str, shipping_week: date = None,
         # ── MODE B: Aster code lookup (fallback) ─────────────
         log("Mode B: Mapping Aster codes → HD SKUs via mapping table...")
         codes = [r['aster_code'] for r in raw_lines]
-        cur.execute("""
+        holiday_clause = "" if include_holiday else "AND sk.is_holiday = false"
+        cur.execute(f"""
             SELECT apm.aster_code, apm.hd_sku_id, apm.aster_name, apm.code_level,
                    apm.hard_good_type, apm.legacy_product_group, sk.is_holiday
             FROM aster_product_mapping apm
             JOIN skus sk ON sk.sku_id = apm.hd_sku_id
             WHERE apm.aster_code = ANY(%s)
               AND apm.active = true
-              AND sk.is_holiday = false
+              {holiday_clause}
             ORDER BY apm.aster_code
         """, (codes,))
         mapping = {}
@@ -350,9 +352,11 @@ if __name__ == "__main__":
     filepath = args[0]
     week_arg = None
     preview  = '--preview' in args
+    include_holiday = '--exclude-holiday' not in args  # holiday included by default
 
     for i, a in enumerate(args):
         if a == '--week' and i + 1 < len(args):
             week_arg = date.fromisoformat(args[i + 1])
 
-    load_availability(filepath, shipping_week=week_arg, preview=preview)
+    load_availability(filepath, shipping_week=week_arg, preview=preview,
+                      include_holiday=include_holiday)
