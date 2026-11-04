@@ -75,6 +75,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" id="nl-draw" onclick="go('draw',this);loadDraw()" style="display:none"><i class="bi bi-boxes me-1"></i>Inventory Draw</span>
   <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
   <span class="nl" onclick="go('promos',this);loadPromos()"><i class="bi bi-megaphone me-1"></i>Promotions</span>
+  <span class="nl" onclick="go('scenarios',this);loadScenarios()"><i class="bi bi-magic me-1"></i>Scenarios</span>
   <span class="nl" id="nl-routing" style="display:none" onclick="go('routing',this)"><i class="bi bi-geo-alt me-1"></i>Routing</span>
   <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
   <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
@@ -353,6 +354,27 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     </div>
     <div class="row g-3" id="promo-list"><div class="text-muted p-2" style="font-size:13px">Loading…</div></div>
     <div id="promo-detail" class="mt-4"></div>
+  </div>
+</div>
+
+<!-- SCENARIOS -->
+<div id="screen-scenarios" class="screen">
+  <div class="p-4">
+    <div class="d-flex align-items-center mb-3">
+      <h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-magic me-2"></i>Scenario Builder</h5>
+      <span class="ms-auto" style="font-size:12px;color:var(--is)">Plain-English rules that steer this week's engine run</span>
+    </div>
+    <div class="card mb-3"><div class="card-body">
+      <label class="form-label" style="font-size:13px;font-weight:600">Describe a scenario</label>
+      <textarea id="scn-text" class="form-control form-control-sm" rows="2" placeholder="e.g. Black Friday bowls going to the South     ·     Arnie Sherman removed from this week"></textarea>
+      <div class="mt-2">
+        <button class="btn btn-sm btn-cta" id="scn-parse-btn" onclick="parseScenario()"><i class="bi bi-stars me-1"></i>Interpret</button>
+        <span style="font-size:11px;color:var(--is);margin-left:8px">Claude turns it into engine directives for you to review before it goes live.</span>
+      </div>
+      <div id="scn-preview" class="mt-3"></div>
+    </div></div>
+    <h6 style="color:var(--fd)"><i class="bi bi-layers me-1"></i>Live Scenarios <span id="scn-count" class="badge bg-secondary">0 active</span></h6>
+    <div id="scn-list"><div class="text-muted" style="font-size:13px">Loading…</div></div>
   </div>
 </div>
 
@@ -2083,6 +2105,92 @@ function pmMod(){return bootstrap.Modal.getOrCreateInstance(document.getElementB
 function pctOf(n,d){return d?Math.round(n/d*100):0;}
 function fmtD(d){if(!d)return '—';var p=String(d).slice(0,10).split('-');return p.length===3?(p[1]+'.'+p[2]+'.'+p[0]):d;}
 
+/* SCENARIOS */
+var _scnDraft=null;
+function scnWeek(){var t=((document.getElementById('sw')||{}).textContent||'').trim();return /^\d{4}-\d{2}-\d{2}/.test(t)?t.slice(0,10):'';}
+var _ADJLABEL={cart_target_override:'Cart target',demand_multiplier:'Demand ×',exclusion:'Block SKU',priority_boost:'Priority +',sku_push:'SKU push',allocation_floor:'Min carts',allocation_cap:'Max carts'};
+function scnScope(a){
+  var s=[];
+  if(a.scope_merchant)s.push('merchant: '+a.scope_merchant);
+  if(a.scope_region)s.push('region: '+a.scope_region);
+  if(a.scope_state)s.push('state: '+a.scope_state);
+  if(a.scope_velocity_tier)s.push('tier: '+a.scope_velocity_tier);
+  if(a.scope_family)s.push('family: '+a.scope_family);
+  if(a.scope_legacy_tier)s.push('legacy: '+a.scope_legacy_tier);
+  if(a.scope_sku_id)s.push('SKU '+a.scope_sku_id);
+  if(a.scope_store_ids&&a.scope_store_ids.length)s.push(a.scope_store_ids.length+' stores');
+  return s.join(' · ')||'all stores';
+}
+function adjChip(a){
+  var v=(a.value_numeric!=null&&a.value_numeric!=='')?' '+a.value_numeric:'';
+  var n=(a.stores_affected!=null)?' <span style="opacity:.55">('+a.stores_affected+' stores)</span>':'';
+  return '<div style="font-size:12px;padding:4px 8px;border:1px solid var(--line);border-radius:4px;margin:3px 0;background:#fafafa">'
+    +'<b>'+escH(_ADJLABEL[a.adjustment_type]||a.adjustment_type)+v+'</b> — '+escH(scnScope(a))+n+'</div>';
+}
+async function parseScenario(){
+  var t=(document.getElementById('scn-text').value||'').trim();
+  if(!t){toast('Type a scenario first','err');return;}
+  var btn=document.getElementById('scn-parse-btn');btn.disabled=true;btn.innerHTML='<span class="spinner-border spinner-border-sm"></span> Interpreting…';
+  var pv=document.getElementById('scn-preview');pv.innerHTML='';
+  try{
+    var r=await api('/api/scenarios/parse',{method:'POST',body:JSON.stringify({text:t,shipping_week:scnWeek()||null})});
+    _scnDraft={text:t,adjustments:r.adjustments||[]};
+    var warn=(r.warnings&&r.warnings.length)?'<div style="font-size:12px;color:#b45309;margin-top:6px"><i class="bi bi-exclamation-triangle me-1"></i>'+r.warnings.map(escH).join('<br>')+'</div>':'';
+    var chips=(r.adjustments||[]).map(adjChip).join('')||'<div class="text-muted" style="font-size:12px">No directives produced — try rephrasing.</div>';
+    var hasAdj=r.adjustments&&r.adjustments.length;
+    pv.innerHTML='<div style="border-left:3px solid var(--cta);padding:8px 12px;background:#f6faf5;border-radius:4px">'
+      +'<div style="font-size:12px;color:var(--is);margin-bottom:2px">Interpreted as:</div>'
+      +'<div style="font-weight:600;margin-bottom:6px">'+escH(r.interpretation||'')+'</div>'
+      +chips+warn
+      +'<div class="mt-2">'+(hasAdj?'<button class="btn btn-sm btn-cta" onclick="saveScenario()"><i class="bi bi-check-circle me-1"></i>Activate scenario</button> ':'')
+      +'<button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById(\'scn-preview\').innerHTML=\'\';_scnDraft=null;">Discard</button></div></div>';
+  }catch(e){pv.innerHTML='<div style="font-size:12px;color:#C00000">'+escH(e.message||'Parse failed')+'</div>';}
+  btn.disabled=false;btn.innerHTML='<i class="bi bi-stars me-1"></i>Interpret';
+}
+async function saveScenario(){
+  if(!_scnDraft)return;
+  try{
+    await api('/api/scenarios/',{method:'POST',body:JSON.stringify({text:_scnDraft.text,shipping_week:scnWeek()||null,adjustments:_scnDraft.adjustments})});
+    toast('Scenario is live','ok');
+    document.getElementById('scn-text').value='';document.getElementById('scn-preview').innerHTML='';_scnDraft=null;
+    loadScenarios();
+  }catch(e){toast(e.message||'Save failed','err');}
+}
+async function loadScenarios(){
+  var el=document.getElementById('scn-list');if(!el)return;
+  try{
+    var r=await api('/api/scenarios/?shipping_week='+encodeURIComponent(scnWeek()||''));
+    var list=r.scenarios||[];
+    var active=list.filter(function(s){return s.is_active;}).length;
+    var cb=document.getElementById('scn-count');if(cb)cb.textContent=active+' active';
+    if(!list.length){el.innerHTML='<div class="text-muted" style="font-size:13px">No scenarios for week '+(r.shipping_week||'')+'. Describe one above to steer this run.</div>';return;}
+    el.innerHTML=list.map(scnCard).join('');
+  }catch(e){el.innerHTML='<div style="font-size:12px;color:#C00000">'+escH(e.message||'Load failed')+'</div>';}
+}
+function scnCard(s){
+  var on=s.is_active;
+  var chips=(s.adjustments||[]).map(adjChip).join('');
+  var badge=on?'<span class="badge" style="background:#15803d">ACTIVE</span>':'<span class="badge bg-secondary">off</span>';
+  return '<div class="card mb-2" style="'+(on?'':'opacity:.6')+'"><div class="card-body py-2"><div class="d-flex align-items-start">'
+    +'<div style="flex:1">'
+    +'<div style="font-weight:600;font-size:13px">'+badge+' '+escH(s.name||'')+'</div>'
+    +(s.description&&s.description!==s.name?'<div style="font-size:11px;color:var(--is);margin:2px 0 4px">'+escH(s.description)+'</div>':'<div style="margin-bottom:4px"></div>')
+    +chips
+    +'</div>'
+    +'<div class="ms-2 text-nowrap">'
+    +'<button class="btn btn-sm btn-outline-secondary me-1" title="Toggle on/off" onclick="toggleScenario(\''+s.id+'\')"><i class="bi bi-'+(on?'toggle-on':'toggle-off')+'"></i></button>'
+    +'<button class="btn btn-sm btn-outline-danger" title="Remove from this run" onclick="removeScenario(\''+s.id+'\')"><i class="bi bi-x-lg"></i></button>'
+    +'</div></div></div></div>';
+}
+async function toggleScenario(id){
+  try{await api('/api/scenarios/'+id+'/toggle',{method:'PATCH'});loadScenarios();}
+  catch(e){toast('Toggle failed','err');}
+}
+async function removeScenario(id){
+  if(!confirm('Remove this scenario from the engine for this run?'))return;
+  try{await api('/api/scenarios/'+id,{method:'DELETE'});toast('Scenario removed','ok');loadScenarios();}
+  catch(e){toast('Remove failed','err');}
+}
 async function loadPromos(){
   try{_promos=await api('/api/promotions/');}catch(e){_promos=[];}
   renderPromos();
