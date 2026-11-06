@@ -193,6 +193,12 @@ class PlaybookEngine:
             min(1.0, base_avail_weight + push_bonus)
         )
 
+    def is_excluded(self, store_id: int, sku_id: int) -> bool:
+        """True if this SKU is hard-excluded for this store (e.g. a scenario
+        'exclusion' directive). The engine must drop these from ranked_skus —
+        zeroing the score is not enough, the shelf-fill loop ignores score."""
+        return sku_id in self._exclusions.get(store_id, set())
+
     def allocation_floor(self, store_id: int, sku_id: int) -> int:
         """Minimum carts of this SKU for this store (0 = no floor)."""
         return self._allocation_floors[store_id].get(sku_id, 0)

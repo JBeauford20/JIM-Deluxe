@@ -53,6 +53,7 @@ def export_aster(
             FROM order_lines ol
             JOIN orders o ON o.id = ol.order_id
             JOIN skus k ON k.sku_id = ol.sku_id
+            JOIN stores s ON s.store_id = o.store_id
             LEFT JOIN aster_product_mapping apm ON (
                 apm.hd_sku_id = ol.sku_id
                 AND apm.active = true
@@ -70,6 +71,8 @@ def export_aster(
             )
             WHERE o.run_id = %s
               AND o.status = 'approved'
+              AND COALESCE(s.store_status, 'active')
+                  NOT IN ('do_not_ship', 'paused', 'inactive', 'hold')
               AND COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty) > 0
             ORDER BY
                 o.store_id,

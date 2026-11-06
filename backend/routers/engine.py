@@ -3,6 +3,7 @@ Engine router — queues velocity + recommendation jobs.
 The worker runs them independently. Closing the browser doesn't stop a job.
 """
 import uuid
+import psycopg2
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from db import get_db, cursor
@@ -26,10 +27,23 @@ def queue_recommendation_run(
     user=Depends(require_role("order_writer", "manager", "admin"))
 ):
     """Queue a recommendation run. Returns job_id immediately."""
+    job_id = str(uuid.uuid4())
     with get_db() as conn:
         cur = cursor(conn)
 
-        # Check for duplicate active job
+        # Reap stale jobs: a run left 'running' when the web process restarted (e.g. a
+        # deploy mid-run) would otherwise keep the batch stuck at 409 forever. — audit
+        cur.execute("""
+            UPDATE engine_jobs SET status = 'failed',
+                   error_text = 'stale — process restarted before completion',
+                   completed_at = now()
+            WHERE job_type = 'recommendations'
+              AND status IN ('queued','running')
+              AND COALESCE(started_at, created_at) < now() - interval '20 minutes'
+        """)
+
+        # One active run per batch (also enforced by the engine_jobs_one_active unique
+        # index, which closes the check-then-insert race on double clicks). — audit
         cur.execute("""
             SELECT id FROM engine_jobs
             WHERE batch_id = %s AND status IN ('queued','running')
@@ -37,12 +51,14 @@ def queue_recommendation_run(
         if cur.fetchone():
             raise HTTPException(409, "A recommendation run is already in progress for this batch")
 
-        job_id = str(uuid.uuid4())
-        cur.execute("""
-            INSERT INTO engine_jobs
-                (id, job_type, status, batch_id, shipping_week, created_by)
-            VALUES (%s,'recommendations','queued',%s,%s,%s)
-        """, (job_id, req.batch_id, req.shipping_week, user["email"]))
+        try:
+            cur.execute("""
+                INSERT INTO engine_jobs
+                    (id, job_type, status, batch_id, shipping_week, created_by)
+                VALUES (%s,'recommendations','queued',%s,%s,%s)
+            """, (job_id, req.batch_id, req.shipping_week, user["email"]))
+        except psycopg2.errors.UniqueViolation:
+            raise HTTPException(409, "A recommendation run is already in progress for this batch")
 
     background.add_task(_run_recommendations, job_id, req.batch_id,
                         req.shipping_week, req.scenario_id)

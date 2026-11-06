@@ -33,6 +33,7 @@ except ImportError:
         def stage1_priority_bonus(self, *a): return 0.0
         def stage1_cart_target(self, sid, default): return default
         def stage2_sku_score_modifier(self, sid, sku_id, vel, avail): return vel, avail
+        def is_excluded(self, sid, sku_id): return False
         def print_summary(self, log=print): log("  Playbook: not available (import error)")
     def load_adjustments(cur, week): return []
 
@@ -423,15 +424,23 @@ def determine_kit_type(sku_id, units, committed, avail_meta):
     meta = avail_meta.get(sku_id, {})
     if meta.get('code_level', '3M') == '3M':
         return meta.get('hard_good_type', 'ceramic_kit')
+    # 1M grower pot → split jute/ceramic across placements toward JUTE_CERAMIC_SPLIT.
+    # Previously the _jute/_ceramic counters were read but NEVER written, so every
+    # placement came out 'mixed' and was saved as ceramic — the jute split never
+    # happened. Now each whole placement goes to the side that keeps the running jute
+    # share on target, and we record it (line ~922 already filters these keys). — audit
     already_jute    = committed.get(f'{sku_id}_jute', 0)
     already_ceramic = committed.get(f'{sku_id}_ceramic', 0)
     total_so_far    = already_jute + already_ceramic
-    jute_target     = math.floor((total_so_far + units) * JUTE_CERAMIC_SPLIT)
-    jute_this       = max(0, jute_target - already_jute)
-    ceramic_this    = units - jute_this
-    if jute_this > 0 and ceramic_this > 0:
-        return 'mixed'
-    return 'jute_kit' if jute_this > 0 else 'ceramic_kit'
+    if total_so_far == 0:
+        go_jute = JUTE_CERAMIC_SPLIT >= 0.5
+    else:
+        go_jute = (already_jute / total_so_far) < JUTE_CERAMIC_SPLIT
+    if go_jute:
+        committed[f'{sku_id}_jute'] = already_jute + units
+        return 'jute_kit'
+    committed[f'{sku_id}_ceramic'] = already_ceramic + units
+    return 'ceramic_kit'
 
 # ── Main engine ───────────────────────────────────────────────
 
@@ -891,7 +900,13 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             )
             sku_scores[sku_id] = vel_norm_sku * W_SKU_VEL + avail_norm * W_SKU_AVAIL
 
-        ranked_skus = sorted(sku_scores.items(), key=lambda x: -x[1])
+        # Hard-filter excluded SKUs (scenario 'exclusion' directives). Zeroing the
+        # score is not enough — the shelf-fill loop places by inventory, not score. — audit
+        ranked_skus = sorted(
+            ((s, sc) for s, sc in sku_scores.items()
+             if not playbook.is_excluded(store_id, s)),
+            key=lambda x: -x[1]
+        )
         if not ranked_skus:
             continue
 
@@ -1135,7 +1150,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         util = current_load_carts / CARTS_PER_TRUCK * 100
         loads_out.append({
             'load_number':  load_number,
-            'load_name':    f"WK{shipping_week.isocalendar()[1]}-L{load_number}",
+            'load_name':    f"WK{shipping_week.isocalendar()[0]}{shipping_week.isocalendar()[1]:02d}-L{load_number}",
             'merchant':     meta['merchant'],
             'region':       meta['region'],
             'cart_count':   current_load_carts,
@@ -1254,7 +1269,10 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     shelf_rows  = []
     cart_id_map = {}
     cart_seq    = 0
-    week_num    = shipping_week.isocalendar()[1]
+    _iso        = shipping_week.isocalendar()
+    week_num    = _iso[1]
+    iso_year    = _iso[0]   # include the ISO year so keys don't collide across years
+                            # (2026 even has an ISO week 53). — audit
 
     for store_id, data in all_orders.items():
         order_id   = order_id_map[store_id]
@@ -1262,7 +1280,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
 
         for cart_idx, cart in enumerate(data['carts']):
             cart_seq += 1
-            cart_key    = f"WK{week_num:02d}-C{cart_seq:04d}"
+            cart_key    = f"WK{iso_year}{week_num:02d}-C{cart_seq:04d}"
             cart_id     = str(uuid.uuid4())
             config_code = cart_config_codes.get((store_id, cart_idx), 'CC1')
             cart_id_map[(store_id, cart['cart_number'])] = cart_id
