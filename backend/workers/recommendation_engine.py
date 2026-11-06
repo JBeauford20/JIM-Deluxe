@@ -586,18 +586,33 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                          for r in cur.fetchall()}
 
     # Override with JIM order values where available and more recent
+    # Only the store's MOST RECENT shipping week counts as its "last delivery".
+    # (Previously this summed every approved/exported JIM week per store, so a
+    #  repeat store's value inflated weekly until its Store Clock hit the 13-week
+    #  cap and it dropped out of the DUE gate. — audit C1, Nov 2026)
     cur.execute("""
+        WITH latest AS (
+            SELECT DISTINCT ON (o.store_id)
+                   o.store_id, ab.shipping_week_start AS wk
+            FROM orders o
+            JOIN recommendation_runs rr ON rr.id = o.run_id
+            JOIN availability_batches ab ON ab.id = rr.batch_id
+            WHERE o.status IN ('approved', 'exported')
+            ORDER BY o.store_id, ab.shipping_week_start DESC
+        )
         SELECT o.store_id,
                SUM(ol.approved_qty * COALESCE(sk.wholesale_price_whl, %s)) AS delivery_whl,
-               MAX(ab.shipping_week_start) AS last_week
-        FROM orders o
-        JOIN order_lines ol ON ol.order_id = o.id
+               l.wk AS last_week
+        FROM latest l
+        JOIN orders o ON o.store_id = l.store_id
         JOIN recommendation_runs rr ON rr.id = o.run_id
         JOIN availability_batches ab ON ab.id = rr.batch_id
+                                    AND ab.shipping_week_start = l.wk
+        JOIN order_lines ol ON ol.order_id = o.id
         LEFT JOIN skus sk ON sk.sku_id = ol.sku_id
         WHERE o.status IN ('approved', 'exported')
           AND ol.approved_qty > 0
-        GROUP BY o.store_id
+        GROUP BY o.store_id, l.wk
     """, (WHOLESALE_PRICE_FALLBACK,))
     for r in cur.fetchall():
         if r['delivery_whl']:
