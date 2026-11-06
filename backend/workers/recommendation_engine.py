@@ -1201,7 +1201,15 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     if preview:
         log("\nPREVIEW MODE — nothing written to database.")
         conn.close()
-        return None
+        return {
+            'stores_served':   len(all_orders),
+            'total_carts':     sum(o['total_carts'] for o in all_orders.values()),
+            'allocated_units': allocated_units,
+            'clearance':       round(clearance, 1),
+            'unique_configs':  unique_after,
+            'loads':           loads_out,
+            'orders':          all_orders,   # store_id -> {total_carts, score_meta, carts, ...}
+        }
 
     # ── WRITE TO DATABASE ─────────────────────────────────────
     log("\nWriting to database...")
