@@ -27,7 +27,6 @@ if not db_url:
     raise SystemExit("SUPABASE_DB_URL is not set. Add it in Railway Variables tab.")
 
 print(f"DB: {db_url[:55]}...")
-print("Dev auth header: X-Dev-Key: jim-dev-2026")
 
 if __name__ == "__main__":
     import uvicorn

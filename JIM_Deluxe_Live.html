@@ -66,6 +66,17 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 </head>
 <body>
 
+<div id="loginOverlay" style="display:none;position:fixed;inset:0;z-index:3000;background:#0d1f12;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:8px;padding:28px;width:340px;box-shadow:0 10px 40px rgba(0,0,0,.4)">
+    <div style="font-size:20px;font-weight:700;color:#14532d;margin-bottom:2px">&#127807; JIM Deluxe</div>
+    <div style="font-size:12px;color:#6b7280;margin-bottom:16px">Sign in to continue</div>
+    <input id="lg-email" type="email" class="form-control form-control-sm mb-2" placeholder="email" autocomplete="username">
+    <input id="lg-pw" type="password" class="form-control form-control-sm mb-2" placeholder="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+    <div id="lg-err" style="font-size:12px;color:#C00000;min-height:16px;margin-bottom:6px"></div>
+    <button class="btn btn-cta w-100" id="lg-btn" onclick="doLogin()">Sign in</button>
+  </div>
+</div>
+
 <nav class="jnav">
   <span class="brand">&#127807; JIM <span style="font-weight:400;opacity:.7">Deluxe</span></span>
   <span class="nl active" onclick="go('week',this)"><i class="bi bi-house me-1"></i>Week</span>
@@ -78,7 +89,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="nl" onclick="go('scenarios',this);loadScenarios()"><i class="bi bi-magic me-1"></i>Scenarios</span>
   <span class="nl" id="nl-routing" style="display:none" onclick="go('routing',this)"><i class="bi bi-geo-alt me-1"></i>Routing</span>
   <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
-  <div class="ms-auto" style="color:#8fa88a;font-size:12px">TPC Order Writer</div>
+  <div class="ms-auto" style="color:#8fa88a;font-size:12px"><span id="nav-user"></span><span onclick="logout()" style="cursor:pointer;text-decoration:underline;margin-left:10px"><i class="bi bi-box-arrow-right me-1"></i>Sign out</span></div>
 </nav>
 
 <div class="ws">
@@ -523,19 +534,52 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 /* JIM Deluxe - Complete JS - ASCII only - single block */
-var B='', DH={'X-Dev-Key':'jim-dev-2026','Content-Type':'application/json'};
+var B='', DH={'Content-Type':'application/json'};
+/* AUTH (Supabase email login; anon key is public/client-safe) */
+var SB_URL='https://ocfmqxtkhpjkkstylypk.supabase.co';
+var SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jZm1xeHRraHBqa2tzdHlseXBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4OTczNjgsImV4cCI6MjEwNjQ3MzM2OH0.vjCWPM9os4YFppHuHeFyGi8_Q4RW3-eSK4SO5pdnl1o';
+function tokGet(){try{return JSON.parse(localStorage.getItem('jim_auth')||'null');}catch(e){return null;}}
+function tokSet(d){try{localStorage.setItem('jim_auth',JSON.stringify(d));}catch(e){}}
+function tokClear(){try{localStorage.removeItem('jim_auth');}catch(e){}}
+function authHdr(){var t=tokGet();return (t&&t.access_token)?{'Authorization':'Bearer '+t.access_token}:{};}
+function showLogin(){var o=document.getElementById('loginOverlay');if(o)o.style.display='flex';}
+async function doLogin(){
+  var email=(document.getElementById('lg-email').value||'').trim(), pw=document.getElementById('lg-pw').value;
+  var err=document.getElementById('lg-err'), btn=document.getElementById('lg-btn');
+  if(!email||!pw){err.textContent='Enter email and password';return;}
+  btn.disabled=true;btn.textContent='Signing in…';err.textContent='';
+  try{
+    var r=await fetch(SB_URL+'/auth/v1/token?grant_type=password',{method:'POST',headers:{'apikey':SB_ANON,'Content-Type':'application/json'},body:JSON.stringify({email:email,password:pw})});
+    if(!r.ok){var e=await r.json().catch(function(){return{};});err.textContent=e.error_description||e.msg||'Invalid login';btn.disabled=false;btn.textContent='Sign in';return;}
+    tokSet(await r.json());location.reload();
+  }catch(ex){err.textContent='Network error';btn.disabled=false;btn.textContent='Sign in';}
+}
+async function tryRefresh(){
+  var t=tokGet();if(!t||!t.refresh_token)return false;
+  try{
+    var r=await fetch(SB_URL+'/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:{'apikey':SB_ANON,'Content-Type':'application/json'},body:JSON.stringify({refresh_token:t.refresh_token})});
+    if(!r.ok)return false;tokSet(await r.json());return true;
+  }catch(e){return false;}
+}
+function logout(){tokClear();location.reload();}
 var bId=null,rId=null,wk=null;
 var orders=[],loads=[],allStores=[],pickerItems=[];
 var selEdStore=null,activePicker=null,aT=null,aLN=null;
 var aMod,lMod;
 
 document.addEventListener('DOMContentLoaded',function(){
+  if(!tokGet()){showLogin();return;}
+  bootApp();
+});
+function bootApp(){
+  var t=tokGet(); var nu=document.getElementById('nav-user');
+  if(nu)nu.textContent=(t&&t.user&&t.user.email)||'';
   aMod=new bootstrap.Modal('#aM');
   lMod=new bootstrap.Modal('#lM');
   document.getElementById('ac').onclick=doApprove;
   document.getElementById('alb').onclick=doApproveLoad;
   loadStores();
-});
+}
 
 /* NAV */
 function go(n,el){
@@ -560,13 +604,17 @@ function toast(m,t){
 /* API */
 async function api(path,opts){
   opts=opts||{};
-  var h=Object.assign({},DH,opts.headers||{});
+  var h=Object.assign({},DH,authHdr(),opts.headers||{});
   var r=await fetch(B+path,Object.assign({},opts,{headers:h}));
+  if(r.status===401){
+    if(await tryRefresh()){h=Object.assign({},DH,authHdr(),opts.headers||{});r=await fetch(B+path,Object.assign({},opts,{headers:h}));}
+  }
+  if(r.status===401){tokClear();showLogin();throw new Error('Session expired - please sign in again');}
   if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
   return r.json();
 }
 async function apiBlob(path){
-  var r=await fetch(B+path,{headers:{'X-Dev-Key':'jim-dev-2026'}});
+  var r=await fetch(B+path,{headers:authHdr()});
   if(!r.ok)throw new Error('Download failed');
   return r.blob();
 }
@@ -594,7 +642,7 @@ async function doUpload(file){
   var w=new Date().toISOString().slice(0,10);
   try{
     var fd=new FormData();fd.append('file',file);fd.append('shipping_week',w);
-    var r=await fetch(B+'/api/availability/upload',{method:'POST',headers:{'X-Dev-Key':'jim-dev-2026'},body:fd});
+    var r=await fetch(B+'/api/availability/upload',{method:'POST',headers:authHdr(),body:fd});
     if(!r.ok)throw new Error(await r.text());
     var d=await r.json();bId=d.batch_id;wk=w;
     var bt=await api('/api/availability/batches/'+bId);
@@ -881,7 +929,7 @@ async function doUploadInTransit(inp){
   var w=new Date().toISOString().slice(0,10);
   fd.append('shipping_week',w);
   try{
-    var r=await fetch(B+'/api/in-transit/upload',{method:'POST',headers:{'X-Dev-Key':'jim-dev-2026'},body:fd});
+    var r=await fetch(B+'/api/in-transit/upload',{method:'POST',headers:authHdr(),body:fd});
     if(!r.ok)throw new Error(await r.text());
     var d=await r.json();
     toast(d.stores_loaded+' stores loaded for week '+d.shipping_week,'ok');
@@ -1483,7 +1531,7 @@ async function exportCartConfigs(){
   if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner-border spinner-border-sm me-1"></span>Building...';}
   try{
     var resp=await fetch(B+'/api/exports/runs/'+rId+'/cart-config-export',{
-      headers:{'X-Dev-Key':'jim-dev-2026'}
+      headers:authHdr()
     });
     if(!resp.ok)throw new Error(await resp.text());
     var blob=await resp.blob();
@@ -2277,7 +2325,7 @@ async function uploadPromoStores(){
   var fd=new FormData();fd.append('file',fi.files[0]);
   document.getElementById('as2-val').textContent='Uploading…';
   try{
-    var r=await fetch(B+'/api/promotions/'+_curPromo.id+'/stores/upload',{method:'POST',headers:{'X-Dev-Key':'jim-dev-2026'},body:fd});
+    var r=await fetch(B+'/api/promotions/'+_curPromo.id+'/stores/upload',{method:'POST',headers:authHdr(),body:fd});
     if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
     var j=await r.json();
     bootstrap.Modal.getOrCreateInstance(document.getElementById('addStoresM')).hide();
