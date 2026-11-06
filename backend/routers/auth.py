@@ -14,10 +14,10 @@ _env_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_URL = _env_url if _PROJECT_REF in _env_url else _DEFAULT_URL
 # Accept either env name — the env file historically used SUPABASE_SERVICE_ROLE_KEY
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE", "")
-# The anon key (public, client-safe) is enough to validate a user JWT via /auth/v1/user.
-# Using it here means login works on deploy with no Railway env change required.
-SUPABASE_ANON = os.environ.get("SUPABASE_ANON_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jZm1xeHRraHBqa2tzdHlseXBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4OTczNjgsImV4cCI6MjEwNjQ3MzM2OH0.vjCWPM9os4YFppHuHeFyGi8_Q4RW3-eSK4SO5pdnl1o")
+# The anon key (public, client-safe) validates a user JWT via /auth/v1/user.
+# Pinned to the project (not read from env) — the Railway env value was stale, which
+# made validation fail. This key is safe to ship; it only identifies the project.
+SUPABASE_ANON = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jZm1xeHRraHBqa2tzdHlseXBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4OTczNjgsImV4cCI6MjEwNjQ3MzM2OH0.vjCWPM9os4YFppHuHeFyGi8_Q4RW3-eSK4SO5pdnl1o")
 
 # Dev bypass is DISABLED unless a DEV_KEY env var is explicitly set (leave it unset
 # in production once the Supabase login is verified). No hardcoded key. — audit, Nov 2026
