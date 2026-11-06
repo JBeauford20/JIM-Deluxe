@@ -6,7 +6,12 @@ import os, hmac, httpx
 router  = APIRouter()
 bearer  = HTTPBearer()
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://ocfmqxtkhpjkkstylypk.supabase.co").rstrip("/")
+_PROJECT_REF = "ocfmqxtkhpjkkstylypk"
+_DEFAULT_URL = f"https://{_PROJECT_REF}.supabase.co"
+# Trust the env URL only if it points at the right project (the Railway var historically
+# held a typo'd ref), otherwise fall back to the known-correct URL.
+_env_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_URL = _env_url if _PROJECT_REF in _env_url else _DEFAULT_URL
 # Accept either env name — the env file historically used SUPABASE_SERVICE_ROLE_KEY
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE", "")
 # The anon key (public, client-safe) is enough to validate a user JWT via /auth/v1/user.
@@ -39,11 +44,14 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Missing auth token")
 
     token = creds.credentials
-    async with httpx.AsyncClient() as client:
-        r = await client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={"Authorization": f"Bearer {token}", "apikey": SUPABASE_ANON}
-        )
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={"Authorization": f"Bearer {token}", "apikey": SUPABASE_ANON}
+            )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Could not verify token")
     if r.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
