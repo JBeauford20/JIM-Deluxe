@@ -446,12 +446,12 @@ def update_shelf_varieties(
             if v.availability_line_id:
                 cur.execute("""
                     SELECT remaining FROM availability_remaining
-                    WHERE availability_line_id = %s FOR UPDATE
+                    WHERE availability_line_id = %s
                 """, (v.availability_line_id,))
             else:
                 cur.execute("""
                     SELECT MIN(remaining) AS remaining FROM availability_remaining
-                    WHERE sku_id = %s FOR UPDATE
+                    WHERE sku_id = %s
                 """, (v.sku_id,))
             avail = cur.fetchone()
             available = int(avail["remaining"] or 0) if avail else 0
