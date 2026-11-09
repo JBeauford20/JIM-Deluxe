@@ -585,9 +585,12 @@ def update_shelf_varieties(
                             INSERT INTO order_lines
                                 (order_id, store_id, sku_id, recommended_qty, draft_qty, is_manual_edit)
                             SELECT o.id, o.store_id, %s, 0, 0, true
-                            FROM orders o WHERE o.id = %s
-                            ON CONFLICT (order_id, sku_id) DO NOTHING
-                        """, (v.sku_id, oid))
+                            FROM orders o
+                            WHERE o.id = %s
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM order_lines ol
+                                  WHERE ol.order_id = o.id AND ol.sku_id = %s)
+                        """, (v.sku_id, oid, v.sku_id))
 
                 cur.execute("""
                     SELECT DISTINCT o.store_id, ol.sku_id
