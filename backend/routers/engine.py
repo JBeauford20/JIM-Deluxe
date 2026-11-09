@@ -39,7 +39,7 @@ def queue_recommendation_run(
                    completed_at = now()
             WHERE job_type = 'recommendations'
               AND status IN ('queued','running')
-              AND COALESCE(started_at, created_at) < now() - interval '20 minutes'
+              AND COALESCE(started_at, queued_at) < now() - interval '20 minutes'
         """)
 
         # One active run per batch (also enforced by the engine_jobs_one_active unique
@@ -54,9 +54,9 @@ def queue_recommendation_run(
         try:
             cur.execute("""
                 INSERT INTO engine_jobs
-                    (id, job_type, status, batch_id, shipping_week, created_by)
-                VALUES (%s,'recommendations','queued',%s,%s,%s)
-            """, (job_id, req.batch_id, req.shipping_week, user["email"]))
+                    (id, job_type, status, batch_id, shipping_week, scenario_id, created_by)
+                VALUES (%s,'recommendations','queued',%s,%s,%s,%s)
+            """, (job_id, req.batch_id, req.shipping_week, req.scenario_id, user["email"]))
         except psycopg2.errors.UniqueViolation:
             raise HTTPException(409, "A recommendation run is already in progress for this batch")
 
