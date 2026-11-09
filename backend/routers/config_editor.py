@@ -575,6 +575,20 @@ def update_shelf_varieties(
             # ── 9g. Recalculate order_lines.draft_qty for affected stores ─────
             # Get all store_ids for orders that contain these carts
             if order_ids:
+                # A store newly receiving an edited variety must get an order_line,
+                # or the Aster export (which reads order_lines) would miss it even
+                # though the physical cart has it. Create any missing lines first;
+                # the recalc below sets draft_qty from the physical cart_shelves.
+                for oid in order_ids:
+                    for v in req.varieties:
+                        cur.execute("""
+                            INSERT INTO order_lines
+                                (order_id, store_id, sku_id, recommended_qty, draft_qty, is_manual_edit)
+                            SELECT o.id, o.store_id, %s, 0, 0, true
+                            FROM orders o WHERE o.id = %s
+                            ON CONFLICT (order_id, sku_id) DO NOTHING
+                        """, (v.sku_id, oid))
+
                 cur.execute("""
                     SELECT DISTINCT o.store_id, ol.sku_id
                     FROM orders o
