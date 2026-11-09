@@ -32,9 +32,11 @@ class MoveShelfRequest(BaseModel):
 
 def get_shelf_config(cur, profile_id: str) -> dict:
     cur.execute("""
-        SELECT units_per_shelf, units_per_tray, trays_per_shelf, max_shelves, units_per_cart
-        FROM shelf_configurations
-        WHERE profile_id = %s AND cart_type_id = 'cc' AND approved = true
+        SELECT sc.units_per_shelf, pp.units_per_tray, sc.trays_per_shelf,
+               sc.max_shelves, sc.units_per_cart
+        FROM shelf_configurations sc
+        JOIN packing_profiles pp ON pp.id = sc.profile_id
+        WHERE sc.profile_id = %s AND sc.cart_type_id = 'cc' AND sc.approved = true
     """, (profile_id,))
     cfg = cur.fetchone()
     if not cfg:

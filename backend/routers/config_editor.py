@@ -324,8 +324,8 @@ def preview_variety_change(
         # Get units_per_tray for this profile
         cur.execute("""
             SELECT units_per_tray
-            FROM shelf_configurations
-            WHERE profile_id = %s AND approved = true
+            FROM packing_profiles
+            WHERE id = %s
             LIMIT 1
         """, (shelf["profile_id"],))
         sc = cur.fetchone()
@@ -424,8 +424,8 @@ def update_shelf_varieties(
         # 3. Get units_per_tray for this profile
         cur.execute("""
             SELECT units_per_tray
-            FROM shelf_configurations
-            WHERE profile_id = %s AND approved = true
+            FROM packing_profiles
+            WHERE id = %s
             LIMIT 1
         """, (profile_id,))
         sc = cur.fetchone()
@@ -559,7 +559,7 @@ def update_shelf_varieties(
                     cur.execute("""
                         SELECT id FROM cart_shelves
                         WHERE cart_id = %s AND shelf_position = %s AND sku_id = %s
-                        ORDER BY created_at DESC LIMIT 1
+                        LIMIT 1
                     """, (cart_id, shelf_position, v.sku_id))
                     cs_row = cur.fetchone()
                     if not cs_row:
