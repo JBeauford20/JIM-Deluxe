@@ -505,7 +505,7 @@ def update_shelf_varieties(
             # ── 9e. Delete old cart_shelves at this position ───
             cur.execute("""
                 DELETE FROM cart_shelves
-                WHERE cart_id = ANY(%s) AND shelf_position = %s
+                WHERE cart_id = ANY(%s::uuid[]) AND shelf_position = %s
             """, (cart_ids, shelf_position))
 
             # ── Insert new cart_shelves rows (variety × cart) ──
@@ -527,7 +527,7 @@ def update_shelf_varieties(
                                      FROM cart_shelves WHERE cart_id = order_carts.id),
                     shelves_used  = (SELECT COUNT(DISTINCT shelf_position)
                                      FROM cart_shelves WHERE cart_id = order_carts.id)
-                WHERE id = ANY(%s)
+                WHERE id = ANY(%s::uuid[])
             """, (cart_ids,))
 
             # ── 9f. Release old allocation_reservations for this shelf position ──
@@ -541,7 +541,7 @@ def update_shelf_varieties(
                 WHERE run_id = %s
                   AND cart_shelf_id IN (
                       SELECT cs_hist.id FROM cart_shelves cs_hist
-                      WHERE cs_hist.cart_id = ANY(%s)
+                      WHERE cs_hist.cart_id = ANY(%s::uuid[])
                         AND cs_hist.shelf_position = %s
                   )
                   AND reservation_type IN ('draft', 'approved')
@@ -579,7 +579,7 @@ def update_shelf_varieties(
                     SELECT DISTINCT o.store_id, ol.sku_id
                     FROM orders o
                     JOIN order_lines ol ON ol.order_id = o.id
-                    WHERE o.id = ANY(%s)
+                    WHERE o.id = ANY(%s::uuid[])
                 """, (order_ids,))
                 affected = cur.fetchall()
 
