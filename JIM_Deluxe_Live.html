@@ -348,8 +348,13 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 
 <!-- HISTORY -->
 <div id="screen-history" class="screen">
+  <div class="px-4 pt-3 d-flex gap-2" id="hist-subtabs">
+    <button class="btn btn-sm btn-cta" id="htab-orders" onclick="histSub('orders')"><i class="bi bi-clock-history me-1"></i>Order History</button>
+    <button class="btn btn-sm btn-outline-secondary" id="htab-deliv" onclick="histSub('deliv')"><i class="bi bi-truck me-1"></i>Deliveries</button>
+  </div>
   <div id="hist-list-view" class="p-4"></div>
   <div id="hist-detail-view" style="display:none"></div>
+  <div id="hist-deliv-view" class="p-4" style="display:none"></div>
 </div>
 
 <!-- PROMOTIONS -->
@@ -1837,6 +1842,50 @@ async function doEditStore(){
 /* ORDER HISTORY */
 var histOrders=[],histLoads=[],_histRuns=[];
 
+/* ORDER HISTORY sub-tabs: Order History | Deliveries (manifest) */
+var _delivRows=null;
+function histSub(which){
+  var o=document.getElementById('htab-orders'), d=document.getElementById('htab-deliv');
+  var lv=document.getElementById('hist-list-view'), dv=document.getElementById('hist-detail-view'), dl=document.getElementById('hist-deliv-view');
+  if(which==='deliv'){
+    o.className='btn btn-sm btn-outline-secondary'; d.className='btn btn-sm btn-cta';
+    if(lv)lv.style.display='none'; if(dv)dv.style.display='none'; if(dl)dl.style.display='block';
+    loadDeliveries();
+  }else{
+    o.className='btn btn-sm btn-cta'; d.className='btn btn-sm btn-outline-secondary';
+    if(dl)dl.style.display='none'; if(lv)lv.style.display='block';
+  }
+}
+async function loadDeliveries(){
+  var el=document.getElementById('hist-deliv-view');if(!el)return;
+  el.innerHTML='<div class="text-muted" style="font-size:13px">Loading deliveries…</div>';
+  try{
+    _delivRows=await api('/api/manifest/stores');
+    el.innerHTML='<div class="d-flex align-items-center mb-2"><h6 class="mb-0" style="color:var(--fd)"><i class="bi bi-truck me-2"></i>Deliveries &mdash; last delivered vs last shipped per store ('+_delivRows.length+')</h6>'
+      +'<input id="deliv-search" class="form-control form-control-sm ms-auto" style="max-width:240px" placeholder="search store / city / state" oninput="renderDeliveries()"></div>'
+      +'<div id="deliv-table"></div>';
+    renderDeliveries();
+  }catch(e){el.innerHTML='<div style="font-size:12px;color:#C00000">'+escH(e.message||'Load failed')+'</div>';}
+}
+function renderDeliveries(){
+  var q=((document.getElementById('deliv-search')||{}).value||'').toLowerCase();
+  var rows=(_delivRows||[]).filter(function(r){
+    if(!q)return true;
+    return (''+r.store_id).indexOf(q)>=0||(r.store_name||'').toLowerCase().indexOf(q)>=0||(r.city||'').toLowerCase().indexOf(q)>=0||(r.state||'').toLowerCase().indexOf(q)>=0;
+  });
+  var body=rows.map(function(r){
+    var dd=r.last_delivery_date?String(r.last_delivery_date).slice(0,10):'&mdash;';
+    var sd=r.last_ship_date?String(r.last_ship_date).slice(0,10):'&mdash;';
+    var it=r.in_transit?' <span class="badge" style="background:#b45309">in transit</span>':'';
+    return '<tr><td>'+r.store_id+'</td><td>'+escH(r.store_name||'')+'</td><td>'+escH(r.city||'')+'</td><td>'+escH(r.state||'')+'</td>'
+      +'<td>'+escH(r.volume_code||'')+'</td>'
+      +'<td>'+(r.last_delivery_week?('WK'+r.last_delivery_week):'&mdash;')+'</td><td>'+dd+'</td>'
+      +'<td>'+(r.last_ship_week?('WK'+r.last_ship_week):'&mdash;')+'</td><td>'+sd+it+'</td></tr>';
+  }).join('');
+  document.getElementById('deliv-table').innerHTML=
+    '<div class="table-responsive" style="max-height:62vh;overflow-y:auto;border:1px solid var(--line);border-radius:4px"><table class="table jt mb-0" style="font-size:12px">'
+    +'<thead><tr><th>Store</th><th>Name</th><th>City</th><th>ST</th><th>Velo</th><th>Last Deliv Wk</th><th>Delivered</th><th>Last Ship Wk</th><th>Shipped</th></tr></thead><tbody>'+body+'</tbody></table></div>';
+}
 async function loadHistory(){
   var lv=document.getElementById('hist-list-view');
   var dv=document.getElementById('hist-detail-view');
