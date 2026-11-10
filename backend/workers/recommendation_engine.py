@@ -556,6 +556,23 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             if existing is None or r['last_order_week'] > existing:
                 last_delivery[r['store_id']] = r['last_order_week']
 
+    # Delivery manifest (stacked Compiled shipment sheets) — the authoritative "what we
+    # shipped" record that fills the in-transit <-> scan-lag gap: a store that was
+    # delivered but whose scan hasn't reached us yet still counts as recently delivered,
+    # so the DUE gate won't re-ship it. Only past deliveries (<= today); future dates are
+    # in-transit and handled separately. — Josh, Nov 2026
+    cur.execute("""
+        SELECT store_id, MAX(delivery_date) AS last_manifest
+        FROM delivery_manifest
+        WHERE delivery_date IS NOT NULL AND delivery_date <= %s
+        GROUP BY store_id
+    """, (today,))
+    for r in cur.fetchall():
+        if r['last_manifest']:
+            existing = last_delivery.get(r['store_id'])
+            if existing is None or r['last_manifest'] > existing:
+                last_delivery[r['store_id']] = r['last_manifest']
+
     # ── PACE: sell-through rate (scans ÷ deliveries, 6-week window) ──
     log("Loading sell-through pace...")
     cur.execute("""
