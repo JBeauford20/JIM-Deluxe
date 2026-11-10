@@ -1034,6 +1034,14 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         shipped = {r['store_id'] for r in cur.fetchall()}
         cur.execute("SELECT store_id FROM in_transit_loads WHERE promotion_id=%s", (promo['id'],))
         shipped |= {r['store_id'] for r in cur.fetchall()}
+        # Master sheet (delivery_manifest): a store delivered in the push window or with a
+        # future (in-transit) delivery already got served — don't re-push it. This closes
+        # the double-ship gap for stores whose promo-shipment wasn't tagged. — Josh, Nov 2026
+        cur.execute("""
+            SELECT DISTINCT store_id FROM delivery_manifest
+            WHERE delivery_date >= %s - INTERVAL '18 days' OR delivery_date > %s
+        """, (shipping_week, today))
+        shipped |= {r['store_id'] for r in cur.fetchall()}
         placed = 0; hit = 0
         for store_id, score_meta in ranked_stores:
             if sum(inventory.get(s, 0) for s in psku) <= 0:
