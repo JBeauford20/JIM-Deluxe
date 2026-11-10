@@ -64,6 +64,13 @@ MAX_CART_CONFIGS  = 10   # hard cap on unique cart config codes per run (tighter
 
 TIER_TARGET_CARTS = {'AA': 3, 'A': 3, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 
+# Hard ceiling on carts per store — base + promo + clearance-floor carts all count
+# toward this. No store ever exceeds it (demand decides how close it gets). — Josh, Nov 2026
+MAX_CARTS_PER_STORE = 3
+# Clearance floor: if a run places less than this % of availability, Stage 3.6 drains the
+# remainder into DUE stores (best-demand first) up to MAX_CARTS_PER_STORE. — Josh, Nov 2026
+MIN_CLEARANCE_PCT   = 90.0
+
 # ── Cart diversity rules ───────────────────────────────────────
 # Maximum shelves of any one SIZE GROUP per cart (prevents full 9cm or full 12cm carts).
 # Size group is broader than profile — 9cm Littles + 9cm Ceramic both count as '9cm'.
@@ -959,9 +966,12 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         if not ranked_skus:
             continue
 
-        # Stage 3: Build carts
-        target_carts = playbook.stage1_cart_target(
-            store_id, TIER_TARGET_CARTS.get(tier, MIN_CARTS)
+        # Stage 3: Build carts (never exceed the per-store cart ceiling)
+        target_carts = min(
+            playbook.stage1_cart_target(
+                store_id, TIER_TARGET_CARTS.get(tier, MIN_CARTS)
+            ),
+            MAX_CARTS_PER_STORE,
         )
         carts, committed = build_carts_for_store(
             store_id, ranked_skus, inventory,
@@ -1055,13 +1065,18 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                 continue
             if not nationwide and meta.get('region') not in regs:
                 continue
+            # Promo carts count toward the per-store ceiling — never push a store past it.
+            existing_carts = len(all_orders[store_id]['carts']) if store_id in all_orders else 0
+            promo_room = MAX_CARTS_PER_STORE - existing_carts
+            if promo_room <= 0:
+                continue
             promo_ranked = sorted(((s, inventory.get(s, 0)) for s in psku if inventory.get(s, 0) > 0),
                                   key=lambda x: -x[1])
             if not promo_ranked:
                 break
             carts, committed = build_carts_for_store(
                 store_id, promo_ranked, inventory, shelf_configs, sku_profiles,
-                PROMO_CARTS_PER_STORE, avail_meta, run_profiles_allocated)
+                min(PROMO_CARTS_PER_STORE, promo_room), avail_meta, run_profiles_allocated)
             if not carts:
                 continue
             for sku_id, units in committed.items():
@@ -1161,6 +1176,76 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             log(f"  SKU {sku_id}: rescued {placed:,} units across {rescued} stores")
     else:
         log("  All available SKUs have allocation — no rescue needed")
+
+    # ── STAGE 3.6: CLEARANCE FLOOR ───────────────────────────
+    # Guarantee at least MIN_CLEARANCE_PCT of availability is placed. After the
+    # demand-driven passes, if we're short, top up DUE stores (best demand first)
+    # with one more cart of their highest-scoring remaining SKUs — never exceeding
+    # MAX_CARTS_PER_STORE. Demand-ranked so the next cart lands where demand is
+    # strongest first ("only if demand calls for it"). Only DUE, active stores are
+    # eligible, so this never re-ships a currently-/recently-served store. — Josh, Nov 2026
+    allocated_units = sum(o['total_units'] for o in all_orders.values())
+    clearance = (allocated_units / total_available * 100) if total_available else 0
+    if clearance < MIN_CLEARANCE_PCT and total_available:
+        log(f"\nStage 3.6: Clearance floor — {clearance:.1f}% < {MIN_CLEARANCE_PCT:.0f}%, draining...")
+        added_carts = 0
+        progress = True
+        while clearance < MIN_CLEARANCE_PCT and progress:
+            progress = False
+            for store_id, score_meta in ranked_stores:
+                if sum(inventory.values()) <= 0:
+                    break
+                if not score_meta.get('is_due', True):
+                    continue
+                if status_overrides.get(store_id, 'active') in ('paused', 'do_not_ship', 'inactive', 'hold'):
+                    continue
+                order = all_orders.get(store_id)
+                if (len(order['carts']) if order else 0) >= MAX_CARTS_PER_STORE:
+                    continue
+                # Rank remaining inventory by this store's SKU demand score, then by
+                # units available so the biggest leftovers clear first.
+                scores = order['sku_scores'] if order else {}
+                ranked = sorted(
+                    ((s, inventory.get(s, 0)) for s in inventory if inventory.get(s, 0) > 0),
+                    key=lambda x: (scores.get(x[0], 0.0), x[1]), reverse=True)
+                if not ranked:
+                    break
+                carts, committed = build_carts_for_store(
+                    store_id, ranked, inventory, shelf_configs, sku_profiles,
+                    1, avail_meta, run_profiles_allocated)
+                if not carts:
+                    continue
+                for sku_id, units in committed.items():
+                    if '_jute' not in str(sku_id) and '_ceramic' not in str(sku_id):
+                        inventory[sku_id] = max(0, inventory.get(sku_id, 0) - units)
+                for c in carts:
+                    for sp, sku_id, trays, units, kit, pid in c['contents']:
+                        run_profiles_allocated[pid] += units
+                if order:
+                    base = len(order['carts'])
+                    for i, c in enumerate(carts, 1):
+                        c['cart_number'] = base + i
+                    order['carts'].extend(carts)
+                    order['total_carts'] = len(order['carts'])
+                    order['total_units'] = sum(c['total_units'] for c in order['carts'])
+                else:
+                    all_orders[store_id] = {
+                        'score_meta': score_meta, 'carts': carts, 'committed': committed,
+                        'total_carts': len(carts),
+                        'total_units': sum(c['total_units'] for c in carts),
+                        'is_exception': True, 'sku_scores': {},
+                    }
+                added_carts += 1
+                progress = True
+                allocated_units = sum(o['total_units'] for o in all_orders.values())
+                clearance = (allocated_units / total_available * 100) if total_available else 0
+                if clearance >= MIN_CLEARANCE_PCT:
+                    break
+        log(f"  Clearance floor: +{added_carts} carts → "
+            f"{allocated_units:,}/{total_available:,} ({clearance:.1f}%)")
+        if clearance < MIN_CLEARANCE_PCT:
+            log(f"  NOTE: {MIN_CLEARANCE_PCT:.0f}% not reachable within the "
+                f"{MAX_CARTS_PER_STORE}-cart cap on DUE stores — max achievable {clearance:.1f}%")
 
     # ── STAGE 4.5: CONFIG CONSOLIDATION ──────────────────────
     log(f"\nStage 4.5: Consolidating cart configs (target: ≤{MAX_CART_CONFIGS})...")
