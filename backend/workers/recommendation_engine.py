@@ -54,6 +54,7 @@ CART_SHELVES      = 5
 CART_CEILING_IN   = 95   # CC plant-reach ceiling (load above the 5in base). Drives
                          # height-based shelf capacity: 17cm(29")->3 shelves, 9cm(15")->5.
 MIN_SHELF_CLEAR_IN = 15  # shortest possible shelf (9cm/bowls) — used to test "room for one more"
+PROMO_CARTS_PER_STORE = 2  # max promo (holiday/BF) carts a store gets in the clearance pass
 MAX_SHELVES_SKU   = 2
 CARTS_PER_TRUCK   = 45
 MIN_CARTS         = 2
@@ -987,6 +988,80 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     allocated_units = sum(o['total_units'] for o in all_orders.values())
     clearance = (allocated_units / total_available * 100) if total_available else 0
     log(f"  {allocated_units:,} / {total_available:,} units ({clearance:.1f}% clearance)")
+
+    # ── STAGE 3.4: PROMO CLEARANCE ────────────────────────────
+    # For each ACTIVE promotion, drain its SKUs to in-scope stores that haven't gotten
+    # it yet, ranked by priority, IGNORING the DUE gate (a push). Promo SKUs have ~no
+    # velocity so the normal flow barely places them; this dedicated pass clears them
+    # to the correct region. — Josh, Nov 2026
+    REGION_MAP = {'North': 'Northern', 'South': 'Southern', 'West': 'Western', 'ALL': None}
+    cur.execute("""
+        SELECT p.id, p.name, p.regions, array_agg(ps.sku_id) AS skus
+        FROM promotions p JOIN promotion_skus ps ON ps.promotion_id = p.id
+        WHERE p.is_active = true GROUP BY p.id
+    """)
+    active_promos = cur.fetchall()
+    if active_promos:
+        log(f"\nStage 3.4: Promo clearance ({len(active_promos)} active)...")
+    for promo in active_promos:
+        psku = [s for s in (promo['skus'] or []) if s and inventory.get(s, 0) > 0]
+        if not psku:
+            log(f"  Promo '{promo['name']}': no SKUs with inventory — skip")
+            continue
+        nationwide = False; regs = set()
+        for r in (promo['regions'] or []):
+            m = REGION_MAP.get(r, r)
+            if m is None: nationwide = True
+            else: regs.add(m)
+        cur.execute("SELECT store_id FROM promotion_store_shipments WHERE promotion_id=%s", (promo['id'],))
+        shipped = {r['store_id'] for r in cur.fetchall()}
+        cur.execute("SELECT store_id FROM in_transit_loads WHERE promotion_id=%s", (promo['id'],))
+        shipped |= {r['store_id'] for r in cur.fetchall()}
+        placed = 0; hit = 0
+        for store_id, score_meta in ranked_stores:
+            if sum(inventory.get(s, 0) for s in psku) <= 0:
+                break
+            meta = store_rows.get(store_id)
+            if not meta or store_id in shipped:
+                continue
+            if status_overrides.get(store_id, 'active') in ('paused', 'do_not_ship', 'inactive', 'hold'):
+                continue
+            if not nationwide and meta.get('region') not in regs:
+                continue
+            promo_ranked = sorted(((s, inventory.get(s, 0)) for s in psku if inventory.get(s, 0) > 0),
+                                  key=lambda x: -x[1])
+            if not promo_ranked:
+                break
+            carts, committed = build_carts_for_store(
+                store_id, promo_ranked, inventory, shelf_configs, sku_profiles,
+                PROMO_CARTS_PER_STORE, avail_meta, run_profiles_allocated)
+            if not carts:
+                continue
+            for sku_id, units in committed.items():
+                if '_jute' not in str(sku_id) and '_ceramic' not in str(sku_id):
+                    inventory[sku_id] = max(0, inventory.get(sku_id, 0) - units)
+            for c in carts:
+                for sp, sku_id, trays, units, kit, pid in c['contents']:
+                    run_profiles_allocated[pid] += units
+            if store_id in all_orders:
+                ex = all_orders[store_id]['carts']; base = len(ex)
+                for i, c in enumerate(carts, 1):
+                    c['cart_number'] = base + i
+                ex.extend(carts)
+                all_orders[store_id]['total_carts'] = len(ex)
+                all_orders[store_id]['total_units'] = sum(c['total_units'] for c in ex)
+            else:
+                all_orders[store_id] = {
+                    'score_meta': score_meta, 'carts': carts, 'committed': committed,
+                    'total_carts': len(carts), 'total_units': sum(c['total_units'] for c in carts),
+                    'is_exception': True, 'sku_scores': {},
+                }
+            placed += sum(c['total_units'] for c in carts); hit += 1
+        log(f"  Promo '{promo['name']}': cleared {placed:,} units to {hit} stores")
+    allocated_units = sum(o['total_units'] for o in all_orders.values())
+    clearance = (allocated_units / total_available * 100) if total_available else 0
+    if active_promos:
+        log(f"  After promo clearance: {allocated_units:,} / {total_available:,} ({clearance:.1f}%)")
 
     # ── STAGE 3.5: ZERO-SKU MINIMUM PASS ─────────────────────
     # Any available SKU that received 0 allocation gets pushed to the top stores
