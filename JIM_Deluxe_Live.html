@@ -138,13 +138,9 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   </div>
   <div class="col-12 col-lg-6">
     <div class="pbx mb-3">
-      <div class="pbh"><i class="bi bi-book me-2"></i>Weekly Playbook</div>
+      <div class="pbh"><i class="bi bi-magic me-2"></i>Active Scenarios<span style="float:right;font-size:12px;font-weight:500;cursor:pointer" onclick="openScenarios()">Manage &rarr;</span></div>
       <div class="p-3">
-        <div class="d-flex gap-2 mb-3">
-          <button class="btn btn-sm btn-outline-primary flex-fill" onclick="toast('Business as Usual set','ok')"><i class="bi bi-arrow-repeat me-1"></i>Business as Usual</button>
-          <button class="btn btn-sm btn-primary flex-fill" onclick="toast('Scenario builder coming soon','warn')"><i class="bi bi-plus-circle me-1"></i>Add Scenario</button>
-        </div>
-        <p class="text-muted mb-0" style="font-size:12.5px">No adjustments active. Engine runs on standard velocity + recency weights.</p>
+        <div id="home-scenarios"><div class="text-muted" style="font-size:12.5px">Loading…</div></div>
       </div>
     </div>
     <div class="card">
@@ -579,6 +575,7 @@ function bootApp(){
   document.getElementById('ac').onclick=doApprove;
   document.getElementById('alb').onclick=doApproveLoad;
   loadStores();
+  loadHomeScenarios();
 }
 
 /* NAV */
@@ -588,6 +585,23 @@ function go(n,el){
   var s=document.getElementById('screen-'+n);if(s)s.classList.add('active');
   var nav=el?(el.closest('.nl')||el):null;if(nav)nav.classList.add('active');
   if(n==='routing')loadRoutingTab();
+  if(n==='week')loadHomeScenarios();
+}
+function openScenarios(){
+  var n=Array.prototype.slice.call(document.querySelectorAll('.nl')).filter(function(x){return /scenarios/.test(x.getAttribute('onclick')||'');})[0];
+  if(n)n.click();
+}
+async function loadHomeScenarios(){
+  var el=document.getElementById('home-scenarios');if(!el)return;
+  try{
+    var r=await api('/api/scenarios/?shipping_week='+encodeURIComponent((typeof scnWeek==='function'?scnWeek():'')||''));
+    var active=(r.scenarios||[]).filter(function(s){return s.is_active;});
+    if(!active.length){el.innerHTML='<div class="text-muted" style="font-size:12.5px">No live scenarios — engine runs on standard velocity + recency weights. <span style="cursor:pointer;text-decoration:underline" onclick="openScenarios()">Add one &rarr;</span></div>';return;}
+    el.innerHTML=active.map(function(s){
+      var chips=(s.adjustments||[]).map(adjChip).join('');
+      return '<div style="padding:6px 0;border-bottom:1px solid var(--line)"><div style="font-weight:600;font-size:13px"><span class="badge" style="background:#15803d">ACTIVE</span> '+escH(s.name||'')+'</div>'+chips+'</div>';
+    }).join('');
+  }catch(e){el.innerHTML='<div style="font-size:12px;color:#C00000">'+escH(e.message||'Load failed')+'</div>';}
 }
 
 /* TOAST */
