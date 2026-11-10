@@ -51,6 +51,9 @@ W_SKU_AVAIL = 0.18   # availability weight — reduced Oct 2026 (was 0.35); velo
 
 # ── Operational constants ─────────────────────────────────────
 CART_SHELVES      = 5
+CART_CEILING_IN   = 95   # CC plant-reach ceiling (load above the 5in base). Drives
+                         # height-based shelf capacity: 17cm(29")->3 shelves, 9cm(15")->5.
+MIN_SHELF_CLEAR_IN = 15  # shortest possible shelf (9cm/bowls) — used to test "room for one more"
 MAX_SHELVES_SKU   = 2
 CARTS_PER_TRUCK   = 45
 MIN_CARTS         = 2
@@ -287,6 +290,7 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
 
     for cart_num in range(1, target_carts + 1):
         shelves_left     = CART_SHELVES
+        cart_height      = 0.0   # inches of clear height used by this cart's shelves
         cart_contents    = []
         profile_shelf_ct = defaultdict(int)
         shelf_pos        = 0
@@ -294,43 +298,46 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
         size_group_shelf_ct = defaultdict(int)   # shelves per size family this cart
 
         while shelves_left > 0:
-            # Select the highest-scoring profile that still has inventory,
-            # hasn't hit its per-cart profile cap, and whose size group
-            # hasn't hit MAX_SHELVES_SIZE_GROUP (prevents full 9cm/12cm carts).
-            best_pid = None; best_score = -1
-            for pid, skus in profile_skus.items():
-                cfg_p    = shelf_configs[pid]
-                p_max    = cfg_p.get('max_shelves') or CART_SHELVES
-                size_grp = PROFILE_SIZE_GROUP.get(pid, pid)
-                if profile_shelf_ct[pid] >= p_max:
-                    continue
-                if size_group_shelf_ct[size_grp] >= MAX_SHELVES_SIZE_GROUP:
-                    continue
-                for sku_id, score in skus:
-                    if inventory.get(sku_id, 0) - committed[sku_id] > 0:
-                        # Guarantee first placement for zero-allocated profiles
-                        if (run_profiles_allocated is not None
-                                and run_profiles_allocated.get(pid, 0) == 0):
-                            effective_score = 999.0
-                        else:
-                            effective_score = score
-                            # Cart diversity: if previous cart maxed out this
-                            # size group (used MAX_SHELVES_SIZE_GROUP shelves),
-                            # apply a hard 0.1× penalty so the next cart is
-                            # forced to lead with a different family.
-                            # This guarantees genuinely different cart content
-                            # → different CC codes after consolidation.
-                            if prev_cart_sg_counts:
-                                prev_counts = prev_cart_sg_counts[-1]
-                                sg = PROFILE_SIZE_GROUP.get(pid, pid)
-                                if prev_counts.get(sg, 0) >= MAX_SHELVES_SIZE_GROUP:
-                                    effective_score *= 0.1
-                        if effective_score > best_score:
-                            best_score = effective_score; best_pid = pid
-                        break
+            # Pick the best profile that has inventory + room (per-profile cap + height
+            # ceiling + the size-group diversity cap). Two passes: prefer the diversity
+            # cap; but if it blocks everything while the cart still has height room, relax
+            # it so a low-variety cart (e.g. a bowl-only store) fills to its height
+            # capacity instead of shipping a half-empty 2-shelf cart. — Josh, Nov 2026
+            def _select(relax_group):
+                bp = None; bs = -1
+                for pid, skus in profile_skus.items():
+                    cfg_p    = shelf_configs[pid]
+                    p_max    = cfg_p.get('max_shelves') or CART_SHELVES
+                    size_grp = PROFILE_SIZE_GROUP.get(pid, pid)
+                    if profile_shelf_ct[pid] >= p_max:
+                        continue
+                    if not relax_group and size_group_shelf_ct[size_grp] >= MAX_SHELVES_SIZE_GROUP:
+                        continue
+                    # Height ceiling: a shelf of this profile must fit under the cart ceiling
+                    if cart_height + cfg_p.get('clear_height_in', MIN_SHELF_CLEAR_IN) > CART_CEILING_IN:
+                        continue
+                    for sku_id, score in skus:
+                        if inventory.get(sku_id, 0) - committed[sku_id] > 0:
+                            if (run_profiles_allocated is not None
+                                    and run_profiles_allocated.get(pid, 0) == 0):
+                                effective_score = 999.0
+                            else:
+                                effective_score = score
+                                if not relax_group and prev_cart_sg_counts:
+                                    prev_counts = prev_cart_sg_counts[-1]
+                                    sg = PROFILE_SIZE_GROUP.get(pid, pid)
+                                    if prev_counts.get(sg, 0) >= MAX_SHELVES_SIZE_GROUP:
+                                        effective_score *= 0.1
+                            if effective_score > bs:
+                                bs = effective_score; bp = pid
+                            break
+                return bp
 
+            best_pid = _select(False)
             if best_pid is None:
-                break   # nothing left to fill
+                best_pid = _select(True)   # relax max-2/type to fill the cart to capacity
+            if best_pid is None:
+                break   # genuinely nothing left to fill
 
             cfg  = shelf_configs[best_pid]
             ups  = cfg['units_per_shelf']
@@ -367,6 +374,7 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             cart_contents.extend(shelf_items)
             profile_shelf_ct[best_pid] += 1
             size_group_shelf_ct[PROFILE_SIZE_GROUP.get(best_pid, best_pid)] += 1
+            cart_height += shelf_configs[best_pid].get('clear_height_in', MIN_SHELF_CLEAR_IN)
             shelves_left -= 1
 
         if not cart_contents:
@@ -418,7 +426,27 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             sg_counts[sg] = sg_counts.get(sg, 0) + 1
         prev_cart_sg_counts.append(sg_counts)
 
-    return carts, dict(committed)
+    # Height-based minimum: a cart must be filled to its height capacity (3 shelves of
+    # 17cm up to 5 of 9cm/bowls). Drop any cart that is neither height-full nor at the
+    # shelf cap — an under-filled cart wastes freight (a CC ships the same at 2 or 5
+    # shelves). Dropped carts release their units back to inventory. — Josh, Nov 2026
+    kept = []
+    for c in carts:
+        ch = sum(shelf_configs.get(pid, {}).get('clear_height_in', MIN_SHELF_CLEAR_IN)
+                 for (_, _, _, _, _, pid) in c['contents'])
+        height_full = (ch + MIN_SHELF_CLEAR_IN) > CART_CEILING_IN
+        # Keep a cart if it's full for its tray heights (e.g. 3 shelves of 17cm) or has
+        # at least 3 shelves. After the relaxed fill above, only genuine tiny-inventory
+        # carts fall below 3 — those get dropped (no more 2-shelf carts). — Josh, Nov 2026
+        if height_full or c['shelves_used'] >= 3:
+            kept.append(c)
+    for i, c in enumerate(kept, 1):
+        c['cart_number'] = i
+    committed = defaultdict(int)
+    for c in kept:
+        for (_, sku_id, trays, units, kit, pid) in c['contents']:
+            committed[sku_id] += units
+    return kept, dict(committed)
 
 def determine_kit_type(sku_id, units, committed, avail_meta):
     meta = avail_meta.get(sku_id, {})
@@ -747,7 +775,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     cur.execute("""
         SELECT sc.profile_id, sc.units_per_shelf, sc.trays_per_shelf,
                sc.max_shelves, sc.units_per_cart,
-               pp.units_per_tray, spp.sku_id
+               pp.units_per_tray, pp.clear_height_in, spp.sku_id
         FROM shelf_configurations sc
         JOIN sku_packing_profiles spp ON spp.profile_id = sc.profile_id
         JOIN packing_profiles pp ON pp.id = sc.profile_id
@@ -762,6 +790,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             'units_per_tray':   r['units_per_tray'],
             'max_shelves':      r['max_shelves'] or CART_SHELVES,
             'units_per_cart':   r['units_per_cart'],
+            'clear_height_in':  float(r['clear_height_in'] or MIN_SHELF_CLEAR_IN),
         }
         if r['sku_id'] not in sku_profiles:
             sku_profiles[r['sku_id']] = r['profile_id']
