@@ -559,14 +559,16 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     # Delivery manifest (stacked Compiled shipment sheets) — the authoritative "what we
     # shipped" record that fills the in-transit <-> scan-lag gap: a store that was
     # delivered but whose scan hasn't reached us yet still counts as recently delivered,
-    # so the DUE gate won't re-ship it. Only past deliveries (<= today); future dates are
-    # in-transit and handled separately. — Josh, Nov 2026
+    # so the DUE gate won't re-ship it. INCLUDES future delivery dates: a store currently
+    # shipping (future delivery) is in-transit and must count as just-served — its
+    # weeks_ago goes negative so is_due is False and it's excluded. in_transit_loads is
+    # deprecated/empty, so the manifest is now the sole in-transit source. — Josh, Nov 2026
     cur.execute("""
         SELECT store_id, MAX(delivery_date) AS last_manifest
         FROM delivery_manifest
-        WHERE delivery_date IS NOT NULL AND delivery_date <= %s
+        WHERE delivery_date IS NOT NULL
         GROUP BY store_id
-    """, (today,))
+    """)
     for r in cur.fetchall():
         if r['last_manifest']:
             existing = last_delivery.get(r['store_id'])
