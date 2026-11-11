@@ -89,12 +89,19 @@ def order_detail(order_id: str, user=Depends(get_current_user)):
                                 'family', k.family,
                                 'trays', cs.tray_count,
                                 'units', cs.unit_count,
-                                'kit_type', cs.kit_type
+                                'kit_type', cs.kit_type,
+                                'aster_code', al.plant_id,
+                                'variety_name', NULLIF(TRIM(CONCAT_WS(' ', vpr.parsed_genus, vpr.parsed_variety)), ''),
+                                'code_level', al.code_level
                             ) ORDER BY cs.unit_count DESC)
                         ) AS shelf_row
                         FROM cart_shelves cs
                         JOIN skus k ON k.sku_id = cs.sku_id
                         LEFT JOIN packing_profiles pp ON pp.id = cs.profile_id
+                        LEFT JOIN availability_lines al ON al.id = cs.availability_line_id
+                        LEFT JOIN variety_parsed_reference vpr
+                               ON vpr.aster_code = CASE WHEN al.plant_id ~ '^[0-9]+$'
+                                                        THEN al.plant_id::bigint END
                         WHERE cs.cart_id = oc.id
                         GROUP BY cs.shelf_position, cs.profile_id, pp.short_name
                     ) AS shelves_grouped) AS shelves

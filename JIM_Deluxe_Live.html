@@ -848,27 +848,50 @@ async function toggleSKURow(orderId, rowId){
     try{
       var d=await api('/api/orders/'+orderId);
       var lines=(d.lines||[]).filter(function(l){return (l.draft_qty||l.recommended_qty||0)>0;});
-      _skuCache[orderId]=lines;
-      renderSKUDropdown(inner,lines);
+      _skuCache[orderId]={lines:lines,carts:d.carts||[]};
+      renderSKUDropdown(inner,_skuCache[orderId]);
     }catch(e){inner.innerHTML='<span class="text-danger">Failed to load: '+e.message+'</span>';}
   }
 }
 
-function renderSKUDropdown(el, lines){
+function renderSKUDropdown(el, detail){
+  // Back-compat: detail may be a bare lines array (old cache) or {lines,carts}.
+  var lines=Array.isArray(detail)?detail:(detail.lines||[]);
+  var carts=Array.isArray(detail)?[]:(detail.carts||[]);
   if(!lines.length){el.innerHTML='<em class="text-muted">No order lines found</em>';return;}
+  // Aggregate Aster varieties per SKU across all of this store's carts/shelves.
+  var varBySku={};
+  carts.forEach(function(c){(c.shelves||[]).forEach(function(sh){(sh.varieties||[]).forEach(function(v){
+    if(!v.aster_code)return;
+    var k=v.sku_id; if(!varBySku[k])varBySku[k]={};
+    if(!varBySku[k][v.aster_code])varBySku[k][v.aster_code]={name:v.variety_name||'',units:0,lvl:v.code_level||''};
+    varBySku[k][v.aster_code].units+=(v.units||0);
+  });});});
+  var anyVar=Object.keys(varBySku).length>0;
   var sorted=lines.slice().sort(function(a,b){return (b.draft_qty||0)-(a.draft_qty||0);});
   el.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12px">'
     +'<thead><tr style="border-bottom:1px solid var(--line)">'
-    +'<th style="padding:4px 12px 6px 0;color:var(--is);font-weight:600">Description</th>'
+    +'<th style="padding:4px 12px 6px 0;color:var(--is);font-weight:600">Description'
+    +(anyVar?' <span style="font-weight:400">· varieties (Aster)</span>':'')+'</th>'
     +'<th style="padding:4px 12px 6px 0;color:var(--is);font-weight:600">SKU</th>'
     +'<th style="padding:4px 0 6px 0;color:var(--is);font-weight:600;text-align:right">Units</th>'
     +'</tr></thead><tbody>'
     +sorted.map(function(l){
-      return '<tr style="border-bottom:1px solid #f0f4f0">'
+      var vmap=varBySku[l.sku_id]||{};
+      var vs=Object.keys(vmap).map(function(ac){return {code:ac,name:vmap[ac].name,units:vmap[ac].units};})
+                 .sort(function(a,b){return b.units-a.units;});
+      var main='<tr style="border-bottom:'+(vs.length?'none':'1px solid #f0f4f0')+'">'
         +'<td style="padding:4px 12px 4px 0;font-weight:600">'+(l.description||l.desc||'SKU '+l.sku_id)+'</td>'
         +'<td style="padding:4px 12px 4px 0;font-family:monospace;color:var(--is)">'+l.sku_id+'</td>'
         +'<td style="padding:4px 0 4px 0;text-align:right;font-weight:700;color:var(--fd)">'+fmt(l.draft_qty||l.recommended_qty||0)+'</td>'
         +'</tr>';
+      if(!vs.length) return main;
+      var sub='<tr style="border-bottom:1px solid #f0f4f0"><td colspan="3" style="padding:0 0 6px 16px">'
+        +vs.map(function(v){return '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--is);padding:1px 8px 1px 0">'
+          +'<span><span style="font-family:monospace">'+v.code+'</span> '+escH(v.name||'')+'</span>'
+          +'<span style="font-weight:600">'+fmt(v.units)+'</span></div>';}).join('')
+        +'</td></tr>';
+      return main+sub;
     }).join('')
     +'</tbody></table>';
 }

@@ -271,6 +271,32 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
 
 # ── Cart building ─────────────────────────────────────────────
 
+def _distribute_units_across_lines(total, lines):
+    """Largest-remainder split of `total` units across a SKU's availability lines, weighted
+    by each line's units_available and capped at it (never over-allocates a line). `lines` is
+    a list of [line_id, units_available]. Returns [(line_id, qty)] with qty>0, summing to
+    min(total, capacity). Mirrors the export's _distribute_trays so generation matches the
+    Inventory Draw / Cart-Config numbers. — Josh, Nov 2026 (Step 2)"""
+    pool = [(lid, av) for lid, av in lines if av > 0]
+    if not pool or total <= 0:
+        return []
+    cap = sum(av for _, av in pool)
+    total = min(total, cap)                       # never draw more than exists
+    raw = [(lid, total * av / cap) for lid, av in pool]
+    res = {lid: int(x) for lid, x in raw}
+    cap_map = {lid: av for lid, av in pool}
+    rem = total - sum(res.values())
+    order = sorted(range(len(raw)), key=lambda i: raw[i][1] - int(raw[i][1]), reverse=True)
+    guard = 0
+    while rem > 0 and order and guard < len(order) * 5:
+        lid = raw[order[guard % len(order)]][0]
+        if res[lid] < cap_map[lid]:
+            res[lid] += 1
+            rem -= 1
+        guard += 1
+    return [(lid, res[lid]) for lid, _ in pool if res[lid] > 0]
+
+
 def build_carts_for_store(store_id, ranked_skus, inventory,
                            shelf_configs, sku_profiles,
                            target_carts, avail_meta,
@@ -1512,6 +1538,35 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     iso_year    = _iso[0]   # include the ISO year so keys don't collide across years
                             # (2026 even has an ISO week 53). — audit
 
+    # ── Variety allocation (Step 2): resolve Aster varieties onto every cart shelf ──
+    # Distribute each SKU's committed units across its availability lines proportionally
+    # (largest-remainder, capped per line so nothing overdraws), then deal those units down
+    # to individual shelves below. Populates cart_shelves.availability_line_id + the
+    # order_line_allocations ledger so each store's cart is variety-resolved. — Josh, Nov 2026
+    cur.execute("SELECT id, sku_id, units_available FROM availability_lines WHERE batch_id = %s",
+                (batch_id,))
+    _aster_lines = defaultdict(list)
+    for r in cur.fetchall():
+        _aster_lines[r['sku_id']].append([str(r['id']), int(r['units_available'] or 0)])
+    for _sid in _aster_lines:
+        _aster_lines[_sid].sort(key=lambda x: (-x[1], x[0]))   # most-available first (deterministic)
+
+    _sku_committed = defaultdict(int)
+    for _s, _d in all_orders.items():
+        for _c in _d['carts']:
+            for (_sp, _sk, _tr, _u, _k, _pid) in _c['contents']:
+                _sku_committed[_sk] += _u
+
+    line_remaining  = {}    # availability_line_id -> units still to assign
+    sku_lines_order = {}    # sku_id -> [line_id, ...] consumption order
+    for _sk, _tot in _sku_committed.items():
+        _alloc = _distribute_units_across_lines(_tot, _aster_lines.get(_sk, []))
+        sku_lines_order[_sk] = [lid for lid, _q in _alloc]
+        for lid, q in _alloc:
+            line_remaining[lid] = line_remaining.get(lid, 0) + q
+
+    ledger_pending = []     # (order_id, sku_id, cart_shelf_id, availability_line_id, qty)
+
     for store_id, data in all_orders.items():
         order_id   = order_id_map[store_id]
         sku_totals = defaultdict(int)
@@ -1537,10 +1592,40 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             for (shelf_pos, sku_id, tray_count, unit_count, kit_type, profile_id) \
                     in cart['contents']:
                 clean_kit = kit_type if kit_type != 'mixed' else 'ceramic_kit'
-                shelf_rows.append((
-                    cart_id, shelf_pos, sku_id, profile_id,
-                    clean_kit, tray_count, unit_count,
-                ))
+                # Split this shelf item across the SKU's allocated Aster lines (a shelf may
+                # span >1 variety → multiple cart_shelves rows at the same shelf_position).
+                need       = unit_count
+                trays_left = tray_count
+                segments   = []   # (availability_line_id, units, trays)
+                for lid in sku_lines_order.get(sku_id, []):
+                    if need <= 0:
+                        break
+                    avail = line_remaining.get(lid, 0)
+                    if avail <= 0:
+                        continue
+                    take = min(need, avail)
+                    if take == need:                     # final segment takes the rest
+                        seg_trays = trays_left
+                    else:
+                        seg_trays = min(trays_left,
+                                        max(1, round(tray_count * take / unit_count)) if unit_count else trays_left)
+                    segments.append((lid, take, seg_trays))
+                    line_remaining[lid] = avail - take
+                    need       -= take
+                    trays_left -= seg_trays
+                if need > 0 or not segments:
+                    # No/insufficient variety info — keep the remainder unattributed (NULL line).
+                    segments.append((None, need if segments else unit_count, max(0, trays_left)))
+                for (lid, seg_units, seg_trays) in segments:
+                    if seg_units <= 0:
+                        continue
+                    cs_id = str(uuid.uuid4())
+                    shelf_rows.append((
+                        cs_id, cart_id, shelf_pos, sku_id, profile_id,
+                        clean_kit, seg_trays, seg_units, lid,
+                    ))
+                    if lid is not None:
+                        ledger_pending.append((order_id, sku_id, cs_id, lid, seg_units))
                 sku_totals[sku_id] += unit_count
 
         for sku_id, total_units in sku_totals.items():
@@ -1562,9 +1647,9 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
 
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO cart_shelves
-            (cart_id, shelf_position, sku_id, profile_id,
-             kit_type, tray_count, unit_count)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
+            (id, cart_id, shelf_position, sku_id, profile_id,
+             kit_type, tray_count, unit_count, availability_line_id)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, shelf_rows, page_size=500)
 
     psycopg2.extras.execute_batch(cur, """
@@ -1574,6 +1659,27 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT DO NOTHING
     """, line_rows, page_size=500)
+
+    # ── WRITE ALLOCATION LEDGER (Step 2) ─────────────────────────
+    # One row per (cart shelf segment × Aster variety). Resolves each to the store's
+    # order_line so the ledger ties variety draws to the exported line.
+    if ledger_pending:
+        order_ids_all = list({str(oid) for oid in order_id_map.values()})
+        cur.execute(
+            "SELECT id, order_id, sku_id FROM order_lines WHERE order_id = ANY(%s::uuid[])",
+            (order_ids_all,))
+        ol_map = {(str(r['order_id']), r['sku_id']): r['id'] for r in cur.fetchall()}
+        ledger_rows = [
+            (ol_map.get((str(oid), sku)), lid, cs_id, str(run_id), batch_id, sku, qty, 'engine')
+            for (oid, sku, cs_id, lid, qty) in ledger_pending
+        ]
+        psycopg2.extras.execute_batch(cur, """
+            INSERT INTO order_line_allocations
+                (order_line_id, availability_line_id, cart_shelf_id,
+                 run_id, batch_id, sku_id, qty, source)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """, ledger_rows, page_size=500)
+        log(f"  {len(ledger_rows):,} variety allocations written to ledger")
 
     log(f"  {len(cart_rows)} carts | {len(shelf_rows)} shelves | {len(line_rows)} order lines")
 
