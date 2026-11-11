@@ -1271,6 +1271,7 @@ function pcAddItem(pos){
   if(ex){ex.tray_count+=trays;}  // same SKU stacks; different packing structures coexist on the shelf
   else{s.items.push({sku_id:sku,tray_count:trays,profile_id:sk.profile_id,description:sk.description});}
   pcRenderBuilder();pcRenderSandbox();
+  if(pcHeightIssues().length)toast('Taller items prefer lower shelves','warn');
 }
 function pcRemoveItem(pos,idx){var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(s){s.items.splice(idx,1);}pcRenderBuilder();pcRenderSandbox();}
 function pcCartUnits(){var t=0;_pcCur.shelves.forEach(function(s){s.items.forEach(function(i){var p=pcProf(i.profile_id);t+=i.tray_count*((p&&p.units_per_tray)||0);});});return t;}
@@ -1328,6 +1329,14 @@ function pcShelfLayout(sh){
 }
 function pcShelfStats(sh){var L=pcShelfLayout(sh);
   return {trays:L.trays,units:L.units,pct:L.areaPct,over:L.unfit.length>0,unfit:L.unfit.length,clear_h:L.clear_h};}
+// Soft guardrail: shelf 1 = bottom, so clear heights should run tallest->shortest going up.
+function pcShelfH(s){var m=0;s.items.forEach(function(i){var g=pcGeom(i.profile_id);if(g)m=Math.max(m,g.clear_h||0);});return m;}
+function pcHeightIssues(){
+  var sh=_pcCur.shelves.filter(function(s){return s.items.length;}).sort(function(a,b){return a.shelf_position-b.shelf_position;});
+  var out=[];
+  for(var i=1;i<sh.length;i++){ if(pcShelfH(sh[i])>pcShelfH(sh[i-1])) out.push('Shelf '+sh[i].shelf_position+' has a taller item than Shelf '+sh[i-1].shelf_position); }
+  return out;
+}
 function pcShelfSVG(sh){
   var L=pcShelfLayout(sh),scale=250/L.W,SW=L.W*scale,SD=L.D*scale,r='';
   L.placed.forEach(function(t){
@@ -1366,6 +1375,8 @@ function pcRenderBuilder(){
     +'<button class="btn btn-sm btn-outline-secondary" onclick="pcStartOver()"><i class="bi bi-arrow-counterclockwise me-1"></i>Start Over</button>'
     +(_pcCur.id?'<button class="btn btn-sm btn-outline-danger" onclick="pcDelete()"><i class="bi bi-trash"></i></button>':'')
     +'</div>';
+  var hi=pcHeightIssues();
+  if(hi.length)h+='<div style="background:#fff4e5;border:1px solid #f0c060;border-radius:6px;padding:6px 10px;font-size:12px;color:#8a5a00;margin-bottom:10px"><i class="bi bi-exclamation-triangle me-1"></i>Taller items prefer lower shelves — '+escH(hi.join('; '))+'.</div>';
   // two columns: shelves (left) + cart elevation (right)
   h+='<div style="display:flex;gap:16px;align-items:flex-start"><div style="flex:1;min-width:0">';
   var shelves=_pcCur.shelves.slice().sort(function(a,b){return a.shelf_position-b.shelf_position;});
@@ -1429,6 +1440,8 @@ async function pcSave(){
   if(!_pcCur.name.trim()){toast('Name the cart first','warn');return;}
   var shelves=_pcCur.shelves.filter(function(s){return s.items.length;});
   if(!shelves.length){toast('Add at least one shelf with a SKU','warn');return;}
+  var hi=pcHeightIssues();
+  if(hi.length&&!confirm(hi.join('\n')+'\n\nTaller items prefer lower shelves. Save anyway?'))return;
   var body={name:_pcCur.name.trim(),cart_type_id:'cc',shelves:shelves.map(function(s){
     return {shelf_position:s.shelf_position,items:s.items.map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count,profile_id:i.profile_id};})};})};
   try{
