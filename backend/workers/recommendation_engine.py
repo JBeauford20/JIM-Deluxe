@@ -71,6 +71,11 @@ MAX_CARTS_PER_STORE = 3
 # remainder into DUE stores (best-demand first) up to MAX_CARTS_PER_STORE. — Josh, Nov 2026
 MIN_CLEARANCE_PCT   = 90.0
 
+# Everyday bowl rule: a cart may carry at most ONE shelf of the same everyday H2O Bowl or
+# Venti Bowl. Promotion (holiday/BF) carts are exempt. — Josh, Nov 2026
+EVERYDAY_BOWL_PROFILES    = {'bowlEU', 'venti'}
+EVERYDAY_BOWL_MAX_SHELVES = 1
+
 # ── Cart diversity rules ───────────────────────────────────────
 # Maximum shelves of any one SIZE GROUP per cart (prevents full 9cm or full 12cm carts).
 # Size group is broader than profile — 9cm Littles + 9cm Ceramic both count as '9cm'.
@@ -269,7 +274,7 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
 def build_carts_for_store(store_id, ranked_skus, inventory,
                            shelf_configs, sku_profiles,
                            target_carts, avail_meta,
-                           run_profiles_allocated=None):
+                           run_profiles_allocated=None, is_promo=False):
     """
     Builds carts shelf-by-shelf, filling each physical shelf with varieties
     from the same profile group (e.g. a 12cm shelf holds Fittonia + Calathea
@@ -318,6 +323,10 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
                     p_max    = cfg_p.get('max_shelves') or CART_SHELVES
                     size_grp = PROFILE_SIZE_GROUP.get(pid, pid)
                     if profile_shelf_ct[pid] >= p_max:
+                        continue
+                    # Everyday bowl/venti: max 1 shelf per cart (promo carts exempt).
+                    if (not is_promo and pid in EVERYDAY_BOWL_PROFILES
+                            and profile_shelf_ct[pid] >= EVERYDAY_BOWL_MAX_SHELVES):
                         continue
                     if not relax_group and size_group_shelf_ct[size_grp] >= MAX_SHELVES_SIZE_GROUP:
                         continue
@@ -1076,7 +1085,8 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                 break
             carts, committed = build_carts_for_store(
                 store_id, promo_ranked, inventory, shelf_configs, sku_profiles,
-                min(PROMO_CARTS_PER_STORE, promo_room), avail_meta, run_profiles_allocated)
+                min(PROMO_CARTS_PER_STORE, promo_room), avail_meta, run_profiles_allocated,
+                is_promo=True)
             if not carts:
                 continue
             for sku_id, units in committed.items():
@@ -1151,6 +1161,10 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                 profile_used = len({sp for sp, sid, _, _, _, pid in last_cart['contents']
                                      if pid == profile_id})
                 if profile_used >= profile_max:
+                    continue
+                # Everyday bowl/venti: never rescue a 2nd bowl shelf onto a cart.
+                if (profile_id in EVERYDAY_BOWL_PROFILES
+                        and profile_used >= EVERYDAY_BOWL_MAX_SHELVES):
                     continue
 
                 trays_to_add = min(avail_net // upt, 1) if upt else 0
