@@ -338,6 +338,20 @@ def preview_variety_change(
         new_units_committed = new_units_per_shelf * cart_count
         net_change = new_units_committed - current_units_committed
 
+        # Units this edit would free (credited back below) — mirrors the commit path so
+        # the preview's availability math matches what commit will actually allow.
+        cur.execute("""
+            SELECT cs.sku_id, COALESCE(SUM(ar.reserved_qty), 0) AS freed
+            FROM allocation_reservations ar
+            JOIN cart_shelves cs ON cs.id = ar.cart_shelf_id
+            JOIN order_carts  oc ON oc.id = cs.cart_id
+            WHERE oc.template_id = %s
+              AND cs.shelf_position = %s
+              AND ar.reservation_type <> 'released'
+            GROUP BY cs.sku_id
+        """, (template_id, req.shelf_position))
+        freed_by_sku = {r["sku_id"]: int(r["freed"] or 0) for r in cur.fetchall()}
+
         # Check availability per variety
         per_variety_check = []
         all_ok = True
@@ -356,7 +370,7 @@ def preview_variety_change(
                     WHERE sku_id = %s
                 """, (v.sku_id,))
             avail = cur.fetchone()
-            available = int(avail["remaining"] or 0) if avail else 0
+            available = (int(avail["remaining"] or 0) if avail else 0) + freed_by_sku.get(v.sku_id, 0)
             ok = available >= required
             if not ok:
                 all_ok = False
@@ -440,7 +454,38 @@ def update_shelf_varieties(
         # 6. Delta per cart
         delta_per_cart = new_units_per_shelf - old_units_per_shelf
 
-        # 7. Availability check for each variety
+        # 6a. Row-lock availability for every SKU this edit touches, so two concurrent
+        # edits can't both pass the check and oversubscribe (double-spend race).
+        cur.execute("SELECT batch_id FROM recommendation_runs WHERE id = %s", (run_id,))
+        brow = cur.fetchone()
+        batch_id = brow["batch_id"] if brow else None
+
+        # 6b. Units this edit will FREE: everything currently reserved by this template's
+        # carts at this shelf position. They're cascade-deleted when we rewrite the shelf
+        # below (allocation_reservations.cart_shelf_id is ON DELETE CASCADE), so credit
+        # them back when checking availability — otherwise keeping/raising an existing SKU
+        # is falsely rejected because its old units aren't released until after the check.
+        cur.execute("""
+            SELECT cs.sku_id, COALESCE(SUM(ar.reserved_qty), 0) AS freed
+            FROM allocation_reservations ar
+            JOIN cart_shelves cs ON cs.id = ar.cart_shelf_id
+            JOIN order_carts  oc ON oc.id = cs.cart_id
+            WHERE oc.template_id = %s
+              AND cs.shelf_position = %s
+              AND ar.reservation_type <> 'released'
+            GROUP BY cs.sku_id
+        """, (template_id, shelf_position))
+        freed_by_sku = {r["sku_id"]: int(r["freed"] or 0) for r in cur.fetchall()}
+
+        touched_skus = {v.sku_id for v in req.varieties} | set(freed_by_sku.keys())
+        if batch_id and touched_skus:
+            cur.execute("""
+                SELECT id FROM availability_lines
+                WHERE batch_id = %s AND sku_id = ANY(%s)
+                FOR UPDATE
+            """, (batch_id, list(touched_skus)))
+
+        # 7. Availability check for each variety (crediting back the units this edit frees)
         for v in req.varieties:
             required = v.tray_count * units_per_tray * cart_count
             if v.availability_line_id:
@@ -454,7 +499,7 @@ def update_shelf_varieties(
                     WHERE sku_id = %s
                 """, (v.sku_id,))
             avail = cur.fetchone()
-            available = int(avail["remaining"] or 0) if avail else 0
+            available = (int(avail["remaining"] or 0) if avail else 0) + freed_by_sku.get(v.sku_id, 0)
             if available < required:
                 raise HTTPException(
                     400,
