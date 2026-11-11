@@ -225,6 +225,44 @@ def add_trays(
         return {"shelf_id": shelf_id, "shelf_position": pos, "units_added": units}
 
 
+@router.delete("/{cart_id}")
+def remove_cart(
+    cart_id: str,
+    user=Depends(require_role("order_writer", "manager", "admin"))
+):
+    """Remove a whole cart from a store's plan. Deleting its shelves cascades the
+    allocation ledger + reservations (units return to remaining), then order_lines and
+    order totals are recomputed from what's left."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT oc.id, oc.order_id, oc.total_units
+            FROM order_carts oc WHERE oc.id = %s FOR UPDATE
+        """, (cart_id,))
+        cart = cur.fetchone()
+        if not cart:
+            raise HTTPException(404, "Cart not found")
+        order_id = cart["order_id"]
+
+        # Delete shelves → ON DELETE CASCADE frees order_line_allocations (ledger) and
+        # allocation_reservations tied to those shelves, so remaining goes back up.
+        cur.execute("DELETE FROM cart_shelves WHERE cart_id = %s", (cart_id,))
+        cur.execute("DELETE FROM order_carts WHERE id = %s", (cart_id,))
+
+        # Recompute each order line's draft_qty from the shelves that remain on this order.
+        cur.execute("""
+            UPDATE order_lines ol
+            SET draft_qty = COALESCE((
+                    SELECT SUM(cs.unit_count)
+                    FROM order_carts oc JOIN cart_shelves cs ON cs.cart_id = oc.id
+                    WHERE oc.order_id = ol.order_id AND cs.sku_id = ol.sku_id), 0)
+            WHERE ol.order_id = %s
+        """, (order_id,))
+
+        recalc_order(cur, order_id)
+        return {"removed": True, "units_released": cart["total_units"]}
+
+
 @router.delete("/{cart_id}/shelves/{shelf_position}")
 def remove_shelf(
     cart_id: str,

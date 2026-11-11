@@ -1096,9 +1096,10 @@ function openEd(sid){go('editor',document.querySelectorAll('.nl')[2]);setTimeout
 function renderCart(o,d){
   var cs=d.carts||[];
   var h='<div class="p-4"><div class="d-flex justify-content-between mb-3"><div><h6 class="mb-0">'+(o.store_id||o.id)+' -- '+(o.store_name||o.name||'')+', '+(o.state||'')+'</h6><div style="font-size:12px;color:var(--is)">'+(o.merchant||'')+', '+cs.length+' carts, '+fmt(o.total_units||0)+' units</div></div>'+mkTB((o.dynamic_velocity_tier||o.tier||'').trim())+'</div>';
+  h+='<div class="mb-3"><button class="btn btn-sm btn-outline-primary" onclick="openAssignSaved(\''+o.id+'\')"><i class="bi bi-bookmark-plus me-1"></i>Assign Saved Cart to this store</button></div>';
   cs.forEach(function(c){
     var sh=(c.shelves||[]).filter(Boolean).slice().sort(function(a,b){return (b.pos||0)-(a.pos||0);});
-    h+='<div class="card mb-3"><div class="ch d-flex justify-content-between" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0"><span><i class="bi bi-cart3 me-2"></i>Cart '+c.cart_number+' <span class="ck">'+(c.cart_key||'C'+c.cart_number)+'</span></span><span style="font-size:11px;opacity:.8">'+(c.shelves_used||sh.length)+'/5, '+(c.total_units||0)+'u'+(c.is_full?' &#10003;':'')+'</span></div>';
+    h+='<div class="card mb-3"><div class="ch d-flex justify-content-between align-items-center" style="padding:8px 12px;font-size:13px;border-radius:9px 9px 0 0"><span><i class="bi bi-cart3 me-2"></i>Cart '+c.cart_number+' <span class="ck">'+(c.cart_key||'C'+c.cart_number)+'</span></span><span style="font-size:11px;opacity:.8">'+(c.shelves_used||sh.length)+'/5, '+(c.total_units||0)+'u'+(c.is_full?' &#10003;':'')+' <button onclick="removeCartFromPlan(\''+c.id+'\',\''+o.id+'\')" class="btn btn-sm py-0 px-1" style="font-size:12px;color:#C00000;border:none;background:none" title="Remove this cart from the plan (returns inventory)"><i class="bi bi-trash"></i></button></span></div>';
     sh.forEach(function(s){
       var vars=(s.varieties||[]);
       var kitLabel=vars.length&&vars[0].kit_type?'<span class="kp ms-1">'+vars[0].kit_type.replace('_kit','')+'</span>':'';
@@ -1125,6 +1126,43 @@ function renderCart(o,d){
   document.getElementById('ed').innerHTML=h;
 }
 
+async function removeCartFromPlan(cartId,orderId){
+  if(!confirm('Remove this cart from the store’s plan? Its inventory returns to availability.'))return;
+  try{
+    var r=await api('/api/carts/'+cartId,{method:'DELETE'});
+    toast('Cart removed — '+fmt(r.units_released)+' units returned to availability','ok');
+    var o=orders.find(function(x){return x.id===orderId;});
+    if(o){var d=await api('/api/orders/'+orderId);renderCart(o,d);}
+    loadPlan();
+  }catch(e){toast('Remove failed: '+e.message,'err');}
+}
+async function openAssignSaved(orderId){
+  var carts=[];try{carts=await api('/api/permanent-carts');}catch(e){toast('Load failed: '+e.message,'err');return;}
+  if(!carts.length){toast('No saved permanent carts yet — build one in Cart Configs → Permanent Carts','warn');return;}
+  var ov=document.createElement('div');ov.id='assignOverlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:3000;display:flex;align-items:center;justify-content:center';
+  ov.onclick=function(e){if(e.target===ov)ov.remove();};
+  var rows=carts.map(function(c){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f0f4f0">'
+      +'<span><strong>'+escH(c.name||'Untitled')+'</strong><div style="font-size:11px;color:var(--is)">'+(c.total_shelves||0)+' shelves · '+fmt(c.total_units||0)+' units</div></span>'
+      +'<button class="btn btn-sm btn-cta py-0 px-3" onclick="assignSaved(\''+c.id+'\',\''+orderId+'\')">Assign</button></div>';
+  }).join('');
+  ov.innerHTML='<div style="background:#fff;border-radius:10px;max-width:460px;width:92%;max-height:80vh;overflow:auto;padding:18px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h6 class="mb-0">Assign a Saved Cart to this store</h6>'
+    +'<button onclick="document.getElementById(\'assignOverlay\').remove()" style="border:none;background:none;font-size:20px;line-height:1">&times;</button></div>'
+    +rows+'<div style="font-size:11px;color:var(--is);margin-top:10px">Blocks if the cart’s SKUs aren’t available this week; varieties auto-fill from remaining stock.</div></div>';
+  document.body.appendChild(ov);
+}
+async function assignSaved(tid,orderId){
+  try{
+    var r=await api('/api/permanent-carts/'+tid+'/assign/'+orderId,{method:'POST'});
+    var ov=document.getElementById('assignOverlay');if(ov)ov.remove();
+    toast('Assigned '+r.cart_key+' — '+fmt(r.units)+' units allocated','ok');
+    var o=orders.find(function(x){return x.id===orderId;});
+    if(o){var d=await api('/api/orders/'+orderId);renderCart(o,d);}
+    loadPlan();
+  }catch(e){toast(e.message,'err');}  // shortfall detail surfaces here
+}
 function setSlot(cartId,orderId,pos){
   activePicker={cart_id:cartId,order_id:orderId,shelf:pos};
   document.getElementById('ph').innerHTML='<strong style="color:var(--fern)">Shelf '+pos+' selected</strong> -- pick a product below';
