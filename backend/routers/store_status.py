@@ -86,6 +86,8 @@ class EditStoreRequest(BaseModel):
     volume_code:  Optional[str] = None
     store_status: Optional[str] = None
     status_note:  Optional[str] = None
+    perm_racks:   Optional[int] = None
+    fenceline:    Optional[bool] = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -451,6 +453,14 @@ def edit_store(
         if body.store_status is not None:
             set_parts.append("store_status = %s")
             params.append(body.store_status)
+
+        if body.perm_racks is not None:
+            set_parts.append("perm_racks = %s")
+            params.append(max(0, int(body.perm_racks)))
+
+        if body.fenceline is not None:
+            set_parts.append("fenceline = %s")
+            params.append(bool(body.fenceline))
 
         if body.status_note is not None:
             set_parts.append("status_note = %s")

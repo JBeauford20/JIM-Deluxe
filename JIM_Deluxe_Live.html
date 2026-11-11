@@ -339,21 +339,21 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 <div style="display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 114px);overflow:hidden">
   <div style="overflow-y:auto;border-right:1px solid var(--line)">
     <div style="padding:10px 14px;border-bottom:1px solid var(--line);background:#f8faf8">
-      <div class="d-flex gap-2">
-        <input class="form-control form-control-sm flex-grow-1" placeholder="Search..." oninput="filterSL(this.value)">
-        <select class="form-select form-select-sm" style="width:80px" onchange="filterST(this.value)"><option value="">All</option><option>AA</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
-        <select class="form-select form-select-sm" style="width:100px" onchange="filterSS(this.value)" id="ss-filter">
-          <option value="">All Status</option>
-          <option value="active">Active</option>
-          <option value="paused">Paused</option>
-          <option value="do_not_ship">Do Not Ship</option>
-          <option value="promotion">Promotion</option>
-          <option value="opening">Opening</option>
-          <option value="fenceline">FenceLine</option>
-          <option value="hold">Hold</option>
-          <option value="store_walk">Store Walk</option>
-        </select>
-        <button class="btn btn-sm btn-cta" onclick="openAddStore()"><i class="bi bi-plus me-1"></i>Add Store</button>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="sf-search" class="form-control form-control-sm" style="flex:1;min-width:0" placeholder="Search store / city…" oninput="applyStoreFilters()">
+        <button class="btn btn-sm btn-cta" style="flex-shrink:0" onclick="openAddStore()"><i class="bi bi-plus"></i></button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">
+        <select id="sf-tier" class="form-select form-select-sm" onchange="applyStoreFilters()"><option value="">All Velo</option><option>AA</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
+        <select id="sf-status" class="form-select form-select-sm" onchange="applyStoreFilters()">
+          <option value="">All Status</option><option value="active">Active</option><option value="paused">Paused</option>
+          <option value="do_not_ship">Do Not Ship</option><option value="promotion">Promotion</option><option value="opening">Opening</option>
+          <option value="fenceline">FenceLine</option><option value="hold">Hold</option><option value="store_walk">Store Walk</option></select>
+        <select id="sf-merchant" class="form-select form-select-sm" onchange="applyStoreFilters()"><option value="">All Merchants</option></select>
+        <select id="sf-region" class="form-select form-select-sm" onchange="applyStoreFilters()"><option value="">All Regions</option></select>
+        <select id="sf-division" class="form-select form-select-sm" onchange="applyStoreFilters()"><option value="">All Divisions</option></select>
+        <select id="sf-state" class="form-select form-select-sm" onchange="applyStoreFilters()"><option value="">All States</option></select>
+        <select id="sf-fence" class="form-select form-select-sm" style="grid-column:span 2" onchange="applyStoreFilters()"><option value="">Fenceline: Any</option><option value="yes">Fenceline: Yes</option><option value="no">Fenceline: No</option></select>
       </div>
     </div>
     <div id="sl"><div class="p-3 text-center text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Loading stores...</div></div>
@@ -514,6 +514,8 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
         <option value="D">D — Bottom 40%</option>
       </select>
     </div>
+    <div class="row g-2 mb-3"><div class="col-6"><label class="form-label" style="font-size:13px;font-weight:600">Perm Racks</label><input type="number" min="0" class="form-control form-control-sm" id="es-perm" value="0"></div>
+      <div class="col-6 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" id="es-fence"><label class="form-check-label" for="es-fence" style="font-size:13px;font-weight:600">Fenceline program</label></div></div></div>
     <div class="mb-0"><label class="form-label" style="font-size:13px;font-weight:600">Note <span style="font-weight:400;color:var(--is)">(optional)</span></label><input type="text" class="form-control form-control-sm" id="es-note" placeholder="Reason for change..."></div>
   </div>
   <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-cta" onclick="doEditStore()"><i class="bi bi-check-circle me-1"></i>Save Changes</button></div>
@@ -2027,23 +2029,48 @@ function toggleDraw(uid){
 
 /* STORES */
 async function loadStores(){
-  try{allStores=await api('/api/stores/?limit=500');renderSL(allStores);}
+  try{allStores=await api('/api/stores/?limit=2500');populateStoreFilters();applyStoreFilters();}
   catch(e){var el=document.getElementById('sl');if(el)el.innerHTML='<div class="p-3 text-danger" style="font-size:13px">Failed: '+e.message+'</div>';}
 }
 function renderSL(list){
   var el=document.getElementById('sl');if(!el)return;
-  el.innerHTML=list.map(function(s){return '<div class="sr" onclick="openSt('+s.store_id+')"><div class="d-flex justify-content-between"><span style="font-weight:700;font-size:13px">'+s.store_id+' -- '+(s.store_name||'')+'</span>'+mkTB((s.dynamic_velocity_tier||'').trim())+'</div><div style="font-size:11px;color:var(--is)" class="d-flex justify-content-between mt-1"><span>'+(s.city||'')+', '+(s.state||'')+'</span><span>'+(s.merchant||'')+'</span></div></div>';}).join('');
+  el.innerHTML=list.map(function(s){
+    var fl=s.fenceline?' <span style="font-size:9px;background:#6c757d;color:#fff;border-radius:3px;padding:1px 4px">FL</span>':'';
+    return '<div class="sr" onclick="openSt('+s.store_id+')"><div class="d-flex justify-content-between"><span style="font-weight:700;font-size:13px">'+s.store_id+' -- '+(s.store_name||'')+fl+'</span>'+mkTB((s.dynamic_velocity_tier||'').trim())+'</div><div style="font-size:11px;color:var(--is)" class="d-flex justify-content-between mt-1"><span>'+(s.city||'')+', '+(s.state||'')+'</span><span>'+(s.merchant||'')+'</span></div></div>';
+  }).join('');
 }
-function filterSL(q){renderSL(allStores.filter(function(s){return !q||String(s.store_id).includes(q)||(s.store_name||'').toLowerCase().includes(q.toLowerCase())||(s.city||'').toLowerCase().includes(q.toLowerCase());}));}
-function filterST(t){renderSL(t?allStores.filter(function(s){return (s.dynamic_velocity_tier||'').trim()===t;}):allStores);}
-function filterSS(s){renderSL(s?allStores.filter(function(x){return (x.store_status||'active')===s;}):allStores);}
+function _distinctStore(field){var m={};allStores.forEach(function(x){var val=(x[field]==null?'':String(x[field])).trim();if(val)m[val]=1;});return Object.keys(m).sort();}
+function populateStoreFilters(){
+  [['sf-merchant','merchant','All Merchants'],['sf-region','region','All Regions'],['sf-division','division','All Divisions'],['sf-state','state','All States']].forEach(function(f){
+    var el=document.getElementById(f[0]);if(!el)return;var cur=el.value;
+    el.innerHTML='<option value="">'+f[2]+'</option>'+_distinctStore(f[1]).map(function(v){return '<option'+(v===cur?' selected':'')+'>'+escH(v)+'</option>';}).join('');
+  });
+}
+function applyStoreFilters(){
+  function v(id){var e=document.getElementById(id);return e?e.value:'';}
+  var q=v('sf-search').toLowerCase(),tier=v('sf-tier'),status=v('sf-status'),merch=v('sf-merchant'),region=v('sf-region'),div=v('sf-division'),state=v('sf-state'),fence=v('sf-fence');
+  renderSL(allStores.filter(function(s){
+    if(q&&!(String(s.store_id).indexOf(q)>=0||(s.store_name||'').toLowerCase().indexOf(q)>=0||(s.city||'').toLowerCase().indexOf(q)>=0))return false;
+    if(tier&&(s.dynamic_velocity_tier||'').trim()!==tier)return false;
+    if(status&&(s.store_status||'active')!==status)return false;
+    if(merch&&(s.merchant||'')!==merch)return false;
+    if(region&&(s.region||'')!==region)return false;
+    if(div&&(s.division||'')!==div)return false;
+    if(state&&(s.state||'')!==state)return false;
+    if(fence==='yes'&&!s.fenceline)return false;
+    if(fence==='no'&&s.fenceline)return false;
+    return true;
+  }));
+}
 
+var _spStore=null;
 async function openSt(id){
-  document.querySelectorAll('#sl .sr').forEach(function(r){r.classList.remove('active');});event.currentTarget.classList.add('active');
+  document.querySelectorAll('#sl .sr').forEach(function(r){r.classList.remove('active');});
+  if(typeof event!=='undefined'&&event&&event.currentTarget&&event.currentTarget.classList)event.currentTarget.classList.add('active');
   var sp=document.getElementById('sp');sp.style.padding='16px';sp.classList.remove('d-flex','align-items-center','justify-content-center');
   sp.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:200px"><span class="spinner-border text-success"></span></div>';
   try{
-    var p=await api('/api/stores/'+id);var s=p.store||{};
+    var p=await api('/api/stores/'+id);var s=p.store||{};_spStore=s;
     var tier=(s.dynamic_velocity_tier||'').trim();
     var weekly=(p.weekly_sales||[]).slice(-26).map(function(w){return w.units||0;});
     var maxW=Math.max.apply(null,weekly.concat([1]));
@@ -2051,15 +2078,23 @@ async function openSt(id){
     var storeSt=s.store_status||'active';
     var stColors={active:'var(--fern)',paused:'#856404',do_not_ship:'#C00000',inactive:'#808080',opening:'#198754',promotion:'#3a6bc4',store_walk:'#ffc107',fenceline:'#6c757d',hold:'#856404'};
     var stBadge='<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:'+(stColors[storeSt]||'#808080')+';color:'+(storeSt==='store_walk'?'#000':'#fff')+';font-weight:700;margin-left:6px">'+storeSt.replace(/_/g,' ').toUpperCase()+'</span>';
+    var itBadge=(p.manifest&&p.manifest.in_transit)?'<span style="font-size:10px;padding:2px 8px;border-radius:10px;background:#b45309;color:#fff;font-weight:700;margin-left:6px"><i class="bi bi-truck me-1"></i>IN TRANSIT</span>':'';
+    var m=p.manifest||{};
     var recent4=weekly.slice(-4).reduce(function(s,v){return s+v;},0);
     var prior4=weekly.slice(-8,-4).reduce(function(s,v){return s+v;},0);
     var pct=prior4>0?Math.round((recent4-prior4)/prior4*100):0;
     var trendColor=pct>=0?'var(--fern)':'#C00000';
     var trendStr=(pct>=0?'+':'')+pct+'% vs prior 4 weeks';
-    sp.innerHTML='<div class="d-flex justify-content-between mb-3"><div><h5 class="mb-1" style="color:var(--fd)">Store '+s.store_id+' -- '+(s.store_name||'')+'</h5><p class="text-muted mb-0" style="font-size:13px">'+(s.city||'')+', '+(s.state||'')+' - '+(s.merchant||'')+'</p></div><div class="text-end">'+mkTB(tier)+stBadge+'<div style="font-size:11px;color:var(--is);margin-top:3px">Static: '+(s.volume_code||'').trim()+'</div>'
-      +'<button onclick="openEditStore('+s.store_id+',\''+(s.store_name||'').replace(/\'/g,"\\'")+'\',\''+(s.store_status||'active')+'\',\''+(s.merchant||'')+'\',\''+(s.volume_code||'A')+'\',\''+(s.city||'')+'\',\''+(s.state||'')+'\')" class="btn btn-sm btn-outline-secondary py-1 px-2 ms-2 mt-2" style="font-size:11px"><i class="bi bi-pencil me-1"></i>Edit Store</button>'
+    sp.innerHTML='<div class="d-flex justify-content-between mb-3"><div><h5 class="mb-1" style="color:var(--fd)">Store '+s.store_id+' -- '+(s.store_name||'')+'</h5><p class="text-muted mb-0" style="font-size:13px">'+(s.city||'')+', '+(s.state||'')+' - '+(s.merchant||'')+'</p></div><div class="text-end">'+mkTB(tier)+stBadge+itBadge+'<div style="font-size:11px;color:var(--is);margin-top:3px">Static Velo: '+(s.volume_code||'').trim()+'</div>'
+      +'<button onclick="openEditStore()" class="btn btn-sm btn-outline-secondary py-1 px-2 ms-2 mt-2" style="font-size:11px"><i class="bi bi-pencil me-1"></i>Edit Store</button>'
       +'</div></div>'
       +'<div class="row g-2 mb-3"><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+parseFloat(s.dynamic_velocity_score||0).toFixed(1)+'</div><div class="l">Velocity Score</div></div></div><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+(s.region||'--')+'</div><div class="l">Region</div></div></div></div>'
+      +'<div class="card mb-3"><div class="card-body py-2" style="font-size:12.5px;display:flex;flex-wrap:wrap;gap:18px">'
+      +'<span><strong>Perm Racks:</strong> '+(s.perm_racks||0)+'</span>'
+      +'<span><strong>Fenceline:</strong> '+(s.fenceline?'<span style="color:var(--fern);font-weight:700">Yes</span>':'No')+'</span>'
+      +'<span><strong>Last Delivered:</strong> '+(m.last_delivery_date?('WK'+(m.last_delivery_week||'?')+' · '+String(m.last_delivery_date).slice(0,10)):'—')+'</span>'
+      +'<span><strong>Last Shipped:</strong> '+(m.last_ship_week?('WK'+m.last_ship_week):'—')+'</span>'
+      +'</div></div>'
       +(cats.length?'<div class="mb-3">'+cats.map(function(c){return '<span style="background:#f0f9f0;border:1px solid var(--mp);border-radius:8px;padding:5px 10px;display:inline-flex;align-items:center;gap:5px;font-size:12px;margin:3px"><span style="color:var(--is)">'+c[0]+'</span>'+mkTB(c[1].trim())+'</span>';}).join('')+'</div>':'')
       +'<div class="card mb-3"><div class="ch lt"><i class="bi bi-graph-up me-2"></i>Weekly Sales -- Last 26 Weeks</div><div class="card-body pb-2"><div style="display:flex;align-items:flex-end;gap:2px;height:90px">'+weekly.map(function(v,i){return '<div style="flex:1;background:var(--fern);border-radius:2px 2px 0 0;height:'+Math.max(4,v/maxW*88)+'px;min-width:0;opacity:.85" title="Week '+(weekly.length-i)+' ago: '+v+' units"></div>';}).join('')+'</div><div class="d-flex justify-content-between mt-1" style="font-size:10px;color:var(--is)"><span>26w</span><span>20w</span><span>13w</span><span>7w</span><span>Now</span></div><div style="font-size:11px;text-align:center;margin-top:4px;color:'+trendColor+';font-weight:600">'+trendStr+'</div></div></div>'
       +'<div class="card"><div class="ch lt"><i class="bi bi-bar-chart me-2"></i>Top SKUs</div><table class="table jt mb-0"><thead><tr><th>Product</th><th>Family</th><th class="text-end">Units</th></tr></thead><tbody>'+(p.top_skus||[]).slice(0,8).map(function(sk){return '<tr><td style="font-size:12px">'+sn(sk.description||sk.desc||'')+'</td><td style="font-size:11px;color:var(--is)">'+(sk.family||'')+'</td><td class="text-end fw-bold">'+fmt(sk.total_units||sk.units||0)+'</td></tr>';}).join('')+'</tbody></table></div>';
@@ -2146,20 +2181,23 @@ async function doAddStore(){
 var _editStoreMod=null; var _editStoreId=null;
 function _getEditStoreMod(){if(!_editStoreMod)_editStoreMod=new bootstrap.Modal(document.getElementById('editStoreM'));return _editStoreMod;}
 
-async function openEditStore(storeId, storeName, currentStatus, currentMerchant, currentVc, currentCity, currentState){
-  _editStoreId=storeId;
-  document.getElementById('es-title').textContent='#'+storeId+' — '+storeName;
-  document.getElementById('es-name').value=storeName||'';
-  document.getElementById('es-city').value=currentCity||'';
-  document.getElementById('es-state').value=currentState||'';
-  document.getElementById('es-status').value=currentStatus||'active';
-  document.getElementById('es-vc').value=currentVc||'A';
+async function openEditStore(){
+  var s=_spStore; if(!s){toast('Open a store first','warn');return;}
+  _editStoreId=s.store_id;
+  document.getElementById('es-title').textContent='#'+s.store_id+' — '+(s.store_name||'');
+  document.getElementById('es-name').value=s.store_name||'';
+  document.getElementById('es-city').value=s.city||'';
+  document.getElementById('es-state').value=s.state||'';
+  document.getElementById('es-status').value=s.store_status||'active';
+  document.getElementById('es-vc').value=(s.volume_code||'A').trim();
+  document.getElementById('es-perm').value=s.perm_racks||0;
+  document.getElementById('es-fence').checked=!!s.fenceline;
   document.getElementById('es-note').value='';
   _getEditStoreMod().show();
   try{
     var merchants=await api('/api/store-status/valid-merchants');
     var sel=document.getElementById('es-merchant');
-    sel.innerHTML=merchants.map(function(m){return '<option value="'+m+'"'+(m===currentMerchant?' selected':'')+'>'+m+'</option>';}).join('');
+    sel.innerHTML=merchants.map(function(m){return '<option value="'+m+'"'+(m===s.merchant?' selected':'')+'>'+m+'</option>';}).join('');
   }catch(e){toast('Could not load merchants','warn');}
 }
 
@@ -2172,15 +2210,17 @@ async function doEditStore(){
     store_status: document.getElementById('es-status').value||null,
     merchant: document.getElementById('es-merchant').value||null,
     volume_code: document.getElementById('es-vc').value||null,
+    perm_racks: parseInt(document.getElementById('es-perm').value)||0,
+    fenceline: document.getElementById('es-fence').checked,
     status_note: document.getElementById('es-note').value.trim()||null,
   };
   try{
     await api('/api/store-status/'+_editStoreId+'/edit',{method:'PUT',body:JSON.stringify(body)});
     toast('Store '+_editStoreId+' updated','ok');
     _getEditStoreMod().hide();
-    // Refresh the store profile if it's open
-    if(document.querySelector('#sl .sr.active'))openEditStore.lastId&&openSt(_editStoreId);
-    loadStores();
+    var sid=_editStoreId;
+    await loadStores();
+    openSt(sid);   // refresh the open profile (openSt is event-safe)
   }catch(e){
     var msg=e.message||'Unknown error';
     try{var j=JSON.parse(msg);msg=j.detail||msg;}catch(x){}

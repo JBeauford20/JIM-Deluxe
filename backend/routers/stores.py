@@ -11,7 +11,10 @@ def list_stores(
     tier:    str  = Query(None),
     region:  str  = Query(None),
     merchant: str = Query(None),
-    limit:   int  = Query(50, le=500),  # cap at 500
+    state:   str  = Query(None),
+    division: str = Query(None),
+    fenceline: bool = Query(None),
+    limit:   int  = Query(50, le=2500),  # cap raised so the Stores tab can load all
     offset:  int  = Query(0),
     user=Depends(get_current_user)
 ):
@@ -28,13 +31,20 @@ def list_stores(
             where.append("region ILIKE %s"); params.append(f"%{region}%")
         if merchant:
             where.append("merchant ILIKE %s"); params.append(f"%{merchant}%")
+        if state:
+            where.append("state = %s"); params.append(state.upper())
+        if division:
+            where.append("division ILIKE %s"); params.append(f"%{division}%")
+        if fenceline is not None:
+            where.append("COALESCE(fenceline, false) = %s"); params.append(fenceline)
 
         sql = f"""
-            SELECT store_id, store_name, city, state, region, merchant,
+            SELECT store_id, store_name, city, state, region, division, merchant,
                    volume_code, volume_code_updated_at, volume_code_updated_by,
                    dynamic_velocity_tier, dynamic_velocity_score,
                    tier_9cm, tier_12cm, tier_h2o, tier_collectors, tier_boutique,
-                   merch_partner, store_status
+                   merch_partner, store_status,
+                   COALESCE(perm_racks, 0) AS perm_racks, COALESCE(fenceline, false) AS fenceline
             FROM stores
             WHERE {' AND '.join(where)}
             ORDER BY dynamic_velocity_score DESC NULLS LAST
@@ -112,6 +122,22 @@ def store_profile(store_id: int, user=Depends(get_current_user)):
         """, (store_id,))
         recent_deliveries = cur.fetchall()
 
+        # Delivery manifest recency: last delivered (<= today) + last shipped (may be future = in transit)
+        cur.execute("""
+            SELECT (SELECT delivery_date FROM delivery_manifest
+                    WHERE store_id = %s AND delivery_date IS NOT NULL AND delivery_date <= CURRENT_DATE
+                    ORDER BY delivery_date DESC LIMIT 1) AS last_delivery_date,
+                   (SELECT week_number FROM delivery_manifest
+                    WHERE store_id = %s AND delivery_date IS NOT NULL AND delivery_date <= CURRENT_DATE
+                    ORDER BY delivery_date DESC LIMIT 1) AS last_delivery_week,
+                   (SELECT week_number FROM delivery_manifest
+                    WHERE store_id = %s AND ship_date IS NOT NULL
+                    ORDER BY ship_date DESC LIMIT 1) AS last_ship_week,
+                   EXISTS (SELECT 1 FROM delivery_manifest
+                    WHERE store_id = %s AND delivery_date > CURRENT_DATE) AS in_transit
+        """, (store_id, store_id, store_id, store_id))
+        manifest = cur.fetchone()
+
         return {
             "store":            store,
             "velocity_history": velocity_history,
@@ -119,4 +145,5 @@ def store_profile(store_id: int, user=Depends(get_current_user)):
             "top_skus":         top_skus,
             "weekly_sales":     weekly_sales,
             "recent_deliveries": recent_deliveries,
+            "manifest":         manifest,
         }
