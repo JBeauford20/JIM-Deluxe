@@ -637,6 +637,15 @@ async function apiBlob(path){
   if(!r.ok)throw new Error('Download failed');
   return r.blob();
 }
+// File uploads (multipart) — same 401 refresh-and-retry as api(). Do NOT set
+// Content-Type; the browser adds the multipart boundary. FormData is re-sent on retry.
+async function apiUpload(path,fd){
+  var r=await fetch(B+path,{method:'POST',headers:authHdr(),body:fd});
+  if(r.status===401){ if(await tryRefresh()){ r=await fetch(B+path,{method:'POST',headers:authHdr(),body:fd}); } }
+  if(r.status===401){tokClear();showLogin();throw new Error('Session expired - please sign in again');}
+  if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
+  return r.json();
+}
 
 /* HELPERS */
 function mkTB(t){t=(t||'').trim();return '<span class="tb tb-'+t+'">'+(t||'?')+'</span>';}
@@ -661,9 +670,7 @@ async function doUpload(file){
   var w=new Date().toISOString().slice(0,10);
   try{
     var fd=new FormData();fd.append('file',file);fd.append('shipping_week',w);
-    var r=await fetch(B+'/api/availability/upload',{method:'POST',headers:authHdr(),body:fd});
-    if(!r.ok)throw new Error(await r.text());
-    var d=await r.json();bId=d.batch_id;wk=w;
+    var d=await apiUpload('/api/availability/upload',fd);bId=d.batch_id;wk=w;
     var bt=await api('/api/availability/batches/'+bId);
     var ls=bt.lines||[];var tot=ls.reduce(function(s,l){return s+(l.units_available||0);},0);
     uz.style.display='none';
@@ -971,9 +978,7 @@ async function doUploadInTransit(inp){
   var w=new Date().toISOString().slice(0,10);
   fd.append('shipping_week',w);
   try{
-    var r=await fetch(B+'/api/in-transit/upload',{method:'POST',headers:authHdr(),body:fd});
-    if(!r.ok)throw new Error(await r.text());
-    var d=await r.json();
+    var d=await apiUpload('/api/in-transit/upload',fd);
     toast(d.stores_loaded+' stores loaded for week '+d.shipping_week,'ok');
     loadInTransitSummary();
   }catch(e){toast('Upload failed: '+e.message,'err');}
@@ -2417,9 +2422,7 @@ async function uploadPromoStores(){
   var fd=new FormData();fd.append('file',fi.files[0]);
   document.getElementById('as2-val').textContent='Uploading…';
   try{
-    var r=await fetch(B+'/api/promotions/'+_curPromo.id+'/stores/upload',{method:'POST',headers:authHdr(),body:fd});
-    if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
-    var j=await r.json();
+    var j=await apiUpload('/api/promotions/'+_curPromo.id+'/stores/upload',fd);
     bootstrap.Modal.getOrCreateInstance(document.getElementById('addStoresM')).hide();
     var msg='Added '+j.added+' ('+j.landed+' landed, '+j.in_transit+' in transit)';
     if(j.missing_date)msg+=' · '+j.missing_date+' no date';
