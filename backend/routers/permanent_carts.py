@@ -56,14 +56,19 @@ def catalog(user=Depends(get_current_user)):
         skus = cur.fetchall()
         cur.execute("""
             SELECT sc.profile_id, sc.trays_per_shelf, sc.units_per_shelf, sc.max_shelves,
-                   pp.units_per_tray, pp.height_class, pp.short_name, pp.clear_height_in
+                   pp.units_per_tray, pp.height_class, pp.short_name, pp.clear_height_in,
+                   pp.tray_width_mm, pp.tray_depth_mm, pp.tray_color
             FROM shelf_configurations sc
             JOIN packing_profiles pp ON pp.id = sc.profile_id
             WHERE sc.cart_type_id = 'cc' AND sc.approved = true
             ORDER BY sc.profile_id
         """)
         profiles = cur.fetchall()
-        cur.execute("SELECT id, name, max_shelves, ceiling_in FROM cart_types WHERE id = 'cc'")
+        cur.execute("""
+            SELECT id, name, max_shelves, ceiling_in, shelf_width_in, shelf_depth_in,
+                   base_height_in, total_height_in
+            FROM cart_types WHERE id = 'cc'
+        """)
         cart = cur.fetchone()
     return {"skus": skus, "profiles": profiles, "cart": cart}
 

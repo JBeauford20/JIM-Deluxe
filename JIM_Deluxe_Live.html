@@ -1218,6 +1218,8 @@ async function pcInit(){
   try{ if(!_pcCat)_pcCat=await api('/api/permanent-carts/catalog'); }
   catch(e){ document.getElementById('pc-builder').innerHTML='<span style="color:#C00000">Catalog load failed: '+escH(e.message)+'</span>'; return; }
   await pcLoadList();
+  // Show a blank rack on entry (unless a cart is already being built).
+  pcRenderBuilder();pcRenderSandbox();
 }
 function pcProf(pid){return (_pcCat.profiles||[]).find(function(p){return p.profile_id===pid;});}
 function pcSkusFor(pid){return (_pcCat.skus||[]).filter(function(s){return s.profile_id===pid;});}
@@ -1265,31 +1267,82 @@ function pcAddItem(pos){
 }
 function pcRemoveItem(pos,idx){var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(s){s.items.splice(idx,1);}pcRenderBuilder();pcRenderSandbox();}
 function pcCartUnits(){var t=0;_pcCur.shelves.forEach(function(s){var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;s.items.forEach(function(i){t+=i.tray_count*upt;});});return t;}
+/* ---- visual helpers (measurements from JIM packing_profiles + cart_types, same math as ShelfKit) ---- */
+var PC_PAL=['#5FBF7F','#4FB3A8','#A9BFCB','#EFC777','#86C5A0','#D98C8C','#8CA0D9','#C9A24F'];
+function pcTrayColor(c){return {clear:'#bfe3d9',cardboard:'#d9b38a',white:'#eef0ee',black:'#6a6f73',bag:'#c8a878'}[c]||'#9ec9b0';}
+function pcCart(){return (_pcCat&&_pcCat.cart)||{shelf_width_in:50.5,shelf_depth_in:22.25,ceiling_in:95,base_height_in:5,max_shelves:5};}
+function pcGeom(pid){
+  var p=pcProf(pid);if(!p)return null;var MM=25.4,c=pcCart();
+  var sw=(+c.shelf_width_in)*MM,sd=(+c.shelf_depth_in)*MM,w=+p.tray_width_mm,d=+p.tray_depth_mm;
+  if(!w||!d){var cap=p.trays_per_shelf||1;return {acrossN:cap,deepN:1,capacity:cap,oneTrayPct:100/cap,w_in:(+c.shelf_width_in)/cap,d_in:+c.shelf_depth_in,clear_h:+p.clear_height_in||15};}
+  var acrossN=Math.max(1,Math.floor(sw/w)),deepN=Math.max(1,Math.floor(sd/d));
+  return {acrossN:acrossN,deepN:deepN,capacity:acrossN*deepN,oneTrayPct:(w*d)/(sw*sd)*100,w_in:w/MM,d_in:d/MM,clear_h:+p.clear_height_in||15};
+}
+function pcShelfStats(sh){var g=pcGeom(sh.profile_id);if(!g)return{placed:0,capacity:0,pct:0,units:0,over:false,g:null};
+  var placed=sh.items.reduce(function(a,i){return a+i.tray_count;},0);var p=pcProf(sh.profile_id);var upt=p?p.units_per_tray:0;
+  return {placed:placed,capacity:g.capacity,pct:Math.round(placed*g.oneTrayPct),units:placed*upt,over:placed>g.capacity,g:g};}
+function pcShelfSVG(sh){
+  var st=pcShelfStats(sh),g=st.g;if(!g)return'';
+  var c=pcCart(),scale=250/(+c.shelf_width_in);
+  var SW=(+c.shelf_width_in)*scale,SD=(+c.shelf_depth_in)*scale,cellW=g.w_in*scale,cellH=g.d_in*scale;
+  var seq=[];sh.items.forEach(function(it,idx){for(var k=0;k<it.tray_count;k++)seq.push(idx);});
+  var r='';
+  for(var i=0;i<g.capacity;i++){var col=i%g.acrossN,row=Math.floor(i/g.acrossN);var x=col*cellW,y=row*cellH;
+    var fl=i<seq.length;var f=fl?PC_PAL[seq[i]%PC_PAL.length]:'#f4f6f4';var sk=fl?'#2d6a4f':'#dde3dd';
+    r+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+Math.max(1,cellW-2).toFixed(1)+'" height="'+Math.max(1,cellH-2).toFixed(1)+'" rx="2" fill="'+f+'" stroke="'+sk+'" stroke-width="1"/>';}
+  // any trays beyond capacity (overflow) drawn as a red strip
+  var ov=st.over?'<rect x="0" y="0" width="'+SW.toFixed(1)+'" height="'+SD.toFixed(1)+'" fill="none" stroke="#C00000" stroke-width="2" stroke-dasharray="5 3"/>':'';
+  return '<svg width="'+SW.toFixed(0)+'" height="'+SD.toFixed(0)+'" style="background:#fff;border:1px solid var(--line);border-radius:4px;display:block">'+r+ov+'</svg>';
+}
+function pcPctBar(st){var w=Math.min(100,st.pct);var col=st.over?'#C00000':(w>=85?'#2d6a4f':'#5FBF7F');
+  return '<div style="height:8px;background:var(--line);border-radius:4px;overflow:hidden;flex:1;min-width:60px"><div style="height:8px;width:'+w+'%;background:'+col+'"></div></div>';}
+function pcElevation(){
+  var c=pcCart(),ceil=+c.ceiling_in||95,W=180,H=300,baseY=H-30,topY=14;
+  var scaleH=(baseY-topY)/ceil,ceilY=baseY-ceil*scaleH,pL=28,pR=W-28;
+  var s='<svg width="'+W+'" height="'+H+'" style="background:#fbfcfb;border:1px solid var(--line);border-radius:6px">';
+  s+='<rect x="'+(pL-6)+'" y="'+topY+'" width="6" height="'+(baseY-topY)+'" fill="#8a9199"/><rect x="'+pR+'" y="'+topY+'" width="6" height="'+(baseY-topY)+'" fill="#8a9199"/>';
+  s+='<rect x="'+(pL-6)+'" y="'+baseY+'" width="'+(pR-pL+12)+'" height="6" fill="#6a7077"/>';
+  s+='<circle cx="'+(pL)+'" cy="'+(baseY+13)+'" r="6" fill="#44484c"/><circle cx="'+(pR)+'" cy="'+(baseY+13)+'" r="6" fill="#44484c"/>';
+  s+='<line x1="'+(pL-6)+'" y1="'+ceilY.toFixed(1)+'" x2="'+(pR+6)+'" y2="'+ceilY.toFixed(1)+'" stroke="#C00000" stroke-width="1" stroke-dasharray="4 3"/><text x="'+(pR+8)+'" y="'+(ceilY+3).toFixed(1)+'" font-size="8" fill="#C00000">'+ceil+'"</text>';
+  var ordered=_pcCur.shelves.slice().sort(function(a,b){return a.shelf_position-b.shelf_position;});
+  var cum=0,over=false;
+  ordered.forEach(function(sh){var st=pcShelfStats(sh),g=st.g,h=(g&&g.clear_h)||15;
+    var y1=baseY-(cum+h)*scaleH,bh=h*scaleH,p=pcProf(sh.profile_id);
+    s+='<rect x="'+pL+'" y="'+y1.toFixed(1)+'" width="'+(pR-pL)+'" height="'+Math.max(2,bh-2).toFixed(1)+'" fill="'+pcTrayColor(p?p.tray_color:'')+'" stroke="#2d6a4f" stroke-width="0.8" opacity="0.88"/>';
+    s+='<rect x="'+(pL-3)+'" y="'+(baseY-cum*scaleH-2).toFixed(1)+'" width="'+(pR-pL+6)+'" height="3" fill="#b8936a"/>';
+    s+='<text x="'+((pL+pR)/2)+'" y="'+(y1+bh/2+3).toFixed(1)+'" font-size="9" fill="#13371f" text-anchor="middle">S'+sh.shelf_position+' · '+st.pct+'%</text>';
+    cum+=h;if(cum>ceil)over=true;});
+  s+='<text x="'+((pL+pR)/2)+'" y="'+(H-8)+'" font-size="9" fill="'+(over?'#C00000':'#6a7077')+'" text-anchor="middle">load '+Math.round(cum)+'" / '+ceil+'"'+(over?' OVER!':'')+'</text></svg>';
+  return s;
+}
 function pcRenderBuilder(){
   var el=document.getElementById('pc-builder');if(!el)return;
   var h='<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">'
-    +'<input value="'+escH(_pcCur.name||'')+'" oninput="pcSetName(this.value)" placeholder="Cart name e.g. Holiday 2027 — AA Stores" style="flex:1;min-width:240px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-weight:600">'
+    +'<input value="'+escH(_pcCur.name||'')+'" oninput="pcSetName(this.value)" placeholder="Cart name e.g. Holiday 2027 — AA Stores" style="flex:1;min-width:220px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-weight:600">'
     +'<button class="btn btn-sm btn-cta" onclick="pcSave()"><i class="bi bi-save me-1"></i>Save</button>'
     +(_pcCur.id?'<button class="btn btn-sm btn-outline-danger" onclick="pcDelete()"><i class="bi bi-trash"></i></button>':'')
     +'</div>';
+  // two columns: shelves (left) + cart elevation (right)
+  h+='<div style="display:flex;gap:16px;align-items:flex-start"><div style="flex:1;min-width:0">';
   var shelves=_pcCur.shelves.slice().sort(function(a,b){return a.shelf_position-b.shelf_position;});
   shelves.forEach(function(s){
-    var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;var maxT=p?p.trays_per_shelf:0;
-    var usedT=s.items.reduce(function(a,i){return a+i.tray_count;},0);
-    var over=maxT&&usedT>maxT;
-    var shUnits=s.items.reduce(function(a,i){return a+i.tray_count*upt;},0);
+    var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;var st=pcShelfStats(s);
     h+='<div class="card mb-2"><div class="ch d-flex justify-content-between align-items-center" style="padding:7px 12px;font-size:13px;border-radius:9px 9px 0 0">'
       +'<span><i class="bi bi-layers me-2"></i>Shelf '+s.shelf_position+'</span>'
       +'<span style="display:flex;gap:8px;align-items:center">'
       +'<select onchange="pcSetProfile('+s.shelf_position+',this.value)" style="font-size:11px;padding:2px 6px;border:1px solid var(--line);border-radius:4px">'
-      +(_pcCat.profiles||[]).map(function(pr){return '<option value="'+pr.profile_id+'"'+(pr.profile_id===s.profile_id?' selected':'')+'>'+escH(pr.short_name||pr.profile_id)+' ('+pr.units_per_tray+'/tray)</option>';}).join('')
+      +(_pcCat.profiles||[]).map(function(pr){return '<option value="'+pr.profile_id+'"'+(pr.profile_id===s.profile_id?' selected':'')+'>'+escH(pr.short_name||pr.profile_id)+' ('+pr.units_per_tray+'/tray · '+(pr.clear_height_in||'?')+'")</option>';}).join('')
       +'</select>'
-      +'<span style="font-size:11px;'+(over?'color:#C00000;font-weight:700':'color:var(--is)')+'">'+usedT+'/'+maxT+' trays · '+shUnits+'u</span>'
       +'<button class="btn btn-sm py-0 px-1" style="font-size:11px;color:#C00000;border:none;background:none" onclick="pcRemoveShelf('+s.shelf_position+')"><i class="bi bi-x-lg"></i></button>'
       +'</span></div><div style="padding:8px 12px">';
+    // top-view visual + % full
+    h+='<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">'+pcShelfSVG(s)
+      +'<div style="flex:1;min-width:0"><div class="d-flex align-items-center gap-2 mb-1">'+pcPctBar(st)
+      +'<span style="font-size:12px;font-weight:700;'+(st.over?'color:#C00000':'color:var(--fd)')+'">'+st.pct+'% full</span></div>'
+      +'<div style="font-size:11px;color:var(--is)">'+st.placed+' / '+st.capacity+' trays · '+fmt(st.units)+' units'+(st.over?' <span style="color:#C00000;font-weight:700">· OVER capacity</span>':'')+'</div></div></div>';
     s.items.forEach(function(i,idx){
       h+='<div class="d-flex justify-content-between align-items-center" style="font-size:12px;padding:3px 0;border-bottom:1px solid #f0f4f0">'
-        +'<span>'+sn(i.description||'SKU '+i.sku_id)+' <span style="color:var(--is)">#'+i.sku_id+'</span></span>'
+        +'<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'+PC_PAL[idx%PC_PAL.length]+';margin-right:5px"></span>'+sn(i.description||'SKU '+i.sku_id)+' <span style="color:var(--is)">#'+i.sku_id+'</span></span>'
         +'<span style="display:flex;gap:8px;align-items:center"><span style="color:var(--mp)">'+i.tray_count+'t · '+(i.tray_count*upt)+'u</span>'
         +'<button class="btn btn-sm py-0 px-1" style="font-size:10px;color:#C00000;border:none;background:none" onclick="pcRemoveItem('+s.shelf_position+','+idx+')"><i class="bi bi-x"></i></button></span></div>';
     });
@@ -1299,7 +1352,7 @@ function pcRenderBuilder(){
       +'<option value="">+ add SKU…</option>'
       +opts.map(function(o){return '<option value="'+o.sku_id+'">'+escH(o.description||('SKU '+o.sku_id))+'</option>';}).join('')
       +'</select>'
-      +'<input id="pc-tray-'+s.shelf_position+'" type="number" min="1" value="1" style="width:56px;font-size:11.5px;padding:3px 6px;border:1px solid var(--line);border-radius:4px">'
+      +'<input id="pc-tray-'+s.shelf_position+'" type="number" min="1" value="1" style="width:52px;font-size:11.5px;padding:3px 6px;border:1px solid var(--line);border-radius:4px">'
       +'<button class="btn btn-sm btn-outline-primary py-0 px-2" style="font-size:11px" onclick="pcAddItem('+s.shelf_position+')">Add</button>'
       +'</div>'+(opts.length?'':'<div style="font-size:10.5px;color:var(--is);margin-top:3px">No SKUs use this tray profile.</div>')
       +'</div></div>';
@@ -1307,6 +1360,10 @@ function pcRenderBuilder(){
   var maxSh=(_pcCat.cart&&_pcCat.cart.max_shelves)||5;
   if(_pcCur.shelves.length<maxSh)h+='<button class="btn btn-sm btn-outline-secondary" onclick="pcAddShelf()"><i class="bi bi-plus-lg me-1"></i>Add Shelf ('+_pcCur.shelves.length+'/'+maxSh+')</button>';
   h+='<div style="margin-top:12px;font-weight:700;color:var(--fd)">Cart total: '+fmt(pcCartUnits())+' units</div>';
+  h+='</div>'; // end shelves col
+  // elevation col
+  h+='<div style="flex-shrink:0;position:sticky;top:0"><div style="font-size:10px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;text-align:center">Cart</div>'+pcElevation()+'</div>';
+  h+='</div>';
   el.innerHTML=h;
 }
 function pcRenderSandbox(){
