@@ -1238,8 +1238,8 @@ async function pcLoad(id){
   try{
     var d=await api('/api/permanent-carts/'+id);
     _pcCur={id:d.id,name:d.name||'',shelves:(d.shelves||[]).map(function(s){
-      return {shelf_position:s.shelf_position,profile_id:s.profile_id,
-        items:(s.items||[]).map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count,description:i.description};})};
+      return {shelf_position:s.shelf_position,
+        items:(s.items||[]).map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count,profile_id:i.profile_id,description:i.description};})};
     })};
     pcRenderBuilder();pcRenderSandbox();
   }catch(e){toast('Load failed: '+e.message,'err');}
@@ -1249,24 +1249,31 @@ function pcAddShelf(){
   if(_pcCur.shelves.length>=maxSh){toast('Cart is full ('+maxSh+' shelves)','warn');return;}
   var used=_pcCur.shelves.map(function(s){return s.shelf_position;});
   var pos=1;while(used.indexOf(pos)>=0)pos++;
-  var firstProf=(_pcCat.profiles[0]||{}).profile_id;
-  _pcCur.shelves.push({shelf_position:pos,profile_id:firstProf,items:[]});
+  _pcCur.shelves.push({shelf_position:pos,items:[]});   // mixed shelf: no single profile
   pcRenderBuilder();pcRenderSandbox();
 }
 function pcRemoveShelf(pos){_pcCur.shelves=_pcCur.shelves.filter(function(s){return s.shelf_position!==pos;});pcRenderBuilder();pcRenderSandbox();}
-function pcSetProfile(pos,pid){var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(s){s.profile_id=pid;s.items=[];}pcRenderBuilder();pcRenderSandbox();}
 function pcSetName(v){_pcCur.name=v;}
 function pcAddItem(pos){
   var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(!s)return;
   var sel=document.getElementById('pc-sku-'+pos),tr=document.getElementById('pc-tray-'+pos);
   var sku=parseInt(sel.value),trays=parseInt(tr.value)||1;
   if(!sku){toast('Pick a SKU','warn');return;}
+  var sk=(_pcCat.skus||[]).find(function(x){return x.sku_id===sku;});
+  if(!sk||!sk.profile_id){toast('That SKU has no tray profile set','warn');return;}
   var ex=s.items.find(function(i){return i.sku_id===sku;});
-  if(ex){ex.tray_count+=trays;}else{var sk=(_pcCat.skus||[]).find(function(x){return x.sku_id===sku;});s.items.push({sku_id:sku,tray_count:trays,description:sk?sk.description:('SKU '+sku)});}
+  if(ex){ex.tray_count+=trays;}  // same SKU stacks; different packing structures coexist on the shelf
+  else{s.items.push({sku_id:sku,tray_count:trays,profile_id:sk.profile_id,description:sk.description});}
   pcRenderBuilder();pcRenderSandbox();
 }
 function pcRemoveItem(pos,idx){var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(s){s.items.splice(idx,1);}pcRenderBuilder();pcRenderSandbox();}
-function pcCartUnits(){var t=0;_pcCur.shelves.forEach(function(s){var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;s.items.forEach(function(i){t+=i.tray_count*upt;});});return t;}
+function pcCartUnits(){var t=0;_pcCur.shelves.forEach(function(s){s.items.forEach(function(i){var p=pcProf(i.profile_id);t+=i.tray_count*((p&&p.units_per_tray)||0);});});return t;}
+function pcAllSkuOptions(){
+  var fams={};(_pcCat.skus||[]).forEach(function(s){if(!s.profile_id)return;(fams[s.family||'Other']=fams[s.family||'Other']||[]).push(s);});
+  return Object.keys(fams).sort().map(function(f){
+    return '<optgroup label="'+escH(f)+'">'+fams[f].map(function(o){return '<option value="'+o.sku_id+'">'+escH(o.description||('SKU '+o.sku_id))+'</option>';}).join('')+'</optgroup>';
+  }).join('');
+}
 /* ---- visual helpers (measurements from JIM packing_profiles + cart_types, same math as ShelfKit) ---- */
 var PC_PAL=['#5FBF7F','#4FB3A8','#A9BFCB','#EFC777','#86C5A0','#D98C8C','#8CA0D9','#C9A24F'];
 function pcTrayColor(c){return {clear:'#bfe3d9',cardboard:'#d9b38a',white:'#eef0ee',black:'#6a6f73',bag:'#c8a878'}[c]||'#9ec9b0';}
@@ -1278,21 +1285,29 @@ function pcGeom(pid){
   var acrossN=Math.max(1,Math.floor(sw/w)),deepN=Math.max(1,Math.floor(sd/d));
   return {acrossN:acrossN,deepN:deepN,capacity:acrossN*deepN,oneTrayPct:(w*d)/(sw*sd)*100,w_in:w/MM,d_in:d/MM,clear_h:+p.clear_height_in||15};
 }
-function pcShelfStats(sh){var g=pcGeom(sh.profile_id);if(!g)return{placed:0,capacity:0,pct:0,units:0,over:false,g:null};
-  var placed=sh.items.reduce(function(a,i){return a+i.tray_count;},0);var p=pcProf(sh.profile_id);var upt=p?p.units_per_tray:0;
-  return {placed:placed,capacity:g.capacity,pct:Math.round(placed*g.oneTrayPct),units:placed*upt,over:placed>g.capacity,g:g};}
+function pcShelfStats(sh){
+  var c=pcCart();var sw=+c.shelf_width_in,sd=+c.shelf_depth_in,shelfArea=sw*sd;
+  var area=0,units=0,trays=0,maxH=0;
+  sh.items.forEach(function(it){var g=pcGeom(it.profile_id),p=pcProf(it.profile_id);if(!g||!p)return;
+    area+=it.tray_count*(g.w_in*g.d_in);units+=it.tray_count*(p.units_per_tray||0);trays+=it.tray_count;maxH=Math.max(maxH,g.clear_h||0);});
+  var pct=area/shelfArea*100;
+  return {trays:trays,units:units,pct:Math.round(pct),over:pct>100.5,clear_h:maxH||15};
+}
+/* mixed-footprint flow pack: each tray drawn at its REAL size, left-to-right, wrapping rows,
+   so differing pack plans (e.g. H2O Bowls + a 17cm tray) coexist on one shelf. */
 function pcShelfSVG(sh){
-  var st=pcShelfStats(sh),g=st.g;if(!g)return'';
-  var c=pcCart(),scale=250/(+c.shelf_width_in);
-  var SW=(+c.shelf_width_in)*scale,SD=(+c.shelf_depth_in)*scale,cellW=g.w_in*scale,cellH=g.d_in*scale;
-  var seq=[];sh.items.forEach(function(it,idx){for(var k=0;k<it.tray_count;k++)seq.push(idx);});
-  var r='';
-  for(var i=0;i<g.capacity;i++){var col=i%g.acrossN,row=Math.floor(i/g.acrossN);var x=col*cellW,y=row*cellH;
-    var fl=i<seq.length;var f=fl?PC_PAL[seq[i]%PC_PAL.length]:'#f4f6f4';var sk=fl?'#2d6a4f':'#dde3dd';
-    r+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+Math.max(1,cellW-2).toFixed(1)+'" height="'+Math.max(1,cellH-2).toFixed(1)+'" rx="2" fill="'+f+'" stroke="'+sk+'" stroke-width="1"/>';}
-  // any trays beyond capacity (overflow) drawn as a red strip
-  var ov=st.over?'<rect x="0" y="0" width="'+SW.toFixed(1)+'" height="'+SD.toFixed(1)+'" fill="none" stroke="#C00000" stroke-width="2" stroke-dasharray="5 3"/>':'';
-  return '<svg width="'+SW.toFixed(0)+'" height="'+SD.toFixed(0)+'" style="background:#fff;border:1px solid var(--line);border-radius:4px;display:block">'+r+ov+'</svg>';
+  var c=pcCart(),scale=250/(+c.shelf_width_in);var sw=+c.shelf_width_in,sd=+c.shelf_depth_in,tol=0.3;
+  var SW=sw*scale,SD=sd*scale;
+  var trays=[];sh.items.forEach(function(it,idx){var g=pcGeom(it.profile_id);if(!g)return;for(var k=0;k<it.tray_count;k++)trays.push({w:g.w_in,d:g.d_in,ci:idx});});
+  var x=0,y=0,rowD=0,r='',over=false;
+  trays.forEach(function(t){
+    if(x+t.w>sw+tol){x=0;y+=rowD;rowD=0;}
+    var ovf=(y+t.d>sd+tol);if(ovf)over=true;
+    var f=ovf?'#f3c2c2':PC_PAL[t.ci%PC_PAL.length],stk=ovf?'#C00000':'#2d6a4f';
+    r+='<rect x="'+(x*scale).toFixed(1)+'" y="'+(y*scale).toFixed(1)+'" width="'+Math.max(2,t.w*scale-2).toFixed(1)+'" height="'+Math.max(2,t.d*scale-2).toFixed(1)+'" rx="2" fill="'+f+'" stroke="'+stk+'" stroke-width="1"/>';
+    x+=t.w;rowD=Math.max(rowD,t.d);
+  });
+  return '<svg width="'+SW.toFixed(0)+'" height="'+SD.toFixed(0)+'" style="background:#fff;border:1px solid '+(over?'#C00000':'var(--line)')+';border-radius:4px;display:block">'+r+'</svg>';
 }
 function pcPctBar(st){var w=Math.min(100,st.pct);var col=st.over?'#C00000':(w>=85?'#2d6a4f':'#5FBF7F');
   return '<div style="height:8px;background:var(--line);border-radius:4px;overflow:hidden;flex:1;min-width:60px"><div style="height:8px;width:'+w+'%;background:'+col+'"></div></div>';}
@@ -1306,8 +1321,8 @@ function pcElevation(){
   s+='<line x1="'+(pL-6)+'" y1="'+ceilY.toFixed(1)+'" x2="'+(pR+6)+'" y2="'+ceilY.toFixed(1)+'" stroke="#C00000" stroke-width="1" stroke-dasharray="4 3"/><text x="'+(pR+8)+'" y="'+(ceilY+3).toFixed(1)+'" font-size="8" fill="#C00000">'+ceil+'"</text>';
   var ordered=_pcCur.shelves.slice().sort(function(a,b){return a.shelf_position-b.shelf_position;});
   var cum=0,over=false;
-  ordered.forEach(function(sh){var st=pcShelfStats(sh),g=st.g,h=(g&&g.clear_h)||15;
-    var y1=baseY-(cum+h)*scaleH,bh=h*scaleH,p=pcProf(sh.profile_id);
+  ordered.forEach(function(sh){var st=pcShelfStats(sh),h=st.clear_h||15;
+    var y1=baseY-(cum+h)*scaleH,bh=h*scaleH,fi=sh.items[0],p=fi?pcProf(fi.profile_id):null;
     s+='<rect x="'+pL+'" y="'+y1.toFixed(1)+'" width="'+(pR-pL)+'" height="'+Math.max(2,bh-2).toFixed(1)+'" fill="'+pcTrayColor(p?p.tray_color:'')+'" stroke="#2d6a4f" stroke-width="0.8" opacity="0.88"/>';
     s+='<rect x="'+(pL-3)+'" y="'+(baseY-cum*scaleH-2).toFixed(1)+'" width="'+(pR-pL+6)+'" height="3" fill="#b8936a"/>';
     s+='<text x="'+((pL+pR)/2)+'" y="'+(y1+bh/2+3).toFixed(1)+'" font-size="9" fill="#13371f" text-anchor="middle">S'+sh.shelf_position+' · '+st.pct+'%</text>';
@@ -1326,36 +1341,30 @@ function pcRenderBuilder(){
   h+='<div style="display:flex;gap:16px;align-items:flex-start"><div style="flex:1;min-width:0">';
   var shelves=_pcCur.shelves.slice().sort(function(a,b){return a.shelf_position-b.shelf_position;});
   shelves.forEach(function(s){
-    var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;var st=pcShelfStats(s);
+    var st=pcShelfStats(s);
     h+='<div class="card mb-2"><div class="ch d-flex justify-content-between align-items-center" style="padding:7px 12px;font-size:13px;border-radius:9px 9px 0 0">'
-      +'<span><i class="bi bi-layers me-2"></i>Shelf '+s.shelf_position+'</span>'
-      +'<span style="display:flex;gap:8px;align-items:center">'
-      +'<select onchange="pcSetProfile('+s.shelf_position+',this.value)" style="font-size:11px;padding:2px 6px;border:1px solid var(--line);border-radius:4px">'
-      +(_pcCat.profiles||[]).map(function(pr){return '<option value="'+pr.profile_id+'"'+(pr.profile_id===s.profile_id?' selected':'')+'>'+escH(pr.short_name||pr.profile_id)+' ('+pr.units_per_tray+'/tray · '+(pr.clear_height_in||'?')+'")</option>';}).join('')
-      +'</select>'
+      +'<span><i class="bi bi-layers me-2"></i>Shelf '+s.shelf_position+' <span style="font-weight:400;color:var(--is);font-size:11px">· '+st.clear_h+'" tall</span></span>'
       +'<button class="btn btn-sm py-0 px-1" style="font-size:11px;color:#C00000;border:none;background:none" onclick="pcRemoveShelf('+s.shelf_position+')"><i class="bi bi-x-lg"></i></button>'
-      +'</span></div><div style="padding:8px 12px">';
-    // top-view visual + % full
+      +'</div><div style="padding:8px 12px">';
+    // top-view visual + % full (area-based across mixed trays)
     h+='<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">'+pcShelfSVG(s)
       +'<div style="flex:1;min-width:0"><div class="d-flex align-items-center gap-2 mb-1">'+pcPctBar(st)
       +'<span style="font-size:12px;font-weight:700;'+(st.over?'color:#C00000':'color:var(--fd)')+'">'+st.pct+'% full</span></div>'
-      +'<div style="font-size:11px;color:var(--is)">'+st.placed+' / '+st.capacity+' trays · '+fmt(st.units)+' units'+(st.over?' <span style="color:#C00000;font-weight:700">· OVER capacity</span>':'')+'</div></div></div>';
+      +'<div style="font-size:11px;color:var(--is)">'+st.trays+' trays · '+fmt(st.units)+' units'+(st.over?' <span style="color:#C00000;font-weight:700">· OVER shelf space</span>':'')+'</div></div></div>';
     s.items.forEach(function(i,idx){
+      var p=pcProf(i.profile_id);var upt=p?p.units_per_tray:0;
       h+='<div class="d-flex justify-content-between align-items-center" style="font-size:12px;padding:3px 0;border-bottom:1px solid #f0f4f0">'
-        +'<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'+PC_PAL[idx%PC_PAL.length]+';margin-right:5px"></span>'+sn(i.description||'SKU '+i.sku_id)+' <span style="color:var(--is)">#'+i.sku_id+'</span></span>'
+        +'<span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'+PC_PAL[idx%PC_PAL.length]+';margin-right:5px"></span>'+sn(i.description||'SKU '+i.sku_id)+' <span style="color:var(--is)">#'+i.sku_id+' · '+escH(p?(p.short_name||p.profile_id||''):'')+'</span></span>'
         +'<span style="display:flex;gap:8px;align-items:center"><span style="color:var(--mp)">'+i.tray_count+'t · '+(i.tray_count*upt)+'u</span>'
         +'<button class="btn btn-sm py-0 px-1" style="font-size:10px;color:#C00000;border:none;background:none" onclick="pcRemoveItem('+s.shelf_position+','+idx+')"><i class="bi bi-x"></i></button></span></div>';
     });
-    var opts=pcSkusFor(s.profile_id);
     h+='<div class="d-flex gap-2 mt-2">'
       +'<select id="pc-sku-'+s.shelf_position+'" style="flex:1;min-width:0;font-size:11.5px;padding:3px 6px;border:1px solid var(--line);border-radius:4px">'
-      +'<option value="">+ add SKU…</option>'
-      +opts.map(function(o){return '<option value="'+o.sku_id+'">'+escH(o.description||('SKU '+o.sku_id))+'</option>';}).join('')
+      +'<option value="">+ add any SKU (mixes pack plans)…</option>'+pcAllSkuOptions()
       +'</select>'
       +'<input id="pc-tray-'+s.shelf_position+'" type="number" min="1" value="1" style="width:52px;font-size:11.5px;padding:3px 6px;border:1px solid var(--line);border-radius:4px">'
       +'<button class="btn btn-sm btn-outline-primary py-0 px-2" style="font-size:11px" onclick="pcAddItem('+s.shelf_position+')">Add</button>'
-      +'</div>'+(opts.length?'':'<div style="font-size:10.5px;color:var(--is);margin-top:3px">No SKUs use this tray profile.</div>')
-      +'</div></div>';
+      +'</div></div></div>';
   });
   var maxSh=(_pcCat.cart&&_pcCat.cart.max_shelves)||5;
   if(_pcCur.shelves.length<maxSh)h+='<button class="btn btn-sm btn-outline-secondary" onclick="pcAddShelf()"><i class="bi bi-plus-lg me-1"></i>Add Shelf ('+_pcCur.shelves.length+'/'+maxSh+')</button>';
@@ -1370,8 +1379,8 @@ function pcRenderSandbox(){
   var el=document.getElementById('pc-sandbox');if(!el)return;
   var n=parseInt((document.getElementById('pc-stores')||{}).value)||0;
   var bySku={};
-  _pcCur.shelves.forEach(function(s){var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;
-    s.items.forEach(function(i){bySku[i.sku_id]=bySku[i.sku_id]||{desc:i.description,u:0};bySku[i.sku_id].u+=i.tray_count*upt;});});
+  _pcCur.shelves.forEach(function(s){s.items.forEach(function(i){var p=pcProf(i.profile_id);var upt=p?p.units_per_tray:0;
+    bySku[i.sku_id]=bySku[i.sku_id]||{desc:i.description,u:0};bySku[i.sku_id].u+=i.tray_count*upt;});});
   var keys=Object.keys(bySku);
   if(!keys.length){el.innerHTML='<span style="font-size:12px;color:var(--is)">Build a cart to project units.</span>';return;}
   var tot=0;
@@ -1392,7 +1401,7 @@ async function pcSave(){
   var shelves=_pcCur.shelves.filter(function(s){return s.items.length;});
   if(!shelves.length){toast('Add at least one shelf with a SKU','warn');return;}
   var body={name:_pcCur.name.trim(),cart_type_id:'cc',shelves:shelves.map(function(s){
-    return {shelf_position:s.shelf_position,profile_id:s.profile_id,items:s.items.map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count};})};})};
+    return {shelf_position:s.shelf_position,items:s.items.map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count,profile_id:i.profile_id};})};})};
   try{
     if(_pcCur.id){try{await api('/api/permanent-carts/'+_pcCur.id,{method:'DELETE'});}catch(e){}}
     var r=await api('/api/permanent-carts',{method:'POST',body:JSON.stringify(body)});

@@ -22,11 +22,12 @@ class ShelfItem(BaseModel):
     sku_id: int
     tray_count: int = 1
     kit_type: Optional[str] = None
+    profile_id: Optional[str] = None   # each item carries its own tray profile (mixed shelves)
 
 
 class ShelfIn(BaseModel):
     shelf_position: int
-    profile_id: str
+    profile_id: Optional[str] = None   # legacy fallback when an item has none
     items: List[ShelfItem]
 
 
@@ -119,6 +120,7 @@ def get_cart(template_id: str, user=Depends(get_current_user)):
         shelves[pos]["items"].append({
             "sku_id": r["sku_id"], "description": r["description"], "family": r["family"],
             "tray_count": r["tray_count"], "unit_count": r["unit_count"], "kit_type": r["kit_type"],
+            "profile_id": r["profile_id"],
         })
     return {**t, "shelves": [shelves[p] for p in order]}
 
@@ -143,12 +145,12 @@ def create_cart(req: PermanentCartIn, user=Depends(require_role("order_writer", 
         positions = set()
         shelf_rows = []
         for sh in req.shelves:
-            per_tray = upt.get(sh.profile_id, 0)
             for it in sh.items:
-                units = (it.tray_count or 0) * per_tray
+                prof = it.profile_id or sh.profile_id
+                units = (it.tray_count or 0) * upt.get(prof, 0)
                 total_units += units
                 positions.add(sh.shelf_position)
-                shelf_rows.append((tid, sh.shelf_position, it.sku_id, sh.profile_id,
+                shelf_rows.append((tid, sh.shelf_position, it.sku_id, prof,
                                    it.kit_type, it.tray_count, units))
         cur.execute("""
             INSERT INTO cart_templates (id, name, cart_type_id, created_by, is_approved,
