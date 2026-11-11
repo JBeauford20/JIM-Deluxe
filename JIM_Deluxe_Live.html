@@ -2086,8 +2086,21 @@ async function doFinalizeWeek(){
 async function doReopenRun(runId){
   try{
     await api('/api/orders/runs/'+runId+'/reopen',{method:'POST'});
-    toast('Week reopened -- orders are editable again','ok');
-    loadHistory();
+    // Load the reopened run back into the editable Review Plan (it's now a draft, so it
+    // leaves Order History — bring it into the working view instead of just reloading
+    // the history list, which left it nowhere to be found). — Josh, Nov 2026
+    rId=runId;
+    try{var s=await api('/api/orders/runs/'+runId+'/summary');if(s&&s.shipping_week)wk=String(s.shipping_week).slice(0,10);}catch(e){}
+    await loadPlan();
+    var rb=document.getElementById('rb');if(rb)rb.style.display='block';
+    ['nl-cfg','nl-draw','nl-routing'].forEach(function(id){var n=document.getElementById(id);if(n)n.style.display='flex';});
+    var fb=document.getElementById('fb');if(fb)fb.disabled=false;
+    var psb=document.getElementById('psb');if(psb)psb.disabled=false;
+    setStrip(wk,null,'Reopened Plan');
+    loadCfgs().catch(function(){});
+    loadDraw().catch(function(){});
+    toast('Week reopened -- loaded into Review Plan','ok');
+    go('plan',rb);
   }catch(e){toast('Re-open failed: '+e.message,'err');}
 }
 
