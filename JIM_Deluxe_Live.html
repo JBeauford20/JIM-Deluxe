@@ -1285,28 +1285,50 @@ function pcGeom(pid){
   var acrossN=Math.max(1,Math.floor(sw/w)),deepN=Math.max(1,Math.floor(sd/d));
   return {acrossN:acrossN,deepN:deepN,capacity:acrossN*deepN,oneTrayPct:(w*d)/(sw*sd)*100,w_in:w/MM,d_in:d/MM,clear_h:+p.clear_height_in||15};
 }
-function pcShelfStats(sh){
-  var c=pcCart();var sw=+c.shelf_width_in,sd=+c.shelf_depth_in,shelfArea=sw*sd;
-  var area=0,units=0,trays=0,maxH=0;
-  sh.items.forEach(function(it){var g=pcGeom(it.profile_id),p=pcProf(it.profile_id);if(!g||!p)return;
-    area+=it.tray_count*(g.w_in*g.d_in);units+=it.tray_count*(p.units_per_tray||0);trays+=it.tray_count;maxH=Math.max(maxH,g.clear_h||0);});
-  var pct=area/shelfArea*100;
-  return {trays:trays,units:units,pct:Math.round(pct),over:pct>100.5,clear_h:maxH||15};
-}
-/* mixed-footprint flow pack: each tray drawn at its REAL size, left-to-right, wrapping rows,
-   so differing pack plans (e.g. H2O Bowls + a 17cm tray) coexist on one shelf. */
-function pcShelfSVG(sh){
-  var c=pcCart(),scale=250/(+c.shelf_width_in);var sw=+c.shelf_width_in,sd=+c.shelf_depth_in,tol=0.3;
-  var SW=sw*scale,SD=sd*scale;
-  var trays=[];sh.items.forEach(function(it,idx){var g=pcGeom(it.profile_id);if(!g)return;for(var k=0;k<it.tray_count;k++)trays.push({w:g.w_in,d:g.d_in,ci:idx});});
-  var x=0,y=0,rowD=0,r='',over=false;
+/* AUTO-FIT packer: best-fit placement into free rectangles, trying a 90° rotation when a
+   tray fits only turned. Guillotine split (right keeps full depth, bottom keeps tray width)
+   so full-depth trays (17cm) and 2-deep trays (bowls/canopy) nest instead of overflowing.
+   Trays that genuinely can't fit are returned as `unfit` (never drawn outside the shelf). */
+function pcPack(trays,W,D){
+  var EPS=0.25; // 1/4" press-in tolerance (matches ShelfKit's perimeter allowance)
+  var free=[{x:0,y:0,w:W,d:D}],placed=[],unfit=[];
+  function findBest(tw,td){var b=null;for(var fi=0;fi<free.length;fi++){var fr=free[fi];
+    if(tw<=fr.w+EPS&&td<=fr.d+EPS){var score=Math.min(fr.w-tw,fr.d-td);  // best-short-side-fit
+      if(!b||score<b.score)b={fi:fi,score:score,x:fr.x,y:fr.y};}}return b;}
   trays.forEach(function(t){
-    if(x+t.w>sw+tol){x=0;y+=rowD;rowD=0;}
-    var ovf=(y+t.d>sd+tol);if(ovf)over=true;
-    var f=ovf?'#f3c2c2':PC_PAL[t.ci%PC_PAL.length],stk=ovf?'#C00000':'#2d6a4f';
-    r+='<rect x="'+(x*scale).toFixed(1)+'" y="'+(y*scale).toFixed(1)+'" width="'+Math.max(2,t.w*scale-2).toFixed(1)+'" height="'+Math.max(2,t.d*scale-2).toFixed(1)+'" rx="2" fill="'+f+'" stroke="'+stk+'" stroke-width="1"/>';
-    x+=t.w;rowD=Math.max(rowD,t.d);
+    // Pass 1: try WITHOUT rotating, anywhere. Pass 2: rotate 90° only if nothing fit non-rotated.
+    var rot=false,tw=t.w,td=t.d,best=findBest(t.w,t.d);
+    if(!best&&t.w!==t.d){var b2=findBest(t.d,t.w);if(b2){best=b2;rot=true;tw=t.d;td=t.w;}}
+    if(!best){unfit.push(t);return;}
+    placed.push({x:best.x,y:best.y,w:tw,d:td,rot:rot,ci:t.ci});
+    var fr=free[best.fi];free.splice(best.fi,1);
+    var right ={x:fr.x+tw,y:fr.y,   w:fr.w-tw,d:fr.d};     // full depth to the right
+    var bottom={x:fr.x,   y:fr.y+td,w:tw,     d:fr.d-td};  // under the tray, tray-wide
+    if(right.w>EPS&&right.d>EPS)free.push(right);
+    if(bottom.w>EPS&&bottom.d>EPS)free.push(bottom);
   });
+  return {placed:placed,unfit:unfit};
+}
+function pcShelfLayout(sh){
+  var c=pcCart();var W=+c.shelf_width_in,D=+c.shelf_depth_in;
+  var list=[],units=0,maxH=0;
+  sh.items.forEach(function(it,idx){var g=pcGeom(it.profile_id),p=pcProf(it.profile_id);if(!g||!p)return;
+    units+=it.tray_count*(p.units_per_tray||0);maxH=Math.max(maxH,g.clear_h||0);
+    for(var k=0;k<it.tray_count;k++)list.push({w:g.w_in,d:g.d_in,ci:idx,area:g.w_in*g.d_in});});
+  var order=list.slice().sort(function(a,b){return b.area-a.area;}); // largest-first packs tighter
+  var pk=pcPack(order,W,D);
+  var areaPct=Math.round(list.reduce(function(a,t){return a+t.area;},0)/(W*D)*100);
+  return {W:W,D:D,placed:pk.placed,unfit:pk.unfit,areaPct:areaPct,trays:list.length,units:units,clear_h:maxH||15};
+}
+function pcShelfStats(sh){var L=pcShelfLayout(sh);
+  return {trays:L.trays,units:L.units,pct:L.areaPct,over:L.unfit.length>0,unfit:L.unfit.length,clear_h:L.clear_h};}
+function pcShelfSVG(sh){
+  var L=pcShelfLayout(sh),scale=250/L.W,SW=L.W*scale,SD=L.D*scale,r='';
+  L.placed.forEach(function(t){
+    r+='<rect x="'+(t.x*scale).toFixed(1)+'" y="'+(t.y*scale).toFixed(1)+'" width="'+Math.max(2,t.w*scale-2).toFixed(1)+'" height="'+Math.max(2,t.d*scale-2).toFixed(1)+'" rx="2" fill="'+PC_PAL[t.ci%PC_PAL.length]+'" stroke="#2d6a4f" stroke-width="1"/>';
+    if(t.rot)r+='<text x="'+((t.x*scale)+(t.w*scale)/2).toFixed(1)+'" y="'+((t.y*scale)+(t.d*scale)/2+3).toFixed(1)+'" font-size="9" fill="#13371f" text-anchor="middle">&#8635;</text>';
+  });
+  var over=L.unfit.length>0;
   return '<svg width="'+SW.toFixed(0)+'" height="'+SD.toFixed(0)+'" style="background:#fff;border:1px solid '+(over?'#C00000':'var(--line)')+';border-radius:4px;display:block">'+r+'</svg>';
 }
 function pcPctBar(st){var w=Math.min(100,st.pct);var col=st.over?'#C00000':(w>=85?'#2d6a4f':'#5FBF7F');
@@ -1350,7 +1372,7 @@ function pcRenderBuilder(){
     h+='<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">'+pcShelfSVG(s)
       +'<div style="flex:1;min-width:0"><div class="d-flex align-items-center gap-2 mb-1">'+pcPctBar(st)
       +'<span style="font-size:12px;font-weight:700;'+(st.over?'color:#C00000':'color:var(--fd)')+'">'+st.pct+'% full</span></div>'
-      +'<div style="font-size:11px;color:var(--is)">'+st.trays+' trays · '+fmt(st.units)+' units'+(st.over?' <span style="color:#C00000;font-weight:700">· OVER shelf space</span>':'')+'</div></div></div>';
+      +'<div style="font-size:11px;color:var(--is)">'+st.trays+' trays · '+fmt(st.units)+' units'+(st.over?' <span style="color:#C00000;font-weight:700">· '+st.unfit+' tray'+(st.unfit>1?'s':'')+" don't fit</span>":'')+'</div></div></div>';
     s.items.forEach(function(i,idx){
       var p=pcProf(i.profile_id);var upt=p?p.units_per_tray:0;
       h+='<div class="d-flex justify-content-between align-items-center" style="font-size:12px;padding:3px 0;border-bottom:1px solid #f0f4f0">'
