@@ -1079,7 +1079,13 @@ function renderCart(o,d){
     sh.forEach(function(s){
       var vars=(s.varieties||[]);
       var kitLabel=vars.length&&vars[0].kit_type?'<span class="kp ms-1">'+vars[0].kit_type.replace('_kit','')+'</span>':'';
-      var vHTML=vars.map(function(v){return '<div style="font-size:11px;color:var(--is);padding-left:30px">&#8226; '+sn(v.description||v.desc||'SKU '+v.sku_id)+' <span style="color:var(--mp)">'+v.trays+'t, '+v.units+'u</span></div>';}).join('');
+      var vHTML=vars.map(function(v){
+        var aster=v.aster_code
+          ?' <span style="font-family:monospace;color:var(--fern)">#'+v.aster_code+'</span>'
+            +(v.variety_name?' <span style="color:var(--fd)">'+escH(v.variety_name)+'</span>':'')
+          :'';
+        return '<div style="font-size:11px;color:var(--is);padding-left:30px">&#8226; '+sn(v.description||v.desc||'SKU '+v.sku_id)+aster+' <span style="color:var(--mp)">'+v.trays+'t, '+v.units+'u</span></div>';
+      }).join('');
       h+='<div class="shr" style="flex-direction:column;align-items:flex-start;gap:2px;padding:7px 12px">'
         +'<div class="d-flex align-items-center gap-2" style="width:100%"><span class="shn">'+(s.pos||s.shelf_position||'')+'</span>'
         +'<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:12.5px">'+(s.profile_short||s.profile||'')+'<span style="font-weight:400;color:var(--is);font-size:11px;margin-left:6px">'+(s.total_trays||0)+' trays, '+(s.total_units||0)+'u</span>'+kitLabel+'</div></div>'
