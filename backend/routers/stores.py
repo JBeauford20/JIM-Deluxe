@@ -54,6 +54,28 @@ def list_stores(
         return cur.fetchall()
 
 
+@router.get("/{store_id}/last-order")
+def store_last_order(store_id: int, user=Depends(get_current_user)):
+    """The store's most recent ACTUAL shipment/delivery: the date, its week, and a pivoted
+    SKU list (what physically went to the store on that delivery)."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT MAX(delivery_date) AS d FROM deliveries WHERE store_id = %s", (store_id,))
+        row = cur.fetchone()
+        last_date = row["d"] if row else None
+        if not last_date:
+            return {"delivery_date": None, "week": None, "lines": []}
+        cur.execute("""
+            SELECT d.sku_id, k.description, k.family, SUM(d.units_delivered) AS units
+            FROM deliveries d JOIN skus k ON k.sku_id = d.sku_id
+            WHERE d.store_id = %s AND d.delivery_date = %s
+            GROUP BY d.sku_id, k.description, k.family
+            ORDER BY units DESC
+        """, (store_id, last_date))
+        lines = cur.fetchall()
+    return {"delivery_date": last_date, "week": int(last_date.isocalendar()[1]), "lines": lines}
+
+
 @router.get("/{store_id}")
 def store_profile(store_id: int, user=Depends(get_current_user)):
     """Full store profile — velocity, SKU breakdown, recent deliveries."""
@@ -138,8 +160,17 @@ def store_profile(store_id: int, user=Depends(get_current_user)):
         """, (store_id, store_id, store_id, store_id))
         manifest = cur.fetchone()
 
+        # YTD sales in wholesale dollars (units_sold × wholesale_price_whl, this calendar year)
+        cur.execute("""
+            SELECT COALESCE(SUM(s.units_sold * COALESCE(sk.wholesale_price_whl, 0)), 0) AS ytd_whl
+            FROM sales s JOIN skus sk ON sk.sku_id = s.sku_id
+            WHERE s.store_id = %s AND s.sale_date >= date_trunc('year', CURRENT_DATE)
+        """, (store_id,))
+        ytd_sales_whl = float(cur.fetchone()["ytd_whl"] or 0)
+
         return {
             "store":            store,
+            "ytd_sales_whl":    ytd_sales_whl,
             "velocity_history": velocity_history,
             "group_velocity":   group_velocity,
             "top_skus":         top_skus,

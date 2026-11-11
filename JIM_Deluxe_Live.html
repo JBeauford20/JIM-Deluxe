@@ -2036,7 +2036,7 @@ function renderSL(list){
   var el=document.getElementById('sl');if(!el)return;
   el.innerHTML=list.map(function(s){
     var fl=s.fenceline?' <span style="font-size:9px;background:#6c757d;color:#fff;border-radius:3px;padding:1px 4px">FL</span>':'';
-    return '<div class="sr" onclick="openSt('+s.store_id+')"><div class="d-flex justify-content-between"><span style="font-weight:700;font-size:13px">'+s.store_id+' -- '+(s.store_name||'')+fl+'</span>'+mkTB((s.dynamic_velocity_tier||'').trim())+'</div><div style="font-size:11px;color:var(--is)" class="d-flex justify-content-between mt-1"><span>'+(s.city||'')+', '+(s.state||'')+'</span><span>'+(s.merchant||'')+'</span></div></div>';
+    return '<div class="sr" onclick="openSt('+s.store_id+')"><div class="d-flex justify-content-between"><span style="font-weight:700;font-size:13px">'+s.store_id+' -- '+(s.store_name||'')+fl+'</span>'+mkTB((s.volume_code||'').trim())+'</div><div style="font-size:11px;color:var(--is)" class="d-flex justify-content-between mt-1"><span>'+(s.city||'')+', '+(s.state||'')+'</span><span>'+(s.merchant||'')+'</span></div></div>';
   }).join('');
 }
 function _distinctStore(field){var m={};allStores.forEach(function(x){var val=(x[field]==null?'':String(x[field])).trim();if(val)m[val]=1;});return Object.keys(m).sort();}
@@ -2051,7 +2051,7 @@ function applyStoreFilters(){
   var q=v('sf-search').toLowerCase(),tier=v('sf-tier'),status=v('sf-status'),merch=v('sf-merchant'),region=v('sf-region'),div=v('sf-division'),state=v('sf-state'),fence=v('sf-fence');
   renderSL(allStores.filter(function(s){
     if(q&&!(String(s.store_id).indexOf(q)>=0||(s.store_name||'').toLowerCase().indexOf(q)>=0||(s.city||'').toLowerCase().indexOf(q)>=0))return false;
-    if(tier&&(s.dynamic_velocity_tier||'').trim()!==tier)return false;
+    if(tier&&(s.volume_code||'').trim()!==tier)return false;
     if(status&&(s.store_status||'active')!==status)return false;
     if(merch&&(s.merchant||'')!==merch)return false;
     if(region&&(s.region||'')!==region)return false;
@@ -2085,20 +2085,35 @@ async function openSt(id){
     var pct=prior4>0?Math.round((recent4-prior4)/prior4*100):0;
     var trendColor=pct>=0?'var(--fern)':'#C00000';
     var trendStr=(pct>=0?'+':'')+pct+'% vs prior 4 weeks';
-    sp.innerHTML='<div class="d-flex justify-content-between mb-3"><div><h5 class="mb-1" style="color:var(--fd)">Store '+s.store_id+' -- '+(s.store_name||'')+'</h5><p class="text-muted mb-0" style="font-size:13px">'+(s.city||'')+', '+(s.state||'')+' - '+(s.merchant||'')+'</p></div><div class="text-end">'+mkTB(tier)+stBadge+itBadge+'<div style="font-size:11px;color:var(--is);margin-top:3px">Static Velo: '+(s.volume_code||'').trim()+'</div>'
+    sp.innerHTML='<div class="d-flex justify-content-between mb-3"><div><h5 class="mb-1" style="color:var(--fd)">Store '+s.store_id+' -- '+(s.store_name||'')+'</h5><p class="text-muted mb-0" style="font-size:13px">'+(s.city||'')+', '+(s.state||'')+' - '+(s.merchant||'')+'</p></div><div class="text-end">'+mkTB((s.volume_code||'').trim())+stBadge+itBadge+'<div style="font-size:11px;color:var(--is);margin-top:3px">Dynamic (advisory): '+(tier||'—')+'</div>'
       +'<button onclick="openEditStore()" class="btn btn-sm btn-outline-secondary py-1 px-2 ms-2 mt-2" style="font-size:11px"><i class="bi bi-pencil me-1"></i>Edit Store</button>'
       +'</div></div>'
-      +'<div class="row g-2 mb-3"><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+parseFloat(s.dynamic_velocity_score||0).toFixed(1)+'</div><div class="l">Velocity Score</div></div></div><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+(s.region||'--')+'</div><div class="l">Region</div></div></div></div>'
-      +'<div class="card mb-3"><div class="card-body py-2" style="font-size:12.5px;display:flex;flex-wrap:wrap;gap:18px">'
+      +'<div class="row g-2 mb-3"><div class="col-6"><div class="sc py-2 text-center"><div class="n">'+parseFloat(s.dynamic_velocity_score||0).toFixed(1)+'</div><div class="l">Velocity Score</div></div></div><div class="col-6"><div class="sc py-2 text-center"><div class="n">$'+fmt(Math.round(p.ytd_sales_whl||0))+'</div><div class="l">YTD Sales (whl)</div></div></div></div>'
+      +'<div class="card mb-3"><div class="card-body py-2" style="font-size:12.5px;display:flex;flex-wrap:wrap;gap:18px;align-items:center">'
+      +'<span><strong>Region:</strong> '+(s.region||'—')+'</span>'
       +'<span><strong>Perm Racks:</strong> '+(s.perm_racks||0)+'</span>'
       +'<span><strong>Fenceline:</strong> '+(s.fenceline?'<span style="color:var(--fern);font-weight:700">Yes</span>':'No')+'</span>'
       +'<span><strong>Last Delivered:</strong> '+(m.last_delivery_date?('WK'+(m.last_delivery_week||'?')+' · '+String(m.last_delivery_date).slice(0,10)):'—')+'</span>'
       +'<span><strong>Last Shipped:</strong> '+(m.last_ship_week?('WK'+m.last_ship_week):'—')+'</span>'
+      +'<button onclick="viewLastOrder('+s.store_id+')" class="btn btn-sm btn-outline-primary py-0 px-2" style="font-size:11px"><i class="bi bi-box-seam me-1"></i>View Last Order</button>'
       +'</div></div>'
       +(cats.length?'<div class="mb-3">'+cats.map(function(c){return '<span style="background:#f0f9f0;border:1px solid var(--mp);border-radius:8px;padding:5px 10px;display:inline-flex;align-items:center;gap:5px;font-size:12px;margin:3px"><span style="color:var(--is)">'+c[0]+'</span>'+mkTB(c[1].trim())+'</span>';}).join('')+'</div>':'')
       +'<div class="card mb-3"><div class="ch lt"><i class="bi bi-graph-up me-2"></i>Weekly Sales -- Last 26 Weeks</div><div class="card-body pb-2"><div style="display:flex;align-items:flex-end;gap:2px;height:90px">'+weekly.map(function(v,i){return '<div style="flex:1;background:var(--fern);border-radius:2px 2px 0 0;height:'+Math.max(4,v/maxW*88)+'px;min-width:0;opacity:.85" title="Week '+(weekly.length-i)+' ago: '+v+' units"></div>';}).join('')+'</div><div class="d-flex justify-content-between mt-1" style="font-size:10px;color:var(--is)"><span>26w</span><span>20w</span><span>13w</span><span>7w</span><span>Now</span></div><div style="font-size:11px;text-align:center;margin-top:4px;color:'+trendColor+';font-weight:600">'+trendStr+'</div></div></div>'
       +'<div class="card"><div class="ch lt"><i class="bi bi-bar-chart me-2"></i>Top SKUs</div><table class="table jt mb-0"><thead><tr><th>Product</th><th>Family</th><th class="text-end">Units</th></tr></thead><tbody>'+(p.top_skus||[]).slice(0,8).map(function(sk){return '<tr><td style="font-size:12px">'+sn(sk.description||sk.desc||'')+'</td><td style="font-size:11px;color:var(--is)">'+(sk.family||'')+'</td><td class="text-end fw-bold">'+fmt(sk.total_units||sk.units||0)+'</td></tr>';}).join('')+'</tbody></table></div>';
   }catch(e){sp.innerHTML='<div class="p-4 text-danger">Failed: '+e.message+'</div>';}
+}
+
+async function viewLastOrder(id){
+  _showAiModal('Last Order','<div class="text-center py-4"><span class="spinner-border spinner-border-sm me-2"></span>Loading…</div>');
+  try{
+    var d=await api('/api/stores/'+id+'/last-order');
+    if(!d.delivery_date){_showAiModal('Last Order — Store '+id,'<div style="font-size:13px">No delivery history for this store.</div>');return;}
+    var tot=(d.lines||[]).reduce(function(a,l){return a+(l.units||0);},0);
+    var rows=(d.lines||[]).map(function(l){return '<tr style="border-bottom:1px solid #f0f4f0"><td style="padding:4px 10px 4px 0">'+sn(l.description||('SKU '+l.sku_id))+'</td><td style="padding:4px 10px 4px 0;font-size:11px;color:var(--is)">'+(l.family||'')+'</td><td style="text-align:right;font-weight:700;color:var(--fd)">'+fmt(l.units)+'</td></tr>';}).join('');
+    var html='<div style="font-size:12.5px;color:var(--is);margin-bottom:10px">Most recent shipment: <strong style="color:var(--fd)">WK'+d.week+'</strong> &middot; '+String(d.delivery_date).slice(0,10)+' &middot; '+fmt(tot)+' units</div>'
+      +'<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="border-bottom:1px solid var(--line)"><th style="text-align:left;padding-bottom:5px">Product</th><th style="text-align:left">Family</th><th style="text-align:right">Units</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    _showAiModal('Last Order — Store '+id,html);
+  }catch(e){_showAiModal('Last Order','<div class="text-danger">'+escH(e.message||'Failed')+'</div>');}
 }
 
 /* AI EXPLANATIONS */
