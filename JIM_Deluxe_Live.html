@@ -1234,6 +1234,12 @@ async function pcLoadList(){
   }).join('');
 }
 function pcNew(){_pcCur={id:null,name:'',shelves:[]};pcRenderBuilder();pcRenderSandbox();}
+function pcStartOver(){
+  if((_pcCur.name&&_pcCur.name.trim())||_pcCur.shelves.length){
+    if(!confirm('Clear the work bench and start a blank cart? This only wipes what you are building now — saved carts are not affected.'))return;
+  }
+  pcNew();toast('Work bench cleared','ok');
+}
 async function pcLoad(id){
   try{
     var d=await api('/api/permanent-carts/'+id);
@@ -1357,6 +1363,7 @@ function pcRenderBuilder(){
   var h='<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">'
     +'<input value="'+escH(_pcCur.name||'')+'" oninput="pcSetName(this.value)" placeholder="Cart name e.g. Holiday 2027 — AA Stores" style="flex:1;min-width:220px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-weight:600">'
     +'<button class="btn btn-sm btn-cta" onclick="pcSave()"><i class="bi bi-save me-1"></i>Save</button>'
+    +'<button class="btn btn-sm btn-outline-secondary" onclick="pcStartOver()"><i class="bi bi-arrow-counterclockwise me-1"></i>Start Over</button>'
     +(_pcCur.id?'<button class="btn btn-sm btn-outline-danger" onclick="pcDelete()"><i class="bi bi-trash"></i></button>':'')
     +'</div>';
   // two columns: shelves (left) + cart elevation (right)
