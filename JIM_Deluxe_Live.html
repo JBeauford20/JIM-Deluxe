@@ -227,32 +227,49 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 
 <!-- CART CONFIGS -->
 <div id="screen-configs" class="screen" style="height:calc(100vh - 114px)">
-<div style="display:flex;height:100%;gap:0;overflow:hidden">
+<div style="display:flex;flex-direction:column;height:100%">
+  <!-- sub-tab toggle -->
+  <div style="padding:7px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-shrink:0">
+    <button id="cfgtab-perm" class="btn btn-sm btn-cta" onclick="cfgTab('perm')"><i class="bi bi-bookmark-star me-1"></i>Permanent Carts</button>
+    <button id="cfgtab-run" class="btn btn-sm btn-outline-secondary" onclick="cfgTab('run')"><i class="bi bi-grid-3x3-gap me-1"></i>This Week's Configs</button>
+  </div>
 
-  <!-- LEFT PANEL: Template list -->
-  <div id="ce-list" style="width:240px;min-width:200px;border-right:1px solid var(--line);overflow-y:auto;padding:.75rem;flex-shrink:0">
-    <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">
-      <i class="bi bi-grid-3x3-gap me-1"></i>Cart Configs
-    </div>
-    <div id="ce-template-list">
-      <span style="font-size:12px;color:var(--is)">No plan loaded.</span>
+  <!-- RUN CONFIGS (existing 3-panel run editor) -->
+  <div id="cfg-run-view" style="display:none;flex:1;min-height:0">
+    <div style="display:flex;height:100%;gap:0;overflow:hidden">
+      <div id="ce-list" style="width:240px;min-width:200px;border-right:1px solid var(--line);overflow-y:auto;padding:.75rem;flex-shrink:0">
+        <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem"><i class="bi bi-grid-3x3-gap me-1"></i>Cart Configs</div>
+        <div id="ce-template-list"><span style="font-size:12px;color:var(--is)">No plan loaded.</span></div>
+      </div>
+      <div id="ce-center" style="flex:1;overflow-y:auto;padding:1rem;min-width:0">
+        <div id="ce-editor-area" style="color:var(--is);font-size:13px">Select a config from the left to edit it.</div>
+      </div>
+      <div id="ce-inventory" style="width:260px;min-width:220px;border-left:1px solid var(--line);overflow-y:auto;padding:.75rem;flex-shrink:0">
+        <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem"><i class="bi bi-box-seam me-1"></i>Inventory Pool</div>
+        <div id="ce-inv-body"><span style="font-size:12px;color:var(--is)">—</span></div>
+      </div>
     </div>
   </div>
 
-  <!-- CENTER PANEL: Shelf recipe editor -->
-  <div id="ce-center" style="flex:1;overflow-y:auto;padding:1rem;min-width:0">
-    <div id="ce-editor-area" style="color:var(--is);font-size:13px">
-      Select a config from the left to edit it.
-    </div>
-  </div>
-
-  <!-- RIGHT PANEL: Inventory pool -->
-  <div id="ce-inventory" style="width:260px;min-width:220px;border-left:1px solid var(--line);overflow-y:auto;padding:.75rem;flex-shrink:0">
-    <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">
-      <i class="bi bi-box-seam me-1"></i>Inventory Pool
-    </div>
-    <div id="ce-inv-body">
-      <span style="font-size:12px;color:var(--is)">—</span>
+  <!-- PERMANENT CARTS builder -->
+  <div id="cfg-perm-view" style="flex:1;min-height:0">
+    <div style="display:flex;height:100%;gap:0;overflow:hidden">
+      <!-- LEFT: saved carts -->
+      <div style="width:230px;min-width:200px;border-right:1px solid var(--line);overflow-y:auto;padding:.75rem;flex-shrink:0">
+        <button class="btn btn-sm btn-cta w-100 mb-2" onclick="pcNew()"><i class="bi bi-plus-lg me-1"></i>New Permanent Cart</button>
+        <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin:.4rem 0">Saved Carts</div>
+        <div id="pc-list"><span style="font-size:12px;color:var(--is)">Loading…</span></div>
+      </div>
+      <!-- CENTER: builder -->
+      <div style="flex:1;overflow-y:auto;padding:1rem;min-width:0">
+        <div id="pc-builder" style="color:var(--is);font-size:13px">Click <strong>New Permanent Cart</strong> to start, or pick a saved one.</div>
+      </div>
+      <!-- RIGHT: sandbox -->
+      <div style="width:290px;min-width:250px;border-left:1px solid var(--line);overflow-y:auto;padding:.75rem;flex-shrink:0">
+        <div style="font-size:11px;font-weight:700;color:var(--is);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem"><i class="bi bi-calculator me-1"></i>Finite-Hardgood Sandbox</div>
+        <div style="font-size:12px;margin-bottom:6px">If sent to <input id="pc-stores" type="number" min="0" value="100" oninput="pcRenderSandbox()" style="width:72px;padding:2px 6px;border:1px solid var(--line);border-radius:4px"> stores:</div>
+        <div id="pc-sandbox"><span style="font-size:12px;color:var(--is)">Build a cart to project units.</span></div>
+      </div>
     </div>
   </div>
 
@@ -591,7 +608,7 @@ function go(n,el){
   var nav=el?(el.closest('.nl')||el):null;if(nav)nav.classList.add('active');
   if(n==='routing')loadRoutingTab();
   if(n==='week')loadHomeScenarios();
-  if(n==='configs')loadCfgs();
+  if(n==='configs')cfgTab(rId?'run':'perm');
 }
 function openScenarios(){
   var n=Array.prototype.slice.call(document.querySelectorAll('.nl')).filter(function(x){return /scenarios/.test(x.getAttribute('onclick')||'');})[0];
@@ -1180,6 +1197,157 @@ async function loadCfgs(){
     if(_ceTemplates.length>0){ceLoadInventory(_ceTemplates[0].id);}
     else if(bId){ceLoadInventoryDirect();}
   }catch(e){if(el)el.innerHTML='<span style="font-size:12px;color:#C00000">'+e.message+'</span>';}
+}
+
+/* ===== PERMANENT CARTS (§6D) ===== */
+var _pcCat=null,_pcList=[],_pcCur={id:null,name:'',shelves:[]};
+function cfgTab(which){
+  var rv=document.getElementById('cfg-run-view'),pv=document.getElementById('cfg-perm-view');
+  var rb=document.getElementById('cfgtab-run'),pb=document.getElementById('cfgtab-perm');
+  if(which==='run'){
+    if(rv)rv.style.display='block';if(pv)pv.style.display='none';
+    rb.className='btn btn-sm btn-cta';pb.className='btn btn-sm btn-outline-secondary';
+    loadCfgs();
+  }else{
+    if(pv)pv.style.display='block';if(rv)rv.style.display='none';
+    pb.className='btn btn-sm btn-cta';rb.className='btn btn-sm btn-outline-secondary';
+    pcInit();
+  }
+}
+async function pcInit(){
+  try{ if(!_pcCat)_pcCat=await api('/api/permanent-carts/catalog'); }
+  catch(e){ document.getElementById('pc-builder').innerHTML='<span style="color:#C00000">Catalog load failed: '+escH(e.message)+'</span>'; return; }
+  await pcLoadList();
+}
+function pcProf(pid){return (_pcCat.profiles||[]).find(function(p){return p.profile_id===pid;});}
+function pcSkusFor(pid){return (_pcCat.skus||[]).filter(function(s){return s.profile_id===pid;});}
+async function pcLoadList(){
+  try{_pcList=await api('/api/permanent-carts');}catch(e){_pcList=[];}
+  var el=document.getElementById('pc-list');if(!el)return;
+  if(!_pcList.length){el.innerHTML='<span style="font-size:12px;color:var(--is)">None yet. Click New.</span>';return;}
+  el.innerHTML=_pcList.map(function(c){
+    return '<div onclick="pcLoad(\''+c.id+'\')" style="padding:7px 9px;border:1px solid var(--line);border-radius:6px;margin-bottom:5px;cursor:pointer">'
+      +'<div style="font-weight:600;font-size:12.5px">'+escH(c.name||'Untitled')+'</div>'
+      +'<div style="font-size:11px;color:var(--is)">'+(c.total_shelves||0)+' shelves · '+fmt(c.total_units||0)+' units</div></div>';
+  }).join('');
+}
+function pcNew(){_pcCur={id:null,name:'',shelves:[]};pcRenderBuilder();pcRenderSandbox();}
+async function pcLoad(id){
+  try{
+    var d=await api('/api/permanent-carts/'+id);
+    _pcCur={id:d.id,name:d.name||'',shelves:(d.shelves||[]).map(function(s){
+      return {shelf_position:s.shelf_position,profile_id:s.profile_id,
+        items:(s.items||[]).map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count,description:i.description};})};
+    })};
+    pcRenderBuilder();pcRenderSandbox();
+  }catch(e){toast('Load failed: '+e.message,'err');}
+}
+function pcAddShelf(){
+  var maxSh=(_pcCat.cart&&_pcCat.cart.max_shelves)||5;
+  if(_pcCur.shelves.length>=maxSh){toast('Cart is full ('+maxSh+' shelves)','warn');return;}
+  var used=_pcCur.shelves.map(function(s){return s.shelf_position;});
+  var pos=1;while(used.indexOf(pos)>=0)pos++;
+  var firstProf=(_pcCat.profiles[0]||{}).profile_id;
+  _pcCur.shelves.push({shelf_position:pos,profile_id:firstProf,items:[]});
+  pcRenderBuilder();pcRenderSandbox();
+}
+function pcRemoveShelf(pos){_pcCur.shelves=_pcCur.shelves.filter(function(s){return s.shelf_position!==pos;});pcRenderBuilder();pcRenderSandbox();}
+function pcSetProfile(pos,pid){var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(s){s.profile_id=pid;s.items=[];}pcRenderBuilder();pcRenderSandbox();}
+function pcSetName(v){_pcCur.name=v;}
+function pcAddItem(pos){
+  var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(!s)return;
+  var sel=document.getElementById('pc-sku-'+pos),tr=document.getElementById('pc-tray-'+pos);
+  var sku=parseInt(sel.value),trays=parseInt(tr.value)||1;
+  if(!sku){toast('Pick a SKU','warn');return;}
+  var ex=s.items.find(function(i){return i.sku_id===sku;});
+  if(ex){ex.tray_count+=trays;}else{var sk=(_pcCat.skus||[]).find(function(x){return x.sku_id===sku;});s.items.push({sku_id:sku,tray_count:trays,description:sk?sk.description:('SKU '+sku)});}
+  pcRenderBuilder();pcRenderSandbox();
+}
+function pcRemoveItem(pos,idx){var s=_pcCur.shelves.find(function(x){return x.shelf_position===pos;});if(s){s.items.splice(idx,1);}pcRenderBuilder();pcRenderSandbox();}
+function pcCartUnits(){var t=0;_pcCur.shelves.forEach(function(s){var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;s.items.forEach(function(i){t+=i.tray_count*upt;});});return t;}
+function pcRenderBuilder(){
+  var el=document.getElementById('pc-builder');if(!el)return;
+  var h='<div class="d-flex align-items-center gap-2 mb-3 flex-wrap">'
+    +'<input value="'+escH(_pcCur.name||'')+'" oninput="pcSetName(this.value)" placeholder="Cart name e.g. Holiday 2027 — AA Stores" style="flex:1;min-width:240px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-weight:600">'
+    +'<button class="btn btn-sm btn-cta" onclick="pcSave()"><i class="bi bi-save me-1"></i>Save</button>'
+    +(_pcCur.id?'<button class="btn btn-sm btn-outline-danger" onclick="pcDelete()"><i class="bi bi-trash"></i></button>':'')
+    +'</div>';
+  var shelves=_pcCur.shelves.slice().sort(function(a,b){return a.shelf_position-b.shelf_position;});
+  shelves.forEach(function(s){
+    var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;var maxT=p?p.trays_per_shelf:0;
+    var usedT=s.items.reduce(function(a,i){return a+i.tray_count;},0);
+    var over=maxT&&usedT>maxT;
+    var shUnits=s.items.reduce(function(a,i){return a+i.tray_count*upt;},0);
+    h+='<div class="card mb-2"><div class="ch d-flex justify-content-between align-items-center" style="padding:7px 12px;font-size:13px;border-radius:9px 9px 0 0">'
+      +'<span><i class="bi bi-layers me-2"></i>Shelf '+s.shelf_position+'</span>'
+      +'<span style="display:flex;gap:8px;align-items:center">'
+      +'<select onchange="pcSetProfile('+s.shelf_position+',this.value)" style="font-size:11px;padding:2px 6px;border:1px solid var(--line);border-radius:4px">'
+      +(_pcCat.profiles||[]).map(function(pr){return '<option value="'+pr.profile_id+'"'+(pr.profile_id===s.profile_id?' selected':'')+'>'+escH(pr.short_name||pr.profile_id)+' ('+pr.units_per_tray+'/tray)</option>';}).join('')
+      +'</select>'
+      +'<span style="font-size:11px;'+(over?'color:#C00000;font-weight:700':'color:var(--is)')+'">'+usedT+'/'+maxT+' trays · '+shUnits+'u</span>'
+      +'<button class="btn btn-sm py-0 px-1" style="font-size:11px;color:#C00000;border:none;background:none" onclick="pcRemoveShelf('+s.shelf_position+')"><i class="bi bi-x-lg"></i></button>'
+      +'</span></div><div style="padding:8px 12px">';
+    s.items.forEach(function(i,idx){
+      h+='<div class="d-flex justify-content-between align-items-center" style="font-size:12px;padding:3px 0;border-bottom:1px solid #f0f4f0">'
+        +'<span>'+sn(i.description||'SKU '+i.sku_id)+' <span style="color:var(--is)">#'+i.sku_id+'</span></span>'
+        +'<span style="display:flex;gap:8px;align-items:center"><span style="color:var(--mp)">'+i.tray_count+'t · '+(i.tray_count*upt)+'u</span>'
+        +'<button class="btn btn-sm py-0 px-1" style="font-size:10px;color:#C00000;border:none;background:none" onclick="pcRemoveItem('+s.shelf_position+','+idx+')"><i class="bi bi-x"></i></button></span></div>';
+    });
+    var opts=pcSkusFor(s.profile_id);
+    h+='<div class="d-flex gap-2 mt-2">'
+      +'<select id="pc-sku-'+s.shelf_position+'" style="flex:1;min-width:0;font-size:11.5px;padding:3px 6px;border:1px solid var(--line);border-radius:4px">'
+      +'<option value="">+ add SKU…</option>'
+      +opts.map(function(o){return '<option value="'+o.sku_id+'">'+escH(o.description||('SKU '+o.sku_id))+'</option>';}).join('')
+      +'</select>'
+      +'<input id="pc-tray-'+s.shelf_position+'" type="number" min="1" value="1" style="width:56px;font-size:11.5px;padding:3px 6px;border:1px solid var(--line);border-radius:4px">'
+      +'<button class="btn btn-sm btn-outline-primary py-0 px-2" style="font-size:11px" onclick="pcAddItem('+s.shelf_position+')">Add</button>'
+      +'</div>'+(opts.length?'':'<div style="font-size:10.5px;color:var(--is);margin-top:3px">No SKUs use this tray profile.</div>')
+      +'</div></div>';
+  });
+  var maxSh=(_pcCat.cart&&_pcCat.cart.max_shelves)||5;
+  if(_pcCur.shelves.length<maxSh)h+='<button class="btn btn-sm btn-outline-secondary" onclick="pcAddShelf()"><i class="bi bi-plus-lg me-1"></i>Add Shelf ('+_pcCur.shelves.length+'/'+maxSh+')</button>';
+  h+='<div style="margin-top:12px;font-weight:700;color:var(--fd)">Cart total: '+fmt(pcCartUnits())+' units</div>';
+  el.innerHTML=h;
+}
+function pcRenderSandbox(){
+  var el=document.getElementById('pc-sandbox');if(!el)return;
+  var n=parseInt((document.getElementById('pc-stores')||{}).value)||0;
+  var bySku={};
+  _pcCur.shelves.forEach(function(s){var p=pcProf(s.profile_id);var upt=p?p.units_per_tray:0;
+    s.items.forEach(function(i){bySku[i.sku_id]=bySku[i.sku_id]||{desc:i.description,u:0};bySku[i.sku_id].u+=i.tray_count*upt;});});
+  var keys=Object.keys(bySku);
+  if(!keys.length){el.innerHTML='<span style="font-size:12px;color:var(--is)">Build a cart to project units.</span>';return;}
+  var tot=0;
+  var rows=keys.map(function(k){var per=bySku[k].u;var need=per*n;tot+=need;
+    return '<tr style="border-bottom:1px solid #f0f4f0"><td style="padding:3px 6px 3px 0;font-size:11.5px">'+sn(bySku[k].desc)+'</td>'
+      +'<td style="text-align:right;font-size:11.5px;color:var(--is)">'+per+'/cart</td>'
+      +'<td style="text-align:right;font-size:12px;font-weight:700;color:var(--fd)">'+fmt(need)+'</td></tr>';}).join('');
+  el.innerHTML='<table style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:1px solid var(--line)">'
+    +'<th style="text-align:left;font-size:10px;color:var(--is);text-transform:uppercase">SKU</th>'
+    +'<th style="text-align:right;font-size:10px;color:var(--is)">Per cart</th>'
+    +'<th style="text-align:right;font-size:10px;color:var(--is);text-transform:uppercase">× '+fmt(n)+' stores</th></tr></thead>'
+    +'<tbody>'+rows+'</tbody></table>'
+    +'<div style="margin-top:8px;padding-top:6px;border-top:2px solid var(--line);display:flex;justify-content:space-between;font-weight:700"><span>Total units needed</span><span style="color:var(--fd)">'+fmt(tot)+'</span></div>'
+    +'<div style="font-size:10.5px;color:var(--is);margin-top:6px">Check these against the hardgood quantity you bought before saving.</div>';
+}
+async function pcSave(){
+  if(!_pcCur.name.trim()){toast('Name the cart first','warn');return;}
+  var shelves=_pcCur.shelves.filter(function(s){return s.items.length;});
+  if(!shelves.length){toast('Add at least one shelf with a SKU','warn');return;}
+  var body={name:_pcCur.name.trim(),cart_type_id:'cc',shelves:shelves.map(function(s){
+    return {shelf_position:s.shelf_position,profile_id:s.profile_id,items:s.items.map(function(i){return {sku_id:i.sku_id,tray_count:i.tray_count};})};})};
+  try{
+    if(_pcCur.id){try{await api('/api/permanent-carts/'+_pcCur.id,{method:'DELETE'});}catch(e){}}
+    var r=await api('/api/permanent-carts',{method:'POST',body:JSON.stringify(body)});
+    _pcCur.id=r.id;
+    toast('Permanent cart saved ('+fmt(r.total_units)+' units)','ok');
+    pcLoadList();pcRenderBuilder();
+  }catch(e){toast('Save failed: '+e.message,'err');}
+}
+async function pcDelete(){
+  if(!_pcCur.id)return;
+  try{await api('/api/permanent-carts/'+_pcCur.id,{method:'DELETE'});toast('Deleted','warn');pcNew();pcLoadList();}
+  catch(e){toast('Delete failed: '+e.message,'err');}
 }
 
 function ceRenderList(){
