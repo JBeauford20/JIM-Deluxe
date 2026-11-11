@@ -341,6 +341,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <div style="padding:10px 14px;border-bottom:1px solid var(--line);background:#f8faf8">
       <div style="display:flex;gap:6px;align-items:center">
         <input id="sf-search" class="form-control form-control-sm" style="flex:1;min-width:0" placeholder="Search store / city…" oninput="applyStoreFilters()">
+        <button class="btn btn-sm btn-outline-primary" style="flex-shrink:0" onclick="openRecStores()" title="Stores the engine would consider this week (ignores availability) — exportable"><i class="bi bi-star-fill"></i></button>
         <button class="btn btn-sm btn-cta" style="flex-shrink:0" onclick="openAddStore()"><i class="bi bi-plus"></i></button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px">
@@ -2063,6 +2064,38 @@ function applyStoreFilters(){
   }));
 }
 
+/* Weekly recommended stores (I5): engine's velocity+recency ranking, ignores availability */
+var _recStores=[];
+async function openRecStores(){
+  var ov=document.createElement('div');ov.id='recOverlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:center;justify-content:center';
+  ov.onclick=function(e){if(e.target===ov)ov.remove();};
+  ov.innerHTML='<div style="background:#fff;border-radius:10px;max-width:900px;width:95%;max-height:88vh;overflow:auto;padding:16px">'
+    +'<div class="d-flex justify-content-between align-items-center mb-2"><h6 class="mb-0">Weekly Recommended Stores <span style="font-size:11px;color:var(--is);font-weight:400">— velocity + recency, independent of availability</span></h6>'
+    +'<div><button class="btn btn-sm btn-outline-secondary me-2" onclick="exportRecStores()"><i class="bi bi-download me-1"></i>Export CSV</button><button onclick="document.getElementById(\'recOverlay\').remove()" style="border:none;background:none;font-size:20px;line-height:1">&times;</button></div></div>'
+    +'<div id="rec-body"><div class="text-center py-4"><span class="spinner-border spinner-border-sm"></span></div></div></div>';
+  document.body.appendChild(ov);
+  try{_recStores=await api('/api/stores/recommended/weekly');renderRecStores();}
+  catch(e){var b=document.getElementById('rec-body');if(b)b.innerHTML='<div class="text-danger">'+escH(e.message||'Failed')+'</div>';}
+}
+function renderRecStores(){
+  var el=document.getElementById('rec-body');if(!el)return;
+  var rows=_recStores.slice(0,500).map(function(r){
+    var flags=(r.in_transit?'<span style="color:#b45309">in transit</span>':'')+(r.on_promo?' <span style="color:#3a6bc4">promo</span>':'');
+    return '<tr style="border-bottom:1px solid #f0f4f0"><td>'+r.rank+'</td><td><strong>'+r.store_id+'</strong> '+escH(r.store_name||'')+'</td><td>'+escH((r.city||'')+', '+(r.state||''))+'</td><td>'+escH(r.region||'')+'</td><td>'+escH(r.merchant||'')+'</td><td>'+(r.velo||'')+'</td><td class="text-end">'+Number(r.vel||0).toFixed(1)+'</td><td class="text-end">'+(r.days_since==null?'—':r.days_since)+'</td><td>'+flags+'</td></tr>';
+  }).join('');
+  el.innerHTML='<div style="font-size:12px;color:var(--is);margin-bottom:6px">'+_recStores.length+' stores considered (top 500 shown; export for the full list)</div>'
+    +'<table class="table jt mb-0" style="font-size:12px"><thead><tr><th>#</th><th>Store</th><th>City</th><th>Region</th><th>Merchant</th><th>Velo</th><th class="text-end">Score</th><th class="text-end">Days</th><th>Flags</th></tr></thead><tbody>'+rows+'</tbody></table>';
+}
+function exportRecStores(){
+  if(!_recStores.length){toast('Nothing to export','warn');return;}
+  var hdr=['Rank','Store','Name','City','State','Region','Merchant','Velo Code','Velocity Score','Days Since Delivery','In Transit','On Promo'];
+  var lines=[hdr.join(',')].concat(_recStores.map(function(r){
+    return [r.rank,r.store_id,'"'+(r.store_name||'').replace(/"/g,'""')+'"',r.city||'',r.state||'',r.region||'',r.merchant||'',r.velo||'',Number(r.vel||0).toFixed(1),r.days_since==null?'':r.days_since,r.in_transit?'Yes':'No',r.on_promo?'Yes':'No'].join(',');
+  }));
+  var blob=new Blob([lines.join('\n')],{type:'text/csv'});var u=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=u;a.download='recommended_stores.csv';a.click();URL.revokeObjectURL(u);
+}
 var _spStore=null;
 async function openSt(id){
   document.querySelectorAll('#sl .sr').forEach(function(r){r.classList.remove('active');});
