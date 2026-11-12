@@ -88,6 +88,7 @@ class EditStoreRequest(BaseModel):
     status_note:  Optional[str] = None
     perm_racks:   Optional[int] = None
     fenceline:    Optional[bool] = None
+    climb_itt_bundle: Optional[bool] = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -461,6 +462,10 @@ def edit_store(
         if body.fenceline is not None:
             set_parts.append("fenceline = %s")
             params.append(bool(body.fenceline))
+
+        if body.climb_itt_bundle is not None:
+            set_parts.append("climb_itt_bundle = %s")
+            params.append(bool(body.climb_itt_bundle))
 
         if body.status_note is not None:
             set_parts.append("status_note = %s")

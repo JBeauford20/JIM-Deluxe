@@ -44,7 +44,9 @@ def list_stores(
                    dynamic_velocity_tier, dynamic_velocity_score,
                    tier_9cm, tier_12cm, tier_h2o, tier_collectors, tier_boutique,
                    merch_partner, store_status,
-                   COALESCE(perm_racks, 0) AS perm_racks, COALESCE(fenceline, false) AS fenceline
+                   COALESCE(perm_racks, 0) AS perm_racks, COALESCE(fenceline, false) AS fenceline,
+                   COALESCE(climb_itt_bundle, false) AS climb_itt_bundle,
+                   tier_terrarium, tier_climbitt
             FROM stores
             WHERE {' AND '.join(where)}
             ORDER BY dynamic_velocity_score DESC NULLS LAST
