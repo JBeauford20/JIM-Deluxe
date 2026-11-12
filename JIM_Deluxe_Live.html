@@ -80,6 +80,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 <nav class="jnav">
   <span class="brand">&#127807; JIM <span style="font-weight:400;opacity:.7">Deluxe</span></span>
   <span class="nl active" onclick="go('week',this)"><i class="bi bi-house me-1"></i>Week</span>
+  <span class="nl" id="nl-oc" onclick="go('ordercreate',this)" style="display:none"><i class="bi bi-pencil-square me-1"></i>Order Environment</span>
   <span class="nl" onclick="go('plan',this)"><i class="bi bi-clipboard-check me-1"></i>Review Plan</span>
   <span class="nl" onclick="go('editor',this)"><i class="bi bi-cart3 me-1"></i>Order Editor</span>
   <span class="nl" id="nl-cfg" onclick="go('configs',this)"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
@@ -411,8 +412,8 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 <div id="screen-ordercreate" class="screen">
 <div style="padding:12px 16px;height:calc(100vh - 114px);overflow:auto">
   <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
-    <div><h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-pencil-square me-2"></i>Order Creation — From Scratch</h5>
-      <div id="oc-sub" style="font-size:12px;color:var(--is)">Manual plan · pick stores, then assign carts in the Order Editor</div></div>
+    <div><h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-pencil-square me-2"></i>Order Environment</h5>
+      <div id="oc-sub" style="font-size:12px;color:var(--is)">Manual plan · pick stores, then assign carts in the Order Editor · your work is saved as you go</div></div>
     <div class="d-flex gap-2">
       <button class="btn btn-sm btn-outline-secondary" onclick="go('plan',document.getElementById('rb'))"><i class="bi bi-clipboard-check me-1"></i>Review Plan</button>
       <button class="btn btn-sm btn-outline-secondary" onclick="go('draw');loadDraw()"><i class="bi bi-boxes me-1"></i>Inventory Draw</button>
@@ -839,7 +840,8 @@ async function doStartEmpty(){
   try{
     var r=await api('/api/orders/manual-run',{method:'POST',body:JSON.stringify({batch_id:bId,shipping_week:wk})});
     rId=r.run_id;orders=[];loads=[];_skuCache={};
-    // reveal plan nav/actions (same as a generated run) so Review/Editor/Draw work
+    // reveal the Order Environment tab + plan nav/actions so Review/Editor/Draw work
+    var noc=document.getElementById('nl-oc');if(noc)noc.style.display='flex';
     var rb=document.getElementById('rb');if(rb)rb.style.display='block';
     ['nl-cfg','nl-draw','nl-routing'].forEach(function(id){var n=document.getElementById(id);if(n)n.style.display='flex';});
     var fb=document.getElementById('fb');if(fb)fb.disabled=false;
