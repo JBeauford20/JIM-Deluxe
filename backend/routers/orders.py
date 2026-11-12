@@ -1,10 +1,92 @@
 """Orders router — list, approve, mark reviewed."""
+import uuid
+from typing import List
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
 
 router = APIRouter()
+
+
+# ── Manual "from-scratch" plan (I4): a manual plan is a first-class draft run so every
+# record (orders/carts/ledger/lines) is integrated with Review, Inventory Draw, exports. ──
+class ManualRunRequest(BaseModel):
+    batch_id: str
+    shipping_week: str
+
+
+class AddStoresRequest(BaseModel):
+    store_ids: List[int]
+
+
+@router.post("/manual-run")
+def create_manual_run(req: ManualRunRequest, user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Create an empty draft run the user builds by hand (no engine). Attaches to the uploaded
+    availability batch so inventory drawdown + exports work exactly like an engine run."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT id FROM availability_batches WHERE id = %s", (req.batch_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "Availability batch not found")
+        cur.execute("""
+            INSERT INTO recommendation_runs
+                (batch_id, shipping_week, stores_scored, stores_served, total_carts, total_units,
+                 inventory_clearance, status, notes)
+            VALUES (%s, %s, 0, 0, 0, 0, 0, 'draft', 'manual')
+            RETURNING id
+        """, (req.batch_id, req.shipping_week))
+        run_id = cur.fetchone()["id"]
+    return {"run_id": run_id, "batch_id": req.batch_id, "shipping_week": req.shipping_week, "manual": True}
+
+
+@router.post("/runs/{run_id}/add-stores")
+def add_stores_to_run(run_id: str, req: AddStoresRequest,
+                      user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Add stores to a manual plan as empty orders (skips any already in the run)."""
+    ids = list({int(s) for s in req.store_ids if s})
+    if not ids:
+        raise HTTPException(400, "No store ids provided")
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT 1 FROM recommendation_runs WHERE id = %s", (run_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "Run not found")
+        cur.execute("SELECT store_id FROM orders WHERE run_id = %s AND store_id = ANY(%s)", (run_id, ids))
+        existing = {r["store_id"] for r in cur.fetchall()}
+        cur.execute("SELECT store_id FROM stores WHERE store_id = ANY(%s) AND active = true", (ids,))
+        valid = {r["store_id"] for r in cur.fetchall()}
+        added = 0
+        for sid in ids:
+            if sid not in valid or sid in existing:
+                continue
+            cur.execute("""
+                INSERT INTO orders (id, run_id, store_id, status, priority_score,
+                                    cart_count, total_units, is_one_cart_exception, is_due)
+                VALUES (%s, %s, %s, 'draft', 0, 0, 0, false, true)
+            """, (str(uuid.uuid4()), run_id, sid))
+            added += 1
+        cur.execute("UPDATE recommendation_runs SET stores_served = (SELECT COUNT(*) FROM orders WHERE run_id = %s) WHERE id = %s", (run_id, run_id))
+    return {"added": added, "skipped_existing": len(existing),
+            "not_found": [s for s in ids if s not in valid]}
+
+
+@router.delete("/{order_id}")
+def remove_order(order_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Remove a store from a (manual) plan: drop its carts (cascades the ledger), lines, order."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT run_id FROM orders WHERE id = %s", (order_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Order not found")
+        run_id = row["run_id"]
+        cur.execute("DELETE FROM cart_shelves WHERE cart_id IN (SELECT id FROM order_carts WHERE order_id = %s)", (order_id,))
+        cur.execute("DELETE FROM order_carts WHERE order_id = %s", (order_id,))
+        cur.execute("DELETE FROM order_lines WHERE order_id = %s", (order_id,))
+        cur.execute("DELETE FROM orders WHERE id = %s", (order_id,))
+        cur.execute("UPDATE recommendation_runs SET stores_served = (SELECT COUNT(*) FROM orders WHERE run_id = %s) WHERE id = %s", (run_id, run_id))
+    return {"removed": True}
 
 @router.get("/history")
 def order_history(user=Depends(get_current_user)):

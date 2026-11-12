@@ -408,6 +408,35 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   </div>
 </div>
 
+<div id="screen-ordercreate" class="screen">
+<div style="padding:12px 16px;height:calc(100vh - 114px);overflow:auto">
+  <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+    <div><h5 class="mb-0" style="color:var(--fd)"><i class="bi bi-pencil-square me-2"></i>Order Creation — From Scratch</h5>
+      <div id="oc-sub" style="font-size:12px;color:var(--is)">Manual plan · pick stores, then assign carts in the Order Editor</div></div>
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-outline-secondary" onclick="go('plan',document.getElementById('rb'))"><i class="bi bi-clipboard-check me-1"></i>Review Plan</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="go('draw');loadDraw()"><i class="bi bi-boxes me-1"></i>Inventory Draw</button>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="card"><div class="card-body">
+      <div style="font-weight:700;color:var(--fd);margin-bottom:8px"><i class="bi bi-shop me-1"></i>Select Stores</div>
+      <div class="d-flex gap-2 mb-2">
+        <input id="oc-search" class="form-control form-control-sm" placeholder="Search stores…" oninput="ocRenderStores()">
+        <select id="oc-fregion" class="form-select form-select-sm" style="width:auto" onchange="ocRenderStores()"><option value="">All Regions</option></select>
+        <select id="oc-fvelo" class="form-select form-select-sm" style="width:auto" onchange="ocRenderStores()"><option value="">All Velo</option><option>AA</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mb-2"><span id="oc-selcount" style="font-size:12px;color:var(--is)">0 selected</span><button class="btn btn-sm btn-cta" onclick="ocAddSelected()"><i class="bi bi-plus me-1"></i>Add selected to plan</button></div>
+      <div id="oc-storelist" style="max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:6px"></div>
+    </div></div>
+    <div class="card"><div class="card-body">
+      <div style="font-weight:700;color:var(--fd);margin-bottom:8px"><i class="bi bi-cart3 me-1"></i>Plan so far — <span id="oc-plancount">0</span> stores</div>
+      <div style="font-size:11px;color:var(--is);margin-bottom:8px">Assign carts to these stores in the Order Editor (open a store → Assign Saved Cart). Everything here is saved as you go.</div>
+      <div id="oc-plan" style="max-height:60vh;overflow:auto"></div>
+    </div></div>
+  </div>
+</div></div>
+
 <!-- MODALS -->
 <div class="modal fade" id="promoM" tabindex="-1"><div class="modal-dialog modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
   <div class="modal-header"><h5 class="modal-title"><i class="bi bi-megaphone me-2"></i><span id="promoMT">Add Promotion</span></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
@@ -613,6 +642,7 @@ function go(n,el){
   if(n==='routing')loadRoutingTab();
   if(n==='week')loadHomeScenarios();
   if(n==='configs')cfgTab(rId?'run':'perm');
+  if(n==='ordercreate'&&rId)ocLoadPlan();
 }
 function openScenarios(){
   var n=Array.prototype.slice.call(document.querySelectorAll('.nl')).filter(function(x){return /scenarios/.test(x.getAttribute('onclick')||'');})[0];
@@ -802,7 +832,72 @@ async function loadPlan(){
   }catch(e){toast('Load failed: '+e.message,'err');}
 }
 
-function doStartEmpty(){orders=[];loads=[];buildStats();buildTable();buildLoads();buildEL();go('editor',document.querySelectorAll('.nl')[2]);toast('Empty plan started','ok');}
+/* ===== CUSTOM ORDER FROM SCRATCH (I4) — manual plan = a persistent draft run ===== */
+var _ocSel={};
+async function doStartEmpty(){
+  if(!bId||!wk){toast('Upload availability first','warn');return;}
+  try{
+    var r=await api('/api/orders/manual-run',{method:'POST',body:JSON.stringify({batch_id:bId,shipping_week:wk})});
+    rId=r.run_id;orders=[];loads=[];_skuCache={};
+    // reveal plan nav/actions (same as a generated run) so Review/Editor/Draw work
+    var rb=document.getElementById('rb');if(rb)rb.style.display='block';
+    ['nl-cfg','nl-draw','nl-routing'].forEach(function(id){var n=document.getElementById(id);if(n)n.style.display='flex';});
+    var fb=document.getElementById('fb');if(fb)fb.disabled=false;
+    setStrip(wk,null,'Manual Plan');
+    toast('Empty plan started — pick stores','ok');
+    go('ordercreate');ocInit();
+  }catch(e){toast('Could not start plan: '+(e.message||'error'),'err');}
+}
+async function ocInit(){
+  if(!allStores.length){try{allStores=await api('/api/stores/?limit=2500');}catch(e){}}
+  var rf=document.getElementById('oc-fregion');
+  if(rf&&rf.options.length<=1)rf.innerHTML='<option value="">All Regions</option>'+_distinctStore('region').map(function(v){return '<option>'+escH(v)+'</option>';}).join('');
+  _ocSel={};ocRenderStores();ocLoadPlan();
+}
+function ocRenderStores(){
+  var q=(document.getElementById('oc-search').value||'').toLowerCase();
+  var reg=document.getElementById('oc-fregion').value,velo=document.getElementById('oc-fvelo').value;
+  var list=allStores.filter(function(s){
+    if(q&&!(String(s.store_id).indexOf(q)>=0||(s.store_name||'').toLowerCase().indexOf(q)>=0||(s.city||'').toLowerCase().indexOf(q)>=0))return false;
+    if(reg&&(s.region||'')!==reg)return false;
+    if(velo&&(s.volume_code||'').trim()!==velo)return false;
+    return true;
+  }).slice(0,400);
+  document.getElementById('oc-storelist').innerHTML=list.map(function(s){
+    return '<label style="display:flex;align-items:center;gap:8px;padding:5px 10px;border-bottom:1px solid #f0f4f0;font-size:12px;cursor:pointer"><input type="checkbox" '+(_ocSel[s.store_id]?'checked':'')+' onchange="ocToggle('+s.store_id+',this.checked)"><span style="flex:1"><strong>'+s.store_id+'</strong> '+escH(s.store_name||'')+' <span style="color:var(--is)">'+escH((s.city||'')+', '+(s.state||''))+'</span></span>'+mkTB((s.volume_code||'').trim())+'</label>';
+  }).join('');
+  ocSelCount();
+}
+function ocToggle(id,on){if(on)_ocSel[id]=true;else delete _ocSel[id];ocSelCount();}
+function ocSelCount(){var e=document.getElementById('oc-selcount');if(e)e.textContent=Object.keys(_ocSel).length+' selected';}
+async function ocAddSelected(){
+  var ids=Object.keys(_ocSel).map(Number);if(!ids.length){toast('Check some stores first','warn');return;}
+  try{
+    var r=await api('/api/orders/runs/'+rId+'/add-stores',{method:'POST',body:JSON.stringify({store_ids:ids})});
+    toast('Added '+r.added+' stores'+(r.skipped_existing?' ('+r.skipped_existing+' already in plan)':''),'ok');
+    _ocSel={};ocRenderStores();ocLoadPlan();
+  }catch(e){toast('Add failed: '+(e.message||'error'),'err');}
+}
+async function ocLoadPlan(){
+  try{var o=await api('/api/orders/runs/'+rId);orders=Array.isArray(o)?o:[];}catch(e){orders=[];}
+  var pc=document.getElementById('oc-plancount');if(pc)pc.textContent=orders.length;
+  var el=document.getElementById('oc-plan');if(!el)return;
+  if(!orders.length){el.innerHTML='<div style="font-size:12px;color:var(--is)">No stores yet — check stores on the left and click Add.</div>';return;}
+  el.innerHTML=orders.map(function(o){
+    return '<div class="d-flex justify-content-between align-items-center" style="padding:6px 8px;border-bottom:1px solid #f0f4f0;font-size:12px">'
+      +'<span style="cursor:pointer" onclick="openEditorFor(\''+o.id+'\')"><strong>'+(o.store_id||'')+'</strong> '+escH(o.store_name||'')+'</span>'
+      +'<span style="display:flex;gap:10px;align-items:center"><span style="color:var(--is)">'+(o.cart_count||0)+' carts · '+fmt(o.total_units||0)+'u</span>'
+      +'<button onclick="ocRemoveStore(\''+o.id+'\')" class="btn btn-sm py-0 px-1" style="color:#C00000;border:none;background:none" title="Remove store from plan"><i class="bi bi-x-lg"></i></button></span></div>';
+  }).join('');
+}
+async function ocRemoveStore(oid){
+  try{await api('/api/orders/'+oid,{method:'DELETE'});ocLoadPlan();}
+  catch(e){toast('Remove failed: '+(e.message||'error'),'err');}
+}
+async function openEditorFor(oid){
+  var o=orders.find(function(x){return x.id===oid;});if(!o)return;
+  try{var d=await api('/api/orders/'+oid);go('editor');renderCart(o,d);}catch(e){toast('Open failed','err');}
+}
 
 /* STATS */
 function buildStats(sum){
