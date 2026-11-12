@@ -2783,6 +2783,16 @@ async function openPromo(id){
   var tbl=bd.length>1?'<table class="table jt mb-2" style="font-size:12px"><thead><tr><th>Division</th><th class="text-end">Scope</th><th class="text-end">Landed</th><th class="text-end">In Transit</th><th class="text-end">Left</th></tr></thead><tbody>'
     +bd.map(function(d){return '<tr><td>'+escH(d.division)+'</td><td class="text-end">'+fmt(d.scope)+'</td><td class="text-end">'+fmt(d.landed)+'</td><td class="text-end">'+fmt(d.in_transit)+'</td><td class="text-end"><b>'+fmt(d.left)+'</b></td></tr>';}).join('')+'</tbody></table>':'';
   var skus=(p.skus||[]).map(function(s){return '<span class="badge bg-light text-dark border me-1 mb-1" style="font-weight:500">'+s.sku_id+' '+escH((s.description||'').slice(0,28))+'</span>';}).join('');
+  var a=p.analytics||{units:0,dollars:0,by_sku:[]};
+  var awin=(a.start_date||a.end_date)?((a.start_date||'…')+' – '+(a.end_date||'…')):'all dates';
+  var aRows=(a.by_sku||[]).map(function(x){return '<tr style="border-bottom:1px solid #f0f4f0"><td>'+sn(x.description||('SKU '+x.sku_id))+'</td><td class="text-end">'+fmt(x.units)+'</td><td class="text-end">$'+fmt(Math.round(x.dollars||0))+'</td></tr>';}).join('');
+  var analyticsHTML='<div class="card mb-3" style="background:#f8faf8"><div class="card-body py-3">'
+    +'<div style="font-weight:700;color:var(--fd)"><i class="bi bi-graph-up-arrow me-1"></i>Sales in Promo Scope</div>'
+    +'<div style="font-size:11px;color:var(--is);margin-bottom:10px">'+escH(a.scope||reg)+' · '+escH(awin)+' · wholesale $</div>'
+    +'<div class="d-flex gap-4 mb-2"><div><div style="font-size:26px;font-weight:700;color:#15803d">$'+fmt(Math.round(a.dollars||0))+'</div><div style="font-size:11px;color:var(--is)">Wholesale $ sold</div></div>'
+    +'<div><div style="font-size:26px;font-weight:700;color:var(--fd)">'+fmt(a.units||0)+'</div><div style="font-size:11px;color:var(--is)">Units sold</div></div></div>'
+    +(aRows?'<table class="table jt mb-0" style="font-size:12px"><thead><tr><th>SKU</th><th class="text-end">Units</th><th class="text-end">Wholesale $</th></tr></thead><tbody>'+aRows+'</tbody></table>':'<div style="font-size:12px;color:var(--is)">No sales in this scope/window yet.</div>')
+    +'</div></div>';
   document.getElementById('promo-detail').innerHTML='<div class="card"><div class="card-body">'
     +'<div class="d-flex align-items-center mb-1"><h6 class="mb-0" style="color:var(--fd)">'+escH(p.name)+' <span class="badge '+(p.is_active?'bg-success':'bg-secondary')+'">'+(p.is_active?'ACTIVE':'inactive')+'</span></h6>'
     +'<button class="btn btn-sm btn-cta ms-auto me-2" onclick="openAddStores()"><i class="bi bi-plus-circle me-1"></i>Add Stores that Received Product</button>'
@@ -2793,7 +2803,8 @@ async function openPromo(id){
     +tile('In Transit',m.in_transit,pctOf(m.in_transit,m.scope)+'% on the road','#b45309','in_transit')
     +tile('Left to Hit',m.left,pctOf(m.left,m.scope)+'% remaining','#475569','left')
     +'</div>'+tbl
-    +'<div id="promo-bucket" class="mt-2"></div>'
+    +'<div id="promo-bucket" class="mt-2 mb-3"></div>'
+    +analyticsHTML
     +'<div style="font-size:11px;color:var(--is);margin-top:10px"><b>Promo SKUs:</b> '+(skus||'none set')+'</div>'
     +'</div></div>';
   document.getElementById('promo-detail').scrollIntoView({behavior:'smooth',block:'nearest'});

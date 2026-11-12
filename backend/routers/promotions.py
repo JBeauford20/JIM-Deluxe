@@ -144,6 +144,44 @@ def _metrics(cur, pid, regions, sku_ids, start_date):
     }
 
 
+def _sales_analytics(cur, regions, sku_ids, start_date, end_date):
+    """Actual sales for this promo's SKUs, in its region scope + date window.
+    Dollars = units_sold × wholesale_price_whl. Matches stores on DIVISION (North/South/West),
+    same as the rollout classifier. Empty window/dates → all-time for those SKUs."""
+    base = {"units": 0, "dollars": 0.0, "by_sku": [],
+            "start_date": str(start_date) if start_date else None,
+            "end_date": str(end_date) if end_date else None}
+    if not sku_ids:
+        base["scope"] = "—"; return base
+    nationwide = (not regions) or ('ALL' in regions)
+    params = [sku_ids]
+    div_clause = ""
+    if not nationwide:
+        div_clause = "AND st.division = ANY(%s)"; params.append(regions)
+    date_clause = ""
+    if start_date:
+        date_clause += " AND s.sale_date >= %s"; params.append(start_date)
+    if end_date:
+        date_clause += " AND s.sale_date <= %s"; params.append(end_date)
+    cur.execute(f"""
+        SELECT s.sku_id, k.description, k.family,
+               SUM(s.units_sold) AS units,
+               SUM(s.units_sold * COALESCE(k.wholesale_price_whl, 0)) AS dollars
+        FROM sales s
+        JOIN skus k ON k.sku_id = s.sku_id
+        JOIN stores st ON st.store_id = s.store_id
+        WHERE s.sku_id = ANY(%s) {div_clause} {date_clause}
+        GROUP BY s.sku_id, k.description, k.family
+        ORDER BY units DESC
+    """, params)
+    by_sku = cur.fetchall()
+    base["by_sku"] = by_sku
+    base["units"] = int(sum(int(r["units"] or 0) for r in by_sku))
+    base["dollars"] = round(float(sum(float(r["dollars"] or 0) for r in by_sku)), 2)
+    base["scope"] = "Nationwide" if nationwide else ", ".join(regions or [])
+    return base
+
+
 def _load_promo(cur, pid):
     cur.execute("SELECT * FROM promotions WHERE id = %s", (pid,))
     p = cur.fetchone()
@@ -193,6 +231,7 @@ def get_promotion(pid: int, user=Depends(get_current_user)):
         cur = cursor(conn)
         p = _load_promo(cur, pid)
         p["metrics"] = _metrics(cur, p["id"], p["regions"], p["sku_ids"], p["start_date"])
+        p["analytics"] = _sales_analytics(cur, p["regions"], p["sku_ids"], p["start_date"], p["end_date"])
         if p["sku_ids"]:
             cur.execute("SELECT sku_id, description, family FROM skus WHERE sku_id = ANY(%s)", (p["sku_ids"],))
             p["skus"] = cur.fetchall()
