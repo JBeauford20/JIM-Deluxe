@@ -322,6 +322,153 @@ def assign_to_order(template_id: str, order_id: str,
             "units": total_units, "shelves": positions}
 
 
+class BulkAssignRequest(BaseModel):
+    order_ids: List[str]
+
+
+@router.post("/{template_id}/assign-bulk")
+def assign_bulk(template_id: str, req: BulkAssignRequest,
+                user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Assign one cart to MANY stores at once. Checks the AGGREGATE draw (cart units × N stores)
+    against remaining FIRST — blocks with a per-SKU shortfall message if it would oversell — then
+    allocates all N in a single transaction from a shared inventory pool (no partial assigns, no
+    orphaned rows, nothing goes negative)."""
+    import uuid
+    from psycopg2.extras import execute_batch
+    order_ids = [str(o) for o in req.order_ids if o]
+    if not order_ids:
+        raise HTTPException(400, "No stores selected")
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT id, store_id, run_id FROM orders WHERE id = ANY(%s::uuid[]) FOR UPDATE", (order_ids,))
+        orders = cur.fetchall()
+        if not orders:
+            raise HTTPException(404, "No matching stores in the plan")
+        run_ids = {o["run_id"] for o in orders}
+        if len(run_ids) != 1:
+            raise HTTPException(400, "Selected stores span multiple plans")
+        run_id = orders[0]["run_id"]
+        cur.execute("SELECT batch_id FROM recommendation_runs WHERE id = %s", (run_id,))
+        batch_id = cur.fetchone()["batch_id"]
+
+        cur.execute("SELECT name FROM cart_templates WHERE id = %s", (template_id,))
+        tmpl = cur.fetchone()
+        if not tmpl:
+            raise HTTPException(404, "Cart not found")
+        cur.execute("""SELECT shelf_position, sku_id, profile_id, tray_count, unit_count
+                       FROM cart_template_shelves WHERE template_id = %s ORDER BY shelf_position""",
+                    (template_id,))
+        tshelves = cur.fetchall()
+        if not tshelves:
+            raise HTTPException(400, "Cart has no shelves")
+
+        per_cart_by_sku: dict = defaultdict(int)
+        for s in tshelves:
+            per_cart_by_sku[s["sku_id"]] += s["unit_count"]
+        skus = list(per_cart_by_sku)
+        N = len(orders)
+
+        # Lock availability + remaining per Aster line (ledger + live reservations).
+        cur.execute("SELECT id FROM availability_lines WHERE batch_id = %s AND sku_id = ANY(%s) FOR UPDATE",
+                    (batch_id, skus))
+        cur.execute("""
+            WITH alloc AS (SELECT availability_line_id, SUM(qty) q FROM order_line_allocations
+                           WHERE batch_id = %s GROUP BY 1),
+                 res AS (SELECT availability_line_id, SUM(reserved_qty) q FROM allocation_reservations
+                         WHERE reservation_type <> 'released' GROUP BY 1)
+            SELECT al.id AS line_id, al.sku_id,
+                   (al.units_available - COALESCE(alloc.q,0) - COALESCE(res.q,0)) AS remaining
+            FROM availability_lines al
+            LEFT JOIN alloc ON alloc.availability_line_id = al.id
+            LEFT JOIN res ON res.availability_line_id = al.id
+            WHERE al.batch_id = %s AND al.sku_id = ANY(%s)
+        """, (batch_id, batch_id, skus))
+        pool: dict = defaultdict(list)
+        avail_by_sku: dict = defaultdict(int)
+        for r in cur.fetchall():
+            rem = int(r["remaining"] or 0)
+            if rem > 0:
+                pool[r["sku_id"]].append([str(r["line_id"]), rem])
+                avail_by_sku[r["sku_id"]] += rem
+
+        # AGGREGATE guardrail — cart units × N stores vs remaining, per SKU. Block if any short.
+        short = [(sku, per_cart_by_sku[sku] * N, avail_by_sku.get(sku, 0))
+                 for sku in skus if per_cart_by_sku[sku] * N > avail_by_sku.get(sku, 0)]
+        if short:
+            cur.execute("SELECT sku_id, description FROM skus WHERE sku_id = ANY(%s)", ([s[0] for s in short],))
+            desc = {r["sku_id"]: r["description"] for r in cur.fetchall()}
+            detail = "; ".join(f"{desc.get(s, s)}: need {need:,}, have {have:,}" for s, need, have in short)
+            raise HTTPException(400, f"Not enough inventory to give this cart to {N} store(s) — {detail}")
+
+        for sku in pool:
+            pool[sku].sort(key=lambda x: -x[1])
+
+        total_units_all = 0
+        for o in orders:
+            oid, sid = o["id"], o["store_id"]
+            cur.execute("SELECT COALESCE(MAX(cart_number),0)+1 AS n FROM order_carts WHERE order_id = %s", (oid,))
+            cart_num = cur.fetchone()["n"]
+            cart_id = str(uuid.uuid4())
+            total_units = sum(per_cart_by_sku.values())
+            positions = len(set(s["shelf_position"] for s in tshelves))
+            label = ("PC " + (tmpl["name"] or ""))[:40]
+            cur.execute("""
+                INSERT INTO order_carts (id, order_id, store_id, cart_number, cart_type_id,
+                     shelves_used, shelves_capacity, total_units, is_full, is_flagged,
+                     flag_reason, effective_max_shelves, cart_key, config_code)
+                VALUES (%s,%s,%s,%s,'cc',%s,5,%s,%s,false,'manual cart',5,%s,%s)
+            """, (cart_id, oid, sid, cart_num, positions, total_units, positions >= 5,
+                  f"MC-{cart_num:04d}", label))
+            shelf_rows, ledger_pending = [], []
+            for s in tshelves:
+                sku, need, prof, trays, item_units = (s["sku_id"], s["unit_count"], s["profile_id"],
+                                                      s["tray_count"], s["unit_count"])
+                for line in pool[sku]:
+                    if need <= 0:
+                        break
+                    take = min(need, line[1])
+                    if take <= 0:
+                        continue
+                    cs_id = str(uuid.uuid4())
+                    seg_trays = round(trays * take / item_units) if item_units else trays
+                    shelf_rows.append((cs_id, cart_id, s["shelf_position"], sku, prof, None,
+                                       seg_trays, take, line[0]))
+                    ledger_pending.append((sku, cs_id, line[0], take))
+                    line[1] -= take
+                    need -= take
+            execute_batch(cur, """
+                INSERT INTO cart_shelves (id, cart_id, shelf_position, sku_id, profile_id,
+                     kit_type, tray_count, unit_count, availability_line_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, shelf_rows)
+            for sku, units in per_cart_by_sku.items():
+                cur.execute("""UPDATE order_lines SET draft_qty = COALESCE(draft_qty,0)+%s, is_manual_edit=true
+                               WHERE order_id=%s AND sku_id=%s""", (units, oid, sku))
+                if cur.rowcount == 0:
+                    cur.execute("""INSERT INTO order_lines (order_id, store_id, sku_id, recommended_qty, draft_qty, is_manual_edit)
+                                   VALUES (%s,%s,%s,0,%s,true)""", (oid, sid, sku, units))
+            cur.execute("SELECT id, sku_id FROM order_lines WHERE order_id=%s AND sku_id=ANY(%s)", (oid, skus))
+            ol_map = {r["sku_id"]: r["id"] for r in cur.fetchall()}
+            ledger_rows = [(ol_map.get(sku), lid, cs_id, str(run_id), batch_id, sku, qty, "manual_cart")
+                           for (sku, cs_id, lid, qty) in ledger_pending]
+            execute_batch(cur, """
+                INSERT INTO order_line_allocations (order_line_id, availability_line_id, cart_shelf_id,
+                     run_id, batch_id, sku_id, qty, source)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            """, ledger_rows)
+            cur.execute("""UPDATE orders SET
+                total_units=(SELECT COALESCE(SUM(total_units),0) FROM order_carts WHERE order_id=%s),
+                cart_count=(SELECT COUNT(*) FROM order_carts WHERE order_id=%s), version=version+1
+                WHERE id=%s""", (oid, oid, oid))
+            total_units_all += total_units
+        cur.execute("""UPDATE recommendation_runs SET
+            total_carts=(SELECT COUNT(*) FROM order_carts oc JOIN orders o ON o.id=oc.order_id WHERE o.run_id=%s),
+            total_units=(SELECT COALESCE(SUM(total_units),0) FROM orders WHERE run_id=%s) WHERE id=%s""",
+            (run_id, run_id, run_id))
+    return {"assigned": N, "cart": tmpl["name"], "units_each": sum(per_cart_by_sku.values()),
+            "units_total": total_units_all}
+
+
 @router.delete("/{template_id}")
 def delete_cart(template_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
     with get_db() as conn:

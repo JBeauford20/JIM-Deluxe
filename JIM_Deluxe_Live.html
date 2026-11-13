@@ -419,6 +419,7 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
       <button class="btn btn-sm btn-outline-secondary" onclick="go('draw');loadDraw()"><i class="bi bi-boxes me-1"></i>Inventory Draw</button>
     </div>
   </div>
+  <div id="oc-remaining" style="background:#f8faf8;border:1px solid var(--line);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:var(--is)">Inventory: —</div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
     <div class="card"><div class="card-body">
       <div style="font-weight:700;color:var(--fd);margin-bottom:8px"><i class="bi bi-shop me-1"></i>Select Stores</div>
@@ -431,9 +432,16 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
       <div id="oc-storelist" style="max-height:56vh;overflow:auto;border:1px solid var(--line);border-radius:6px"></div>
     </div></div>
     <div class="card"><div class="card-body">
-      <div style="font-weight:700;color:var(--fd);margin-bottom:8px"><i class="bi bi-cart3 me-1"></i>Plan so far — <span id="oc-plancount">0</span> stores</div>
-      <div style="font-size:11px;color:var(--is);margin-bottom:8px">Assign carts to these stores in the Order Editor (open a store → Assign Saved Cart). Everything here is saved as you go.</div>
-      <div id="oc-plan" style="max-height:60vh;overflow:auto"></div>
+      <div style="font-weight:700;color:var(--fd);margin-bottom:8px"><i class="bi bi-cart3 me-1"></i>Assign Carts — <span id="oc-plancount">0</span> stores in plan</div>
+      <div class="d-flex gap-2 mb-2 align-items-center">
+        <select id="oc-cart" class="form-select form-select-sm" style="flex:1"><option value="">Pick a cart to assign…</option></select>
+        <button class="btn btn-sm btn-outline-secondary" onclick="go('configs',document.getElementById('nl-cfg'))" title="Build or manage carts">Build</button>
+      </div>
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <label style="font-size:12px;cursor:pointer"><input type="checkbox" id="oc-allck" onchange="ocCheckAll(this.checked)"> <span id="oc-ckcount">0</span> checked</label>
+        <button class="btn btn-sm btn-cta" onclick="ocAssignToChecked()"><i class="bi bi-box-arrow-in-down me-1"></i>Assign cart → checked</button>
+      </div>
+      <div id="oc-plan" style="max-height:52vh;overflow:auto"></div>
     </div></div>
   </div>
 </div></div>
@@ -643,7 +651,7 @@ function go(n,el){
   if(n==='routing')loadRoutingTab();
   if(n==='week')loadHomeScenarios();
   if(n==='configs')cfgTab(rId?'run':'perm');
-  if(n==='ordercreate'&&rId)ocLoadPlan();
+  if(n==='ordercreate'&&rId){ocLoadCarts();ocLoadPlan();}
 }
 function openScenarios(){
   var n=Array.prototype.slice.call(document.querySelectorAll('.nl')).filter(function(x){return /scenarios/.test(x.getAttribute('onclick')||'');})[0];
@@ -834,7 +842,7 @@ async function loadPlan(){
 }
 
 /* ===== CUSTOM ORDER FROM SCRATCH (I4) — manual plan = a persistent draft run ===== */
-var _ocSel={};
+var _ocSel={}, _ocPlanSel={};
 async function doStartEmpty(){
   if(!bId||!wk){toast('Upload availability first','warn');return;}
   try{
@@ -854,7 +862,29 @@ async function ocInit(){
   if(!allStores.length){try{allStores=await api('/api/stores/?limit=2500');}catch(e){}}
   var rf=document.getElementById('oc-fregion');
   if(rf&&rf.options.length<=1)rf.innerHTML='<option value="">All Regions</option>'+_distinctStore('region').map(function(v){return '<option>'+escH(v)+'</option>';}).join('');
-  _ocSel={};ocRenderStores();ocLoadPlan();
+  _ocSel={};_ocPlanSel={};ocRenderStores();ocLoadCarts();ocLoadPlan();
+}
+async function ocLoadCarts(){
+  var sel=document.getElementById('oc-cart');if(!sel)return;
+  try{var carts=await api('/api/permanent-carts');}catch(e){carts=[];}
+  var cur=sel.value;
+  sel.innerHTML='<option value="">Pick a cart to assign…</option>'+carts.map(function(c){
+    return '<option value="'+c.id+'"'+(c.id===cur?' selected':'')+'>'+escH(c.name||'Untitled')+' · '+fmt(c.total_units||0)+'u · '+(c.total_shelves||0)+' sh</option>';
+  }).join('');
+}
+async function ocLoadRemaining(){
+  var el=document.getElementById('oc-remaining');if(!el||!rId)return;
+  try{
+    var d=await api('/api/orders/runs/'+rId+'/inventory-draw');
+    var sk=d.skus||[];
+    var avail=sk.reduce(function(a,s){return a+(s.units_available||s.available||0);},0);
+    var used=sk.reduce(function(a,s){return a+(s.allocated||s.units_used||0);},0);
+    var rem=sk.reduce(function(a,s){return a+(s.remaining!=null?s.remaining:((s.units_available||0)-(s.allocated||0)));},0);
+    var low=sk.filter(function(s){var r=s.remaining!=null?s.remaining:((s.units_available||0)-(s.allocated||0));var a=s.units_available||s.available||0;return a>0&&r/a<0.1;}).length;
+    el.innerHTML='<strong style="color:var(--fd)">Inventory:</strong> '+fmt(rem)+' of '+fmt(avail)+' units remaining · '+fmt(used)+' allocated'
+      +(low?' · <span style="color:#b45309;font-weight:700">'+low+' SKU(s) &lt;10% left</span>':'')
+      +' <span style="cursor:pointer;text-decoration:underline" onclick="go(\'draw\');loadDraw()">details →</span>';
+  }catch(e){el.innerHTML='<strong>Inventory:</strong> (load failed)';}
 }
 function ocRenderStores(){
   var q=(document.getElementById('oc-search').value||'').toLowerCase();
@@ -883,14 +913,36 @@ async function ocAddSelected(){
 async function ocLoadPlan(){
   try{var o=await api('/api/orders/runs/'+rId);orders=Array.isArray(o)?o:[];}catch(e){orders=[];}
   var pc=document.getElementById('oc-plancount');if(pc)pc.textContent=orders.length;
-  var el=document.getElementById('oc-plan');if(!el)return;
-  if(!orders.length){el.innerHTML='<div style="font-size:12px;color:var(--is)">No stores yet — check stores on the left and click Add.</div>';return;}
-  el.innerHTML=orders.map(function(o){
-    return '<div class="d-flex justify-content-between align-items-center" style="padding:6px 8px;border-bottom:1px solid #f0f4f0;font-size:12px">'
-      +'<span style="cursor:pointer" onclick="openEditorFor(\''+o.id+'\')"><strong>'+(o.store_id||'')+'</strong> '+escH(o.store_name||'')+'</span>'
-      +'<span style="display:flex;gap:10px;align-items:center"><span style="color:var(--is)">'+(o.cart_count||0)+' carts · '+fmt(o.total_units||0)+'u</span>'
-      +'<button onclick="ocRemoveStore(\''+o.id+'\')" class="btn btn-sm py-0 px-1" style="color:#C00000;border:none;background:none" title="Remove store from plan"><i class="bi bi-x-lg"></i></button></span></div>';
-  }).join('');
+  var el=document.getElementById('oc-plan');
+  if(el){
+    if(!orders.length){el.innerHTML='<div style="font-size:12px;color:var(--is)">No stores yet — check stores on the left and click Add.</div>';}
+    else{
+      var cur={};orders.forEach(function(o){cur[o.id]=1;});Object.keys(_ocPlanSel).forEach(function(k){if(!cur[k])delete _ocPlanSel[k];});
+      el.innerHTML=orders.map(function(o){
+        return '<div class="d-flex justify-content-between align-items-center" style="padding:6px 8px;border-bottom:1px solid #f0f4f0;font-size:12px">'
+          +'<span style="display:flex;align-items:center;gap:7px"><input type="checkbox" '+(_ocPlanSel[o.id]?'checked':'')+' onchange="ocPlanToggle(\''+o.id+'\',this.checked)">'
+          +'<span style="cursor:pointer" onclick="openEditorFor(\''+o.id+'\')"><strong>'+(o.store_id||'')+'</strong> '+escH(o.store_name||'')+'</span></span>'
+          +'<span style="display:flex;gap:10px;align-items:center"><span style="color:var(--is)">'+(o.cart_count||0)+' carts · '+fmt(o.total_units||0)+'u</span>'
+          +'<button onclick="ocRemoveStore(\''+o.id+'\')" class="btn btn-sm py-0 px-1" style="color:#C00000;border:none;background:none" title="Remove store from plan"><i class="bi bi-x-lg"></i></button></span></div>';
+      }).join('');
+    }
+  }
+  ocCkCount();ocLoadRemaining();
+}
+function ocPlanToggle(oid,on){if(on)_ocPlanSel[oid]=true;else delete _ocPlanSel[oid];ocCkCount();}
+function ocCheckAll(on){_ocPlanSel={};if(on)orders.forEach(function(o){_ocPlanSel[o.id]=true;});ocLoadPlan();}
+function ocCkCount(){var e=document.getElementById('oc-ckcount');if(e)e.textContent=Object.keys(_ocPlanSel).length;}
+async function ocAssignToChecked(){
+  var tid=document.getElementById('oc-cart').value;
+  if(!tid){toast('Pick a cart to assign first','warn');return;}
+  var ids=Object.keys(_ocPlanSel);
+  if(!ids.length){toast('Check the stores to assign it to','warn');return;}
+  try{
+    var r=await api('/api/permanent-carts/'+tid+'/assign-bulk',{method:'POST',body:JSON.stringify({order_ids:ids})});
+    toast('Assigned "'+r.cart+'" to '+r.assigned+' store(s) — '+fmt(r.units_total)+' units drawn','ok');
+    _ocPlanSel={};var ac=document.getElementById('oc-allck');if(ac)ac.checked=false;
+    ocLoadPlan();
+  }catch(e){toast(e.message||'Assign failed','err');}
 }
 async function ocRemoveStore(oid){
   try{await api('/api/orders/'+oid,{method:'DELETE'});ocLoadPlan();}
