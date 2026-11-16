@@ -213,20 +213,14 @@ def add_trays(
                 (cart_id, shelf_position, sku_id, profile_id, kit_type,
                  tray_count, unit_count, availability_line_id)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (cart_id, shelf_position) DO UPDATE SET
-                sku_id      = EXCLUDED.sku_id,
-                profile_id  = EXCLUDED.profile_id,
-                kit_type    = EXCLUDED.kit_type,
-                tray_count  = EXCLUDED.tray_count,
-                unit_count  = EXCLUDED.unit_count
             RETURNING id
         """, (cart_id, pos, req.sku_id, profile_id, req.kit_type,
               req.tray_count, units, req.availability_line_id))
         shelf_id = cur.fetchone()["id"]
-
-        # If ON CONFLICT replaced an existing shelf at this position, free its old ledger draw
-        # first so remaining is correct before we allocate the new one.
-        ledger.release_by_shelf(cur, shelf_id)
+        # Plain INSERT: cart_shelves has NO unique(cart_id, shelf_position) — that
+        # constraint was dropped Oct 2026 because a shelf position may hold multiple
+        # variety rows. An ON CONFLICT upsert here 500s (no matching constraint) and
+        # its replace semantics would be wrong for this schema anyway.
 
         # Update order line draft_qty (and capture its id for the ledger row)
         cur.execute("""
