@@ -202,6 +202,17 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
       <button class="btn btn-sm btn-primary" id="fb" onclick="doFinalizeWeek()" disabled title="Approve all remaining orders, lock week, and move to Order History"><i class="bi bi-archive me-1"></i>Finalize Week</button>
     </div>
   </div>
+  <div class="card mb-3" id="rxPanel" style="display:none"><div class="card-body py-2 d-flex align-items-center gap-3 flex-wrap">
+    <span style="font-weight:600;color:var(--fd)"><i class="bi bi-signpost-split me-1"></i>Routing Exchange</span>
+    <span id="rxStatus"></span>
+    <span id="rxInfo" class="text-muted" style="font-size:12px"></span>
+    <div class="ms-auto d-flex gap-2 align-items-center">
+      <button class="btn btn-sm btn-outline-primary" onclick="rxExportRequest()" title="CSV of stores + carts for the external routing team"><i class="bi bi-box-arrow-up me-1"></i>Export Routing Request</button>
+      <input type="file" id="rxFile" accept=".csv" style="display:none" onchange="rxImport(this.files[0])">
+      <button class="btn btn-sm btn-outline-success" onclick="document.getElementById('rxFile').click()" title="Import the routing team's Store/Route/Drop/Ship/Del file — replaces the provisional loads with real trucks"><i class="bi bi-box-arrow-in-down me-1"></i>Import Routing File</button>
+      <button class="btn btn-sm btn-cta" id="rxPack" onclick="rxPackPlan()" disabled title="Truck-level pack plan (one kitting block per route)"><i class="bi bi-boxes me-1"></i>Pack Plans</button>
+    </div>
+  </div></div>
   <div class="card"><div class="table-responsive">
     <table class="table jt mb-0">
       <thead><tr><th>Store</th><th>Location</th><th>Tier</th><th class="text-end">Velocity</th><th>Grade</th><th>Clock</th><th>Last Delivery</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th><th>Actions</th></tr></thead>
@@ -903,7 +914,7 @@ async function loadPlan(){
     var r=await Promise.all([api('/api/orders/runs/'+rId),api('/api/orders/runs/'+rId+'/loads'),api('/api/orders/runs/'+rId+'/summary').catch(function(){return null;})]);
     orders=Array.isArray(r[0])?r[0]:[];
     loads=Array.isArray(r[1])?r[1]:[];
-    buildStats(r[2]);buildTable();buildLoads();buildEL();
+    buildStats(r[2]);buildTable();buildLoads();buildEL();rxRefresh();
     _startRunPolling(rId);  // presence + change-feed polling for this plan (Phase 2/3)
   }catch(e){toast('Load failed: '+e.message,'err');}
 }
@@ -1385,6 +1396,62 @@ async function doExport(){
   toast('Generating Aster import file...','ok');
   try{var b=await apiBlob('/api/exports/runs/'+rId+'/aster-import');var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download='JIM_Aster_'+(wk||'export')+'.csv';a.click();URL.revokeObjectURL(u);toast('Downloaded','ok');}
   catch(e){toast('Export failed: '+e.message,'err');}
+}
+
+/* ROUTING EXCHANGE — export request, import the routing team's trucks, pack plans */
+async function rxRefresh(){
+  var p=document.getElementById('rxPanel');if(!p)return;
+  if(!rId){p.style.display='none';return;}
+  try{
+    var s=await api('/api/routing/runs/'+rId+'/exchange-status');
+    p.style.display='block';
+    var st=(s.routing_status||'draft');
+    var el=document.getElementById('rxStatus');
+    el.textContent=st==='routed'?'ROUTED':st==='submitted'?'SENT TO ROUTING':'NOT SUBMITTED';
+    el.style.cssText='font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;'+
+      (st==='routed'?'background:#e7f2ea;color:#2e7d43;border:1px solid #2e7d43':
+       st==='submitted'?'background:#fff7e0;color:#8a6d00;border:1px solid #ffe08a':
+       'background:#eef0ee;color:#667;border:1px solid #ccc');
+    var info='';
+    if(st==='submitted'&&s.routing_submitted_at)info='sent '+new Date(s.routing_submitted_at).toLocaleDateString()+' '+new Date(s.routing_submitted_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    if(st==='routed')info=escH(s.routing_filename||'')+' — '+s.external_loads+' trucks';
+    document.getElementById('rxInfo').textContent=info;
+    var pk=document.getElementById('rxPack');if(pk)pk.disabled=!s.load_count;
+  }catch(e){p.style.display='none';}
+}
+async function rxExportRequest(){
+  if(!rId)return;
+  try{
+    var b=await apiBlob('/api/routing/runs/'+rId+'/request-export');
+    var u=URL.createObjectURL(b);var a=document.createElement('a');
+    a.href=u;a.download='Routing_Request_'+(wk||'wk')+'.csv';a.click();URL.revokeObjectURL(u);
+    toast('Routing request exported — send it to the routing team','ok');rxRefresh();
+  }catch(e){toast('Export failed: '+e.message,'err');}
+}
+async function rxImport(f){
+  var inp=document.getElementById('rxFile');
+  if(!f||!rId){if(inp)inp.value='';return;}
+  if(!confirm('Importing the routing file REPLACES this plan\'s current loads with the routing team\'s trucks. Continue?')){if(inp)inp.value='';return;}
+  var fd=new FormData();fd.append('file',f);
+  try{
+    var r=await apiUpload('/api/routing/runs/'+rId+'/response-import',fd);
+    var warn=false,msg=r.loads+' trucks · '+r.stores_routed+' stores routed';
+    if(r.stores_in_run_not_routed&&r.stores_in_run_not_routed.length){msg+=' · '+r.stores_in_run_not_routed.length+' plan stores NOT in file';warn=true;}
+    if(r.stores_in_file_not_in_run&&r.stores_in_file_not_in_run.length){msg+=' · '+r.stores_in_file_not_in_run.length+' unknown stores skipped';warn=true;}
+    if(r.manifest_rows_added||r.manifest_rows_updated)msg+=' · manifest +'+r.manifest_rows_added+'/~'+r.manifest_rows_updated;
+    toast(msg,warn?'warn':'ok');
+    loadPlan();  // rebuilds the table + Truck Loads cards from the real trucks
+  }catch(e){toast('Import failed: '+e.message,'err');}
+  if(inp)inp.value='';
+}
+async function rxPackPlan(){
+  if(!rId)return;
+  try{
+    var b=await apiBlob('/api/routing/runs/'+rId+'/pack-plan-export');
+    var u=URL.createObjectURL(b);var a=document.createElement('a');
+    a.href=u;a.download='Pack_Plan_'+(wk||'wk')+'.xlsx';a.click();URL.revokeObjectURL(u);
+    toast('Pack plans downloaded','ok');
+  }catch(e){toast('Pack plan failed: '+e.message,'err');}
 }
 
 /* EDITOR */
