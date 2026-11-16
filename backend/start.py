@@ -26,7 +26,10 @@ db_url = os.environ.get('SUPABASE_DB_URL', '')
 if not db_url:
     raise SystemExit("SUPABASE_DB_URL is not set. Add it in Railway Variables tab.")
 
-print(f"DB: {db_url[:55]}...")
+# Log only the host — a raw prefix slice of the DSN leaks password characters
+from urllib.parse import urlsplit
+_parts = urlsplit(db_url)
+print(f"DB host: {_parts.hostname}:{_parts.port or 5432}")
 
 if __name__ == "__main__":
     import uvicorn

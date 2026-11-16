@@ -11,6 +11,8 @@ from pydantic import BaseModel
 
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
+from services import ledger
+from routers.concurrency import log_change
 
 router = APIRouter()
 
@@ -32,6 +34,19 @@ class UpdateVarietiesRequest(BaseModel):
 
 
 # ── Helpers ───────────────────────────────────────────────────
+
+def _sku_line_ids(cur, sku_id: int, batch_id=None):
+    """Availability line ids for an HD SKU (optionally within one batch). Used when an edit
+    didn't pin a specific Aster line — we consider every line that SKU can draw from."""
+    if batch_id:
+        cur.execute(
+            "SELECT id FROM availability_lines WHERE sku_id = %s AND batch_id = %s",
+            (sku_id, batch_id),
+        )
+    else:
+        cur.execute("SELECT id FROM availability_lines WHERE sku_id = %s", (sku_id,))
+    return [str(r["id"]) for r in cur.fetchall()]
+
 
 def _aggregate_templates(rows: list) -> list:
     """
@@ -300,14 +315,18 @@ def preview_variety_change(
     with get_db() as conn:
         cur = cursor(conn)
 
-        # Fetch template
+        # Fetch template (+ batch via run, so ledger remaining is scoped to this week)
         cur.execute("""
-            SELECT cart_count FROM cart_config_templates WHERE id = %s
+            SELECT t.cart_count, rr.batch_id
+            FROM cart_config_templates t
+            JOIN recommendation_runs rr ON rr.id = t.run_id
+            WHERE t.id = %s
         """, (template_id,))
         tmpl = cur.fetchone()
         if not tmpl:
             raise HTTPException(404, "Template not found")
         cart_count = tmpl["cart_count"]
+        batch_id = tmpl["batch_id"]
 
         # Fetch current shelf
         cur.execute("""
@@ -338,39 +357,32 @@ def preview_variety_change(
         new_units_committed = new_units_per_shelf * cart_count
         net_change = new_units_committed - current_units_committed
 
-        # Units this edit would free (credited back below) — mirrors the commit path so
-        # the preview's availability math matches what commit will actually allow.
+        # Units this edit would free (credited back below) — read from the LEDGER (the single
+        # source of truth), mirroring the commit path. The old reservations-based credit missed
+        # engine-created carts entirely (the engine writes the ledger, not reservations).
         cur.execute("""
-            SELECT cs.sku_id, COALESCE(SUM(ar.reserved_qty), 0) AS freed
-            FROM allocation_reservations ar
-            JOIN cart_shelves cs ON cs.id = ar.cart_shelf_id
+            SELECT cs.sku_id, COALESCE(SUM(ola.qty), 0) AS freed
+            FROM order_line_allocations ola
+            JOIN cart_shelves cs ON cs.id = ola.cart_shelf_id
             JOIN order_carts  oc ON oc.id = cs.cart_id
             WHERE oc.template_id = %s
               AND cs.shelf_position = %s
-              AND ar.reservation_type <> 'released'
             GROUP BY cs.sku_id
         """, (template_id, req.shelf_position))
         freed_by_sku = {r["sku_id"]: int(r["freed"] or 0) for r in cur.fetchall()}
 
-        # Check availability per variety
+        # Check availability per variety (ledger remaining + what this edit frees back)
         per_variety_check = []
         all_ok = True
         for v in req.new_varieties:
             required = v.tray_count * units_per_tray * cart_count
 
             if v.availability_line_id:
-                cur.execute("""
-                    SELECT remaining FROM availability_remaining
-                    WHERE availability_line_id = %s
-                """, (v.availability_line_id,))
+                available_base = ledger.remaining_for_line(cur, v.availability_line_id)
             else:
-                cur.execute("""
-                    SELECT MIN(remaining) AS remaining
-                    FROM availability_remaining
-                    WHERE sku_id = %s
-                """, (v.sku_id,))
-            avail = cur.fetchone()
-            available = (int(avail["remaining"] or 0) if avail else 0) + freed_by_sku.get(v.sku_id, 0)
+                rem = ledger.remaining_for_lines(cur, _sku_line_ids(cur, v.sku_id, batch_id))
+                available_base = min(rem.values()) if rem else 0
+            available = available_base + freed_by_sku.get(v.sku_id, 0)
             ok = available >= required
             if not ok:
                 all_ok = False
@@ -460,46 +472,41 @@ def update_shelf_varieties(
         brow = cur.fetchone()
         batch_id = brow["batch_id"] if brow else None
 
-        # 6b. Units this edit will FREE: everything currently reserved by this template's
-        # carts at this shelf position. They're cascade-deleted when we rewrite the shelf
-        # below (allocation_reservations.cart_shelf_id is ON DELETE CASCADE), so credit
-        # them back when checking availability — otherwise keeping/raising an existing SKU
-        # is falsely rejected because its old units aren't released until after the check.
+        # 6b. Units this edit will FREE: everything currently ALLOCATED (ledger) by this
+        # template's carts at this shelf position. They're cascade-deleted when we rewrite the
+        # shelf below (order_line_allocations.cart_shelf_id is ON DELETE CASCADE), so credit
+        # them back when checking availability — otherwise keeping/raising an existing SKU is
+        # falsely rejected because its old units aren't released until after the check.
+        # Reads the LEDGER (single source), which also covers engine-created carts.
         cur.execute("""
-            SELECT cs.sku_id, COALESCE(SUM(ar.reserved_qty), 0) AS freed
-            FROM allocation_reservations ar
-            JOIN cart_shelves cs ON cs.id = ar.cart_shelf_id
+            SELECT cs.sku_id, COALESCE(SUM(ola.qty), 0) AS freed
+            FROM order_line_allocations ola
+            JOIN cart_shelves cs ON cs.id = ola.cart_shelf_id
             JOIN order_carts  oc ON oc.id = cs.cart_id
             WHERE oc.template_id = %s
               AND cs.shelf_position = %s
-              AND ar.reservation_type <> 'released'
             GROUP BY cs.sku_id
         """, (template_id, shelf_position))
         freed_by_sku = {r["sku_id"]: int(r["freed"] or 0) for r in cur.fetchall()}
 
+        # Lock every availability line this edit could touch (both the pinned lines and all
+        # lines for the touched SKUs within the batch) in a stable order before checking.
         touched_skus = {v.sku_id for v in req.varieties} | set(freed_by_sku.keys())
+        lock_ids = {v.availability_line_id for v in req.varieties if v.availability_line_id}
         if batch_id and touched_skus:
-            cur.execute("""
-                SELECT id FROM availability_lines
-                WHERE batch_id = %s AND sku_id = ANY(%s)
-                FOR UPDATE
-            """, (batch_id, list(touched_skus)))
+            for sk in touched_skus:
+                lock_ids.update(_sku_line_ids(cur, sk, batch_id))
+        ledger.lock_lines(cur, lock_ids)
 
         # 7. Availability check for each variety (crediting back the units this edit frees)
         for v in req.varieties:
             required = v.tray_count * units_per_tray * cart_count
             if v.availability_line_id:
-                cur.execute("""
-                    SELECT remaining FROM availability_remaining
-                    WHERE availability_line_id = %s
-                """, (v.availability_line_id,))
+                available_base = ledger.remaining_for_line(cur, v.availability_line_id)
             else:
-                cur.execute("""
-                    SELECT MIN(remaining) AS remaining FROM availability_remaining
-                    WHERE sku_id = %s
-                """, (v.sku_id,))
-            avail = cur.fetchone()
-            available = (int(avail["remaining"] or 0) if avail else 0) + freed_by_sku.get(v.sku_id, 0)
+                rem = ledger.remaining_for_lines(cur, _sku_line_ids(cur, v.sku_id, batch_id))
+                available_base = min(rem.values()) if rem else 0
+            available = available_base + freed_by_sku.get(v.sku_id, 0)
             if available < required:
                 raise HTTPException(
                     400,
@@ -553,7 +560,11 @@ def update_shelf_varieties(
                 WHERE cart_id = ANY(%s::uuid[]) AND shelf_position = %s
             """, (cart_ids, shelf_position))
 
-            # ── Insert new cart_shelves rows (variety × cart) ──
+            # ── Insert new cart_shelves rows (variety × cart) and draw each through the
+            #    single LEDGER. Deleting the old shelves above cascaded their ledger rows
+            #    (units returned to remaining); allocate() re-checks under the locks taken
+            #    in step 6a so a concurrent edit can't oversell. Replaces the old parallel
+            #    allocation_reservations write path (now retired for this endpoint).
             for cart_id in cart_ids:
                 for v in req.varieties:
                     unit_count = v.tray_count * units_per_tray
@@ -562,8 +573,29 @@ def update_shelf_varieties(
                             (cart_id, shelf_position, sku_id, profile_id,
                              tray_count, unit_count, availability_line_id)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
                     """, (cart_id, shelf_position, v.sku_id, profile_id,
                           v.tray_count, unit_count, v.availability_line_id))
+                    cs_id = cur.fetchone()["id"]
+                    if v.availability_line_id and unit_count > 0:
+                        try:
+                            ledger.allocate(
+                                cur,
+                                availability_line_id=v.availability_line_id,
+                                qty=unit_count,
+                                order_line_id=None,   # linked in step 9g recompute
+                                cart_shelf_id=cs_id,
+                                run_id=run_id,
+                                batch_id=batch_id,
+                                sku_id=v.sku_id,
+                                source="config_editor",
+                                lock=False,  # lines already locked in step 6a
+                            )
+                        except ledger.AllocationError as e:
+                            raise HTTPException(
+                                400,
+                                f"Insufficient units: need {e.need} for SKU {v.sku_id}, only {e.have} available",
+                            )
 
             # ── Recalc each order_cart totals ──────────────────
             cur.execute("""
@@ -571,51 +603,10 @@ def update_shelf_varieties(
                 SET total_units   = (SELECT COALESCE(SUM(unit_count), 0)
                                      FROM cart_shelves WHERE cart_id = order_carts.id),
                     shelves_used  = (SELECT COUNT(DISTINCT shelf_position)
-                                     FROM cart_shelves WHERE cart_id = order_carts.id)
+                                     FROM cart_shelves WHERE cart_id = order_carts.id),
+                    version       = version + 1
                 WHERE id = ANY(%s::uuid[])
             """, (cart_ids,))
-
-            # ── 9f. Release old allocation_reservations for this shelf position ──
-            # Identify the old cart_shelf IDs that were deleted so we can release
-            # any reservations that referenced them. Since we already deleted them,
-            # release by cart_id + reservation matching the run.
-            cur.execute("""
-                UPDATE allocation_reservations
-                SET reservation_type = 'released',
-                    released_at      = now()
-                WHERE run_id = %s
-                  AND cart_shelf_id IN (
-                      SELECT cs_hist.id FROM cart_shelves cs_hist
-                      WHERE cs_hist.cart_id = ANY(%s::uuid[])
-                        AND cs_hist.shelf_position = %s
-                  )
-                  AND reservation_type IN ('draft', 'approved')
-            """, (run_id, cart_ids, shelf_position))
-
-            # Create new draft reservations for each new variety × each cart
-            for cart_id_row in cart_rows:
-                cart_id  = cart_id_row["cart_id"]
-                order_id = cart_id_row["order_id"]
-                for v in req.varieties:
-                    if not v.availability_line_id:
-                        continue
-                    unit_count = v.tray_count * units_per_tray
-                    # Get the cart_shelf id we just inserted
-                    cur.execute("""
-                        SELECT id FROM cart_shelves
-                        WHERE cart_id = %s AND shelf_position = %s AND sku_id = %s
-                        LIMIT 1
-                    """, (cart_id, shelf_position, v.sku_id))
-                    cs_row = cur.fetchone()
-                    if not cs_row:
-                        continue
-                    cur.execute("""
-                        INSERT INTO allocation_reservations
-                            (availability_line_id, run_id, order_id, cart_shelf_id,
-                             reserved_qty, reservation_type)
-                        VALUES (%s, %s, %s, %s, %s, 'draft')
-                    """, (v.availability_line_id, run_id, order_id,
-                          cs_row["id"], unit_count))
 
             # ── 9g. Recalculate order_lines.draft_qty for affected stores ─────
             # Get all store_ids for orders that contain these carts
@@ -661,6 +652,10 @@ def update_shelf_varieties(
                         )
                           AND sku_id = %s
                     """, (row["store_id"], run_id, row["sku_id"]))
+
+        # Record the edit for pollers (bumps run last_activity_at too).
+        log_change(cur, run_id, "config", template_id, "edit_shelf",
+                   user.get("email") if isinstance(user, dict) else None)
 
     # ── Return updated template ────────────────────────────────
     with get_db() as conn2:

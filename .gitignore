@@ -41,3 +41,22 @@ fix_workers.py
 # Old prototype files
 JIM_Deluxe_Prototype.html
 html_structure.txt
+
+# One-off local scripts (audit 2026-11-16): never commit these prefixes
+gen_*.py
+apply_*.py
+clean_*.py
+debug_*.py
+find_*.py
+rebuild_*.py
+strip_*.py
+write_final_html.py
+backend/workers/gen_*.py
+
+# Local images / analysis folders
+*.png
+*.webp
+*.heic
+Exec Team Feedback/
+Sales Folders/
+WEEK44LogisticsAnalysis/

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from db import init_pool
-from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations, in_transit, store_status, routing, config_editor, promotions, scenarios, packing, manifest, permanent_carts
+from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations, in_transit, store_status, routing, config_editor, promotions, scenarios, packing, manifest, permanent_carts, concurrency
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +27,7 @@ app = FastAPI(
 
 # CORS: restrict to known frontend origins.
 # Set ALLOWED_ORIGINS env var on Railway (comma-separated) to lock this down.
-_raw_origins = os.environ.get("ALLOWED_ORIGINS", "*")
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "https://jim-deluxe-production.up.railway.app")
 _allowed_origins = [o.strip() for o in _raw_origins.split(",")] if _raw_origins != "*" else ["*"]
 
 app.add_middleware(
@@ -54,6 +54,7 @@ app.include_router(scenarios.router,        prefix="/api/scenarios",    tags=["S
 app.include_router(packing.router,          prefix="/api/packing",      tags=["Packing"])
 app.include_router(manifest.router,         prefix="/api/manifest",     tags=["Manifest"])
 app.include_router(permanent_carts.router,   prefix="/api/permanent-carts", tags=["PermanentCarts"])
+app.include_router(concurrency.router,        prefix="/api/concurrency",  tags=["Concurrency"])
 
 @app.get("/api/health")
 def health():

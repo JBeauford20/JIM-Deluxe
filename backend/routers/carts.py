@@ -8,6 +8,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
+from services import ledger
+from routers.concurrency import log_change, claim_blocker
 
 router = APIRouter()
 
@@ -19,14 +21,25 @@ class AddTraysRequest(BaseModel):
     kit_type:             str | None = None    # 'jute_kit' | 'ceramic_kit' | None
     availability_line_id: str | None = None    # which supply source to draw from
     shelf_position:       int | None = None    # if None, engine picks next available shelf
+    version:              int | None = None    # optimistic cart version the client last read
 
 class RemoveTraysRequest(BaseModel):
     shelf_position: int
     tray_count:     int
+    version:        int | None = None
 
 class MoveShelfRequest(BaseModel):
     from_position: int
     to_position:   int
+
+
+def _check_cart_version(cart: dict, client_version):
+    """Optimistic concurrency: if the client sent the version it read and it no longer matches
+    the row, someone else edited this cart first — 409 so the UI can refresh and reapply."""
+    if client_version is None:
+        return
+    if int(cart.get("version") or 0) != int(client_version):
+        raise HTTPException(409, "This cart was just changed by someone else — refresh and retry.")
 
 # ── Helpers ───────────────────────────────────────────────────
 
@@ -75,7 +88,8 @@ def recalc_cart(cur, cart_id: str):
             shelves_used = %s,
             total_units  = %s,
             is_full      = %s,
-            is_flagged   = NOT %s
+            is_flagged   = NOT %s,
+            version      = version + 1
         WHERE id = %s
     """, (agg["shelves_used"], agg["total_units"], is_full, is_full, cart_id))
     return agg["total_units"]
@@ -133,20 +147,34 @@ def add_trays(
 ):
     """
     Add trays of a SKU to a cart shelf.
-    Single transaction: shelf + order line + reservation + totals.
+    Single transaction: shelf + order line + ledger allocation + totals.
+    Honors optimistic cart version + store soft-claim; draws through the single ledger path.
     """
     with get_db() as conn:
         cur = cursor(conn)
 
-        # Get cart + order
+        # Get cart + order (+ version for optimistic check, + run_id for ledger/change-log)
         cur.execute("""
-            SELECT oc.id, oc.order_id, oc.shelves_used,
-                   oc.effective_max_shelves, oc.shelves_capacity
-            FROM order_carts oc WHERE oc.id = %s FOR UPDATE
+            SELECT oc.id, oc.order_id, oc.shelves_used, oc.version,
+                   oc.effective_max_shelves, oc.shelves_capacity,
+                   o.run_id, o.claimed_by
+            FROM order_carts oc
+            JOIN orders o ON o.id = oc.order_id
+            WHERE oc.id = %s FOR UPDATE
         """, (cart_id,))
         cart = cur.fetchone()
         if not cart:
             raise HTTPException(404, "Cart not found")
+
+        _check_cart_version(cart, req.version)
+        holder = claim_blocker(cur, cart["order_id"], user.get("email"))
+        if holder:
+            raise HTTPException(409, f"{holder} is editing this store — refresh before editing.")
+
+        run_id = cart["run_id"]
+        cur.execute("SELECT batch_id FROM recommendation_runs WHERE id = %s", (run_id,))
+        _br = cur.fetchone()
+        batch_id = _br["batch_id"] if _br else None
 
         max_shelves = cart["effective_max_shelves"] or cart["shelves_capacity"] or 5
         if cart["shelves_used"] >= max_shelves:
@@ -165,22 +193,16 @@ def add_trays(
             raise HTTPException(400, f"No units_per_tray configured for profile {profile_id}")
         units = req.tray_count * units_per_tray
 
-        # Check availability — availability_line_id strongly recommended to prevent double-spend
+        # Check availability through the single ledger path — availability_line_id strongly
+        # recommended to prevent double-spend. Lock the line now; allocate() below re-checks
+        # under that lock and raises if another writer drew it out from under us.
         if req.availability_line_id:
-            # Lock the underlying row (FOR UPDATE on aggregate views is illegal in PostgreSQL)
-            cur.execute("""
-                SELECT id FROM availability_lines WHERE id = %s FOR UPDATE
-            """, (req.availability_line_id,))
-            cur.execute("""
-                SELECT remaining FROM availability_remaining
-                WHERE availability_line_id = %s
-            """, (req.availability_line_id,))
-            avail = cur.fetchone()
-            if not avail or avail["remaining"] < units:
-                remaining = avail["remaining"] if avail else 0
-                raise HTTPException(400, f"Insufficient availability: need {units}, have {remaining}")
+            ledger.lock_lines(cur, [req.availability_line_id])
+            have = ledger.remaining_for_line(cur, req.availability_line_id)
+            if have < units:
+                raise HTTPException(400, f"Insufficient availability: need {units}, have {have}")
         else:
-            # No availability_line_id supplied — skipping reservation check.
+            # No availability_line_id supplied — skipping ledger draw.
             # This allows manual builds but risks double-spend. Always supply
             # availability_line_id when building from a batch.
             pass
@@ -202,25 +224,43 @@ def add_trays(
               req.tray_count, units, req.availability_line_id))
         shelf_id = cur.fetchone()["id"]
 
-        # Reserve availability
-        if req.availability_line_id:
-            cur.execute("""
-                INSERT INTO allocation_reservations
-                    (availability_line_id, order_id, cart_shelf_id, reserved_qty, reservation_type)
-                VALUES (%s, %s, %s, %s, 'draft')
-            """, (req.availability_line_id, cart["order_id"], shelf_id, units))
+        # If ON CONFLICT replaced an existing shelf at this position, free its old ledger draw
+        # first so remaining is correct before we allocate the new one.
+        ledger.release_by_shelf(cur, shelf_id)
 
-        # Update order line draft_qty
+        # Update order line draft_qty (and capture its id for the ledger row)
         cur.execute("""
             INSERT INTO order_lines (order_id, store_id, sku_id, recommended_qty, draft_qty, kit_type)
-            SELECT %s, o.store_id, %s, 0, 0, %s FROM orders o WHERE o.id = %s
+            SELECT %s, o.store_id, %s, 0, %s, %s FROM orders o WHERE o.id = %s
             ON CONFLICT (order_id, sku_id, COALESCE(kit_type,'none')) DO UPDATE SET
                 draft_qty = order_lines.draft_qty + %s
-        """, (cart["order_id"], req.sku_id, req.kit_type, cart["order_id"], units))
+            RETURNING id
+        """, (cart["order_id"], req.sku_id, units, req.kit_type, cart["order_id"], units))
+        _ol = cur.fetchone()
+        order_line_id = _ol["id"] if _ol else None
+
+        # Draw availability through the single ledger (locks + re-checks under FOR UPDATE)
+        if req.availability_line_id:
+            try:
+                ledger.allocate(
+                    cur,
+                    availability_line_id=req.availability_line_id,
+                    qty=units,
+                    order_line_id=order_line_id,
+                    cart_shelf_id=shelf_id,
+                    run_id=run_id,
+                    batch_id=batch_id,
+                    sku_id=req.sku_id,
+                    source="manual",
+                    lock=False,  # already locked above
+                )
+            except ledger.AllocationError as e:
+                raise HTTPException(400, f"Insufficient availability: need {e.need}, have {e.have}")
 
         # Recalculate totals
         recalc_cart(cur, cart_id)
         recalc_order(cur, cart["order_id"])
+        log_change(cur, run_id, "cart", cart_id, "add_trays", user.get("email"))
 
         return {"shelf_id": shelf_id, "shelf_position": pos, "units_added": units}
 
@@ -228,6 +268,7 @@ def add_trays(
 @router.delete("/{cart_id}")
 def remove_cart(
     cart_id: str,
+    version: int | None = None,
     user=Depends(require_role("order_writer", "manager", "admin"))
 ):
     """Remove a whole cart from a store's plan. Deleting its shelves cascades the
@@ -236,13 +277,19 @@ def remove_cart(
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
-            SELECT oc.id, oc.order_id, oc.total_units
-            FROM order_carts oc WHERE oc.id = %s FOR UPDATE
+            SELECT oc.id, oc.order_id, oc.total_units, oc.version, o.run_id
+            FROM order_carts oc
+            JOIN orders o ON o.id = oc.order_id
+            WHERE oc.id = %s FOR UPDATE
         """, (cart_id,))
         cart = cur.fetchone()
         if not cart:
             raise HTTPException(404, "Cart not found")
         order_id = cart["order_id"]
+        _check_cart_version(cart, version)
+        holder = claim_blocker(cur, order_id, user.get("email"))
+        if holder:
+            raise HTTPException(409, f"{holder} is editing this store — refresh before editing.")
 
         # Delete shelves → ON DELETE CASCADE frees order_line_allocations (ledger) and
         # allocation_reservations tied to those shelves, so remaining goes back up.
@@ -260,6 +307,7 @@ def remove_cart(
         """, (order_id,))
 
         recalc_order(cur, order_id)
+        log_change(cur, cart["run_id"], "cart", cart_id, "remove_cart", user.get("email"))
         return {"removed": True, "units_released": cart["total_units"]}
 
 
@@ -267,29 +315,33 @@ def remove_cart(
 def remove_shelf(
     cart_id: str,
     shelf_position: int,
+    version: int | None = None,
     user=Depends(require_role("order_writer", "manager", "admin"))
 ):
-    """Remove a shelf from a cart. Releases availability reservation."""
+    """Remove a shelf from a cart. Returns its draw to the ledger."""
     with get_db() as conn:
         cur = cursor(conn)
 
-        # Get shelf
+        # Get shelf (+ cart version for optimistic check, + order claim/run for guard/change-log)
         cur.execute("""
-            SELECT cs.*, oc.order_id
+            SELECT cs.*, oc.order_id, oc.version AS cart_version, o.run_id
             FROM cart_shelves cs
             JOIN order_carts oc ON oc.id = cs.cart_id
+            JOIN orders o ON o.id = oc.order_id
             WHERE cs.cart_id = %s AND cs.shelf_position = %s FOR UPDATE
         """, (cart_id, shelf_position))
         shelf = cur.fetchone()
         if not shelf:
             raise HTTPException(404, "Shelf not found")
 
-        # Release reservation
-        cur.execute("""
-            UPDATE allocation_reservations
-            SET reservation_type = 'released', released_at = now()
-            WHERE cart_shelf_id = %s
-        """, (shelf["id"],))
+        _check_cart_version({"version": shelf["cart_version"]}, version)
+        holder = claim_blocker(cur, shelf["order_id"], user.get("email"))
+        if holder:
+            raise HTTPException(409, f"{holder} is editing this store — refresh before editing.")
+
+        # Return the shelf's draw through the single ledger (deleting the shelf would cascade
+        # the ledger rows anyway, but we delete explicitly so remaining is right regardless).
+        ledger.release_by_shelf(cur, shelf["id"])
 
         # Remove shelf
         cur.execute("DELETE FROM cart_shelves WHERE id = %s", (shelf["id"],))
@@ -303,5 +355,6 @@ def remove_shelf(
 
         recalc_cart(cur, cart_id)
         recalc_order(cur, shelf["order_id"])
+        log_change(cur, shelf["run_id"], "cart", cart_id, "remove_shelf", user.get("email"))
 
         return {"removed": True, "units_released": shelf["unit_count"]}

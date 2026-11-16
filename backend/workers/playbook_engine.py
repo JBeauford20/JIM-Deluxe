@@ -62,7 +62,12 @@ def sku_in_scope(adj: dict, sku_id: int, sku_family: dict) -> bool:
         return False
     if adj['scope_legacy_tier'] and tier != adj['scope_legacy_tier']:
         return False
-    # scope_sku_group_id handled separately via group membership
+    if adj.get('scope_sku_group_id'):
+        # Group membership resolution is not implemented yet. Fail CLOSED:
+        # a group-scoped adjustment must never silently apply to every SKU.
+        print(f"[playbook] WARNING: adjustment {adj.get('id')} is scoped by sku_group_id "
+              f"which is not supported yet — adjustment skipped for sku {sku_id}", flush=True)
+        return False
     return True
 
 

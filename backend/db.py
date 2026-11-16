@@ -10,8 +10,13 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 def init_pool():
     global _pool
     dsn = os.environ.get("SUPABASE_DB_URL", "NOT SET")
-    # Log enough to debug without exposing the full password
-    safe = dsn[:30] + "..." + dsn[-30:] if len(dsn) > 60 else dsn
+    # Log only the host/port — any raw slice of the DSN can include password chars
+    try:
+        from urllib.parse import urlsplit
+        p = urlsplit(dsn)
+        safe = f"{p.hostname}:{p.port or 5432}/{(p.path or '').lstrip('/')}"
+    except Exception:
+        safe = "(unparseable DSN)"
     print(f"[DB] Connecting to: {safe}", flush=True)
     print(f"[DB] Using pooler: {'pooler.supabase.com' in dsn}", flush=True)
     extras = "?sslmode=require" if "pooler.supabase.com" in dsn and "sslmode" not in dsn else ""

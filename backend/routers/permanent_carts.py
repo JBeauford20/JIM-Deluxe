@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
+from routers.concurrency import log_change, claim_blocker
 
 router = APIRouter()
 
@@ -183,6 +184,9 @@ def assign_to_order(template_id: str, order_id: str,
         order = cur.fetchone()
         if not order:
             raise HTTPException(404, "Order not found")
+        holder = claim_blocker(cur, order_id, user.get("email") if isinstance(user, dict) else None)
+        if holder:
+            raise HTTPException(409, f"{holder} is editing this store — refresh before editing.")
         cur.execute("SELECT batch_id FROM recommendation_runs WHERE id = %s", (order["run_id"],))
         br = cur.fetchone()
         batch_id = br["batch_id"] if br else None
@@ -207,19 +211,17 @@ def assign_to_order(template_id: str, order_id: str,
         skus = list(req_by_sku)
 
         # Lock the availability rows for every SKU this cart draws, then compute remaining
-        # per Aster line = units_available − ledger allocations − live reservations.
+        # per Aster line = units_available − ledger allocations. The ledger is the single
+        # source of truth; the old parallel allocation_reservations term has been retired.
         cur.execute("SELECT id FROM availability_lines WHERE batch_id = %s AND sku_id = ANY(%s) FOR UPDATE",
                     (batch_id, skus))
         cur.execute("""
             WITH alloc AS (SELECT availability_line_id, SUM(qty) q
-                           FROM order_line_allocations WHERE batch_id = %s GROUP BY 1),
-                 res AS (SELECT availability_line_id, SUM(reserved_qty) q
-                         FROM allocation_reservations WHERE reservation_type <> 'released' GROUP BY 1)
+                           FROM order_line_allocations WHERE batch_id = %s GROUP BY 1)
             SELECT al.id AS line_id, al.sku_id,
-                   (al.units_available - COALESCE(alloc.q,0) - COALESCE(res.q,0)) AS remaining
+                   (al.units_available - COALESCE(alloc.q,0)) AS remaining
             FROM availability_lines al
             LEFT JOIN alloc ON alloc.availability_line_id = al.id
-            LEFT JOIN res   ON res.availability_line_id = al.id
             WHERE al.batch_id = %s AND al.sku_id = ANY(%s)
         """, (batch_id, batch_id, skus))
         pool: dict = defaultdict(list)
@@ -318,6 +320,9 @@ def assign_to_order(template_id: str, order_id: str,
             WHERE id = %s
         """, (order_id, order_id, order_id))
 
+        log_change(cur, order["run_id"], "cart", cart_id, "assign_permanent_cart",
+                   user.get("email") if isinstance(user, dict) else None)
+
     return {"assigned": True, "cart_id": cart_id, "cart_key": f"PC-{cart_num:04d}",
             "units": total_units, "shelves": positions}
 
@@ -368,19 +373,16 @@ def assign_bulk(template_id: str, req: BulkAssignRequest,
         skus = list(per_cart_by_sku)
         N = len(orders)
 
-        # Lock availability + remaining per Aster line (ledger + live reservations).
+        # Lock availability + remaining per Aster line (ledger only — reservations retired).
         cur.execute("SELECT id FROM availability_lines WHERE batch_id = %s AND sku_id = ANY(%s) FOR UPDATE",
                     (batch_id, skus))
         cur.execute("""
             WITH alloc AS (SELECT availability_line_id, SUM(qty) q FROM order_line_allocations
-                           WHERE batch_id = %s GROUP BY 1),
-                 res AS (SELECT availability_line_id, SUM(reserved_qty) q FROM allocation_reservations
-                         WHERE reservation_type <> 'released' GROUP BY 1)
+                           WHERE batch_id = %s GROUP BY 1)
             SELECT al.id AS line_id, al.sku_id,
-                   (al.units_available - COALESCE(alloc.q,0) - COALESCE(res.q,0)) AS remaining
+                   (al.units_available - COALESCE(alloc.q,0)) AS remaining
             FROM availability_lines al
             LEFT JOIN alloc ON alloc.availability_line_id = al.id
-            LEFT JOIN res ON res.availability_line_id = al.id
             WHERE al.batch_id = %s AND al.sku_id = ANY(%s)
         """, (batch_id, batch_id, skus))
         pool: dict = defaultdict(list)
@@ -465,6 +467,8 @@ def assign_bulk(template_id: str, req: BulkAssignRequest,
             total_carts=(SELECT COUNT(*) FROM order_carts oc JOIN orders o ON o.id=oc.order_id WHERE o.run_id=%s),
             total_units=(SELECT COALESCE(SUM(total_units),0) FROM orders WHERE run_id=%s) WHERE id=%s""",
             (run_id, run_id, run_id))
+        log_change(cur, run_id, "run", str(run_id), "assign_bulk",
+                   user.get("email") if isinstance(user, dict) else None)
     return {"assigned": N, "cart": tmpl["name"], "units_each": sum(per_cart_by_sku.values()),
             "units_total": total_units_all}
 

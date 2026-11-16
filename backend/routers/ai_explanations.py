@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from db import get_db, cursor
-from routers.auth import get_current_user
+from routers.auth import get_current_user, require_role
 
 router = APIRouter()
 
@@ -266,7 +266,7 @@ TOP SKUs SENT:
 
 
 @router.post("/orders/{order_id}/explain")
-def explain_order(order_id: str, user=Depends(get_current_user)):
+def explain_order(order_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
     with get_db() as conn:
         cur = cursor(conn)
 
@@ -368,7 +368,7 @@ TOP 5 STORES BY PRIORITY: {top_str}"""
 
 
 @router.post("/runs/{run_id}/summarize")
-def summarize_run(run_id: str, user=Depends(get_current_user)):
+def summarize_run(run_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
     with get_db() as conn:
         cur = cursor(conn)
 
@@ -490,12 +490,15 @@ def _build_audit_batch(stores: list) -> str:
 
 
 @router.post("/runs/{run_id}/audit")
-def audit_run(run_id: str, force: bool = False, user=Depends(get_current_user)):
+def audit_run(run_id: str, force: bool = False, user=Depends(require_role("order_writer", "manager", "admin"))):
     """
     Batch-audit every order in a run using Claude Haiku.
     Results are cached in order_audits — pass ?force=true to re-run.
     Returns flags grouped by severity: FLAG > WARNING > INFO.
     """
+    # force=true deletes and rewrites order_audits and re-spends AI calls — manager+ only
+    if force and user["role"] not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="force=true requires manager or admin")
     with get_db() as conn:
         cur = cursor(conn)
 
@@ -623,7 +626,7 @@ class AskRequest(BaseModel):
 
 
 @router.post("/ask")
-def ask(body: AskRequest, user=Depends(get_current_user)):
+def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "admin"))):
     """
     Answer a free-text question about a run or a specific store's order.
     Pulls full context from DB before calling Claude Sonnet.

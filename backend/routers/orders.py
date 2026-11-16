@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
+from routers.concurrency import log_change, bump_activity
 
 router = APIRouter()
 
@@ -32,10 +33,11 @@ def create_manual_run(req: ManualRunRequest, user=Depends(require_role("order_wr
         cur.execute("""
             INSERT INTO recommendation_runs
                 (batch_id, shipping_week, stores_scored, stores_served, total_carts, total_units,
-                 inventory_clearance, status, notes)
-            VALUES (%s, %s, 0, 0, 0, 0, 0, 'draft', 'manual')
+                 inventory_clearance, status, notes, created_by, last_activity_at)
+            VALUES (%s, %s, 0, 0, 0, 0, 0, 'draft', 'manual', %s, now())
             RETURNING id
-        """, (req.batch_id, req.shipping_week))
+        """, (req.batch_id, req.shipping_week,
+              user.get("email") if isinstance(user, dict) else None))
         run_id = cur.fetchone()["id"]
     return {"run_id": run_id, "batch_id": req.batch_id, "shipping_week": req.shipping_week, "manual": True}
 
@@ -67,6 +69,8 @@ def add_stores_to_run(run_id: str, req: AddStoresRequest,
             """, (str(uuid.uuid4()), run_id, sid))
             added += 1
         cur.execute("UPDATE recommendation_runs SET stores_served = (SELECT COUNT(*) FROM orders WHERE run_id = %s) WHERE id = %s", (run_id, run_id))
+        log_change(cur, run_id, "run", run_id, "add_stores",
+                   user.get("email") if isinstance(user, dict) else None)
     return {"added": added, "skipped_existing": len(existing),
             "not_found": [s for s in ids if s not in valid]}
 
@@ -86,6 +90,8 @@ def remove_order(order_id: str, user=Depends(require_role("order_writer", "manag
         cur.execute("DELETE FROM order_lines WHERE order_id = %s", (order_id,))
         cur.execute("DELETE FROM orders WHERE id = %s", (order_id,))
         cur.execute("UPDATE recommendation_runs SET stores_served = (SELECT COUNT(*) FROM orders WHERE run_id = %s) WHERE id = %s", (run_id, run_id))
+        log_change(cur, run_id, "run", run_id, "remove_store",
+                   user.get("email") if isinstance(user, dict) else None)
     return {"removed": True}
 
 @router.get("/history")
@@ -220,6 +226,10 @@ def approve_order(
             WHERE order_id = %s AND reservation_type = 'draft'
         """, (order_id,))
 
+        cur.execute("SELECT run_id FROM orders WHERE id = %s", (order_id,))
+        _r = cur.fetchone()
+        log_change(cur, _r["run_id"] if _r else None, "order", order_id, "approve",
+                   user.get("email") if isinstance(user, dict) else None)
         return {"approved": True}
 
 @router.get("/runs/{run_id}/loads")

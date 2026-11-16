@@ -244,22 +244,22 @@ def consolidate_configs(all_orders, max_configs=MAX_CART_CONFIGS):
     active = dict(sig_count)          # signature → total carts (mutable)
     canonical = {s: s for s in active}  # signature → its current canonical sig
 
-    # Greedy merge: rarest → nearest neighbour
+    # Greedy merge: rarest → nearest neighbour (composite keys make ties deterministic)
     while len(active) > max_configs:
-        rarest = min(active, key=lambda s: active[s])
+        rarest = min(active, key=lambda s: (active[s], s))
         others = [s for s in active if s != rarest]
         if not others:
             break
-        best = max(others, key=lambda s: jaccard(rarest, s))
+        best = max(others, key=lambda s: (jaccard(rarest, s), s))
         active[best] += active.pop(rarest)
         for s in list(canonical):
             if canonical[s] == rarest:
                 canonical[s] = best
 
-    # Assign CC codes, most common first
+    # Assign CC codes, most common first (signature as tie-break)
     cc_codes = {
         sig: f"CC{i+1}"
-        for i, sig in enumerate(sorted(active, key=lambda s: -active[s]))
+        for i, sig in enumerate(sorted(active, key=lambda s: (-active[s], s)))
     }
 
     config_codes = {
@@ -516,6 +516,23 @@ def determine_kit_type(sku_id, units, committed, avail_meta):
 # ── Main engine ───────────────────────────────────────────────
 
 def run(batch_id, shipping_week=None, preview=False, verbose=True):
+    """Public entry — guarantees the DB connection closes even when a run fails,
+    so repeated failures can't exhaust the Supabase connection pool."""
+    conn = get_conn()
+    try:
+        return _run(conn, batch_id, shipping_week, preview, verbose)
+    finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
 
     log = print if verbose else lambda *a, **k: None
 
@@ -531,7 +548,6 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     log(f"Weights: vel={W_VELOCITY} rec={W_RECENCY} pace={W_PACE} brd={W_BREADTH}")
     log(f"{'='*62}\n")
 
-    conn = get_conn()
     cur  = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     # ── LOAD DATA ─────────────────────────────────────────────
@@ -543,6 +559,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         FROM availability_lines al
         WHERE al.batch_id = %s
         GROUP BY al.sku_id, al.code_level, al.hard_good_type, al.kit_selection_required
+        ORDER BY al.sku_id
     """, (batch_id,))
     avail_rows = cur.fetchall()
     if not avail_rows:
@@ -569,6 +586,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                merchant, region, state, market_number
         FROM stores
         WHERE dynamic_velocity_tier IS NOT NULL AND active = true
+        ORDER BY store_id
     """)
     store_rows  = {r['store_id']: dict(r) for r in cur.fetchall()}
     vel_scores  = [float(r['dynamic_velocity_score'])
@@ -842,6 +860,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         JOIN sku_packing_profiles spp ON spp.profile_id = sc.profile_id
         JOIN packing_profiles pp ON pp.id = sc.profile_id
         WHERE sc.cart_type_id = 'cc' AND sc.approved = true
+        ORDER BY spp.is_default DESC, sc.profile_id
     """)
     shelf_configs = {}
     sku_profiles  = {}
@@ -920,7 +939,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             'is_overshipped':  clk.get('is_overshipped', False),
         }
 
-    ranked_stores = sorted(store_scores.items(), key=lambda x: -x[1]['priority'])
+    ranked_stores = sorted(store_scores.items(), key=lambda x: (-x[1]['priority'], x[0]))
     log(f"  {len(ranked_stores):,} stores scored")
 
     # ── PRE-COMPUTE TIER SKU TEMPLATES ────────────────────────
@@ -996,7 +1015,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
         ranked_skus = sorted(
             ((s, sc) for s, sc in sku_scores.items()
              if not playbook.is_excluded(store_id, s)),
-            key=lambda x: -x[1]
+            key=lambda x: (-x[1], x[0])
         )
         if not ranked_skus:
             continue
@@ -1060,9 +1079,9 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     # to the correct region. — Josh, Nov 2026
     REGION_MAP = {'North': 'Northern', 'South': 'Southern', 'West': 'Western', 'ALL': None}
     cur.execute("""
-        SELECT p.id, p.name, p.regions, array_agg(ps.sku_id) AS skus
+        SELECT p.id, p.name, p.regions, array_agg(ps.sku_id ORDER BY ps.sku_id) AS skus
         FROM promotions p JOIN promotion_skus ps ON ps.promotion_id = p.id
-        WHERE p.is_active = true GROUP BY p.id
+        WHERE p.is_active = true GROUP BY p.id ORDER BY p.id
     """)
     active_promos = cur.fetchall()
     if active_promos:
@@ -1106,7 +1125,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
             if promo_room <= 0:
                 continue
             promo_ranked = sorted(((s, inventory.get(s, 0)) for s in psku if inventory.get(s, 0) > 0),
-                                  key=lambda x: -x[1])
+                                  key=lambda x: (-x[1], x[0]))
             if not promo_ranked:
                 break
             carts, committed = build_carts_for_store(
@@ -1198,9 +1217,28 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
                     continue
                 units_to_add = trays_to_add * upt
 
+                # Respect the physical cart ceiling — the main fill loop checks this,
+                # the rescue pass must too (3×29" 17cm shelves + a tall rescue = unbuildable).
+                cart_height = sum(
+                    shelf_configs.get(pid, {}).get('clear_height_in', MIN_SHELF_CLEAR_IN)
+                    for _, _, _, _, _, pid in last_cart['contents']
+                )
+                if cart_height + cfg.get('clear_height_in', MIN_SHELF_CLEAR_IN) > CART_CEILING_IN:
+                    continue
+
+                # Rebuild the store's jute/ceramic counters from its existing carts so the
+                # rescue shelf continues the 50/50 split instead of always starting at jute.
+                store_kit_counts = defaultdict(int)
+                for c in order_data['carts']:
+                    for _, c_sku, _, c_units, c_kit, _ in c['contents']:
+                        if c_kit == 'jute_kit':
+                            store_kit_counts[f'{c_sku}_jute'] += c_units
+                        elif c_kit == 'ceramic_kit':
+                            store_kit_counts[f'{c_sku}_ceramic'] += c_units
+
                 new_shelf_pos = last_cart['shelves_used'] + 1
                 kit = determine_kit_type(sku_id, units_to_add,
-                                         defaultdict(int), avail_meta)
+                                         store_kit_counts, avail_meta)
                 last_cart['contents'].append(
                     (new_shelf_pos, sku_id, trays_to_add, units_to_add, kit, profile_id)
                 )
@@ -1689,6 +1727,7 @@ def run(batch_id, shipping_week=None, preview=False, verbose=True):
     # Fetch availability line IDs for sku_id → avail_line lookup
     cur.execute("""
         SELECT id, sku_id FROM availability_lines WHERE batch_id = %s
+        ORDER BY sku_id, id
     """, (batch_id,))
     sku_avail_line_map = {r['sku_id']: str(r['id']) for r in cur.fetchall()}
 
