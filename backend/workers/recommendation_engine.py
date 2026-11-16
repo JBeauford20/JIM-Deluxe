@@ -25,17 +25,10 @@ from datetime import date, timedelta
 from collections import defaultdict
 import psycopg2, psycopg2.extras
 
-try:
-    from playbook_engine import PlaybookEngine, load_adjustments
-except ImportError:
-    class PlaybookEngine:
-        def __init__(self, *a, **kw): pass
-        def stage1_priority_bonus(self, *a): return 0.0
-        def stage1_cart_target(self, sid, default): return default
-        def stage2_sku_score_modifier(self, sid, sku_id, vel, avail): return vel, avail
-        def is_excluded(self, sid, sku_id): return False
-        def print_summary(self, log=print): log("  Playbook: not available (import error)")
-    def load_adjustments(cur, week): return []
+# Decision 5A (2026-11-16): a playbook import failure HARD-FAILS the run. The old
+# stub fallback silently ignored every active scenario directive and completed
+# "successfully" — a plan that quietly skipped "exclude West" is worse than no plan.
+from playbook_engine import PlaybookEngine, load_adjustments
 
 BASE = Path(__file__).parent
 from db_conn import get_conn
@@ -300,7 +293,8 @@ def _distribute_units_across_lines(total, lines):
 def build_carts_for_store(store_id, ranked_skus, inventory,
                            shelf_configs, sku_profiles,
                            target_carts, avail_meta,
-                           run_profiles_allocated=None, is_promo=False):
+                           run_profiles_allocated=None, is_promo=False,
+                           cap_groups=None):
     """
     Builds carts shelf-by-shelf, filling each physical shelf with varieties
     from the same profile group (e.g. a 12cm shelf holds Fittonia + Calathea
@@ -393,11 +387,25 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             trays_left      = tps
             shelf_items     = []
 
+            upc_cap = cfg.get('units_per_cart') or 0
             for sku_id, _ in profile_skus[best_pid]:
                 if trays_left <= 0:
                     break
                 avail_net = inventory.get(sku_id, 0) - committed[sku_id]
                 if avail_net <= 0:
+                    continue
+                # Decision 4A: allocation caps in CARTS, shared across the directive's
+                # scope. remaining_carts is a shared budget mutated across every build
+                # pass for this store; convert to this profile's unit equivalent.
+                # (Dropped under-filled carts don't refund the budget — acceptably strict.)
+                cap_hit = False
+                if cap_groups and upc_cap:
+                    allow_carts = min((g['remaining_carts'] for g in cap_groups
+                                       if sku_id in g['skus']), default=None)
+                    if allow_carts is not None:
+                        avail_net = min(avail_net, int(allow_carts * upc_cap))
+                        cap_hit = avail_net <= 0
+                if cap_hit:
                     continue
                 # Whole trays only — no partial trays
                 trays_to_take = min(trays_left, avail_net // upt)
@@ -408,6 +416,10 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
                 shelf_items.append((shelf_pos, sku_id, trays_to_take, units_to_take, kit, best_pid))
                 committed[sku_id] += units_to_take
                 trays_left        -= trays_to_take
+                if cap_groups and upc_cap:
+                    for g in cap_groups:
+                        if sku_id in g['skus']:
+                            g['remaining_carts'] -= units_to_take / upc_cap
 
             if not shelf_items:
                 shelf_pos -= 1
@@ -550,6 +562,15 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
 
     cur  = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
+    # Decision 2A (2026-11-16): anchor every analytics window (pace, recency,
+    # store-clock scans) to the freshest sale date in the data, not the wall
+    # clock — a Friday re-run reproduces Tuesday's scores. shipping_week and
+    # physical in-transit checks stay on the real calendar.
+    cur.execute("SELECT MAX(sale_date) AS mx FROM sales")
+    _mx = cur.fetchone()
+    anchor = _mx['mx'] if _mx and _mx['mx'] else today
+    log(f"Time anchor (sales cutoff): {anchor}")
+
     # ── LOAD DATA ─────────────────────────────────────────────
 
     log("Loading availability batch...")
@@ -641,13 +662,13 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         WITH del_w AS (
             SELECT store_id, SUM(units_delivered) AS delivered
             FROM deliveries
-            WHERE delivery_date >= CURRENT_DATE - INTERVAL '42 days'
+            WHERE delivery_date >= %s
             GROUP BY store_id
         ),
         sal_w AS (
             SELECT store_id, SUM(units_sold) AS sold
             FROM sales
-            WHERE sale_date >= CURRENT_DATE - INTERVAL '42 days'
+            WHERE sale_date >= %s
             GROUP BY store_id
         )
         SELECT d.store_id,
@@ -656,7 +677,7 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         FROM del_w d
         LEFT JOIN sal_w s ON s.store_id = d.store_id
         WHERE d.delivered > 0
-    """)
+    """, (anchor - timedelta(days=PACE_WINDOW_DAYS), anchor - timedelta(days=PACE_WINDOW_DAYS)))
     store_pace = {}
     for r in cur.fetchall():
         store_pace[r['store_id']] = min(1.0, r['sold'] / r['delivered'])
@@ -672,15 +693,16 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         SELECT s.store_id,
                SUM(s.units_sold * COALESCE(sk.wholesale_price_whl, %s))
                    / %s AS scans_wk_long,
-               SUM(CASE WHEN s.sale_date >= CURRENT_DATE - INTERVAL '42 days'
+               SUM(CASE WHEN s.sale_date >= %s
                         THEN s.units_sold * COALESCE(sk.wholesale_price_whl, %s) END)
                    / 6.0 AS scans_wk_6w
         FROM sales s
         JOIN skus sk ON sk.sku_id = s.sku_id
-        WHERE s.sale_date >= CURRENT_DATE - INTERVAL '%s days'
+        WHERE s.sale_date >= %s
         GROUP BY s.store_id
     """, (WHOLESALE_PRICE_FALLBACK, CLOCK_LONG_WINDOW_DAYS / 7.0,
-          WHOLESALE_PRICE_FALLBACK, CLOCK_LONG_WINDOW_DAYS))
+          anchor - timedelta(days=42), WHOLESALE_PRICE_FALLBACK,
+          anchor - timedelta(days=CLOCK_LONG_WINDOW_DAYS)))
     store_scan_whl = {r['store_id']: (float(r['scans_wk_long'] or 0),
                                       float(r['scans_wk_6w'] or 0))
                      for r in cur.fetchall()}
@@ -791,7 +813,7 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         else:
             del_whl  = last_delivery_whl.get(store_id, 0.0)
             last_del = raw_last_del
-        days_ago = (today - last_del).days if last_del else None
+        days_ago = (anchor - last_del).days if last_del else None
         weeks_ago = (days_ago / 7.0) if days_ago is not None else None
 
         s_weeks, s_grade = static_clock(scan_long)
@@ -883,6 +905,18 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
     playbook    = PlaybookEngine(adjustments, store_rows, sku_family)
     playbook.print_summary(log)
 
+    # Decision 4A (2026-11-16): allocation caps in CARTS. One mutable budget per
+    # store+directive, shared across every build pass (main, floors, promo) so the
+    # cap binds on the store's total, not per pass.
+    _store_cap_state = {}
+    def cap_state_for(sid):
+        if sid not in _store_cap_state:
+            _store_cap_state[sid] = [
+                {'skus': d['skus'], 'remaining_carts': float(d['carts']), 'label': d['label']}
+                for d in playbook.cap_directives(sid)
+            ] or None
+        return _store_cap_state[sid]
+
     # ── STAGE 1: SCORE STORES ─────────────────────────────────
     log("\nStage 1: Scoring stores (velocity + recency + pace + breadth)...")
     store_scores = {}
@@ -892,7 +926,7 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         vel_norm = normalize(raw_vel, vel_min, vel_max)
 
         last_del  = last_delivery.get(store_id)
-        days_ago  = (today - last_del).days if last_del else None
+        days_ago  = (anchor - last_del).days if last_del else None
         rec_score = recency_score(days_ago)
 
         # Pace: sell-through rate — neutral (0.5) when no delivery history
@@ -1030,7 +1064,7 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         carts, committed = build_carts_for_store(
             store_id, ranked_skus, inventory,
             shelf_configs, sku_profiles, target_carts, avail_meta,
-            run_profiles_allocated,
+            run_profiles_allocated, cap_groups=cap_state_for(store_id),
         )
         if not carts:
             continue
@@ -1071,6 +1105,64 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
     allocated_units = sum(o['total_units'] for o in all_orders.values())
     clearance = (allocated_units / total_available * 100) if total_available else 0
     log(f"  {allocated_units:,} / {total_available:,} units ({clearance:.1f}% clearance)")
+
+    # ── STAGE 3.45: ALLOCATION FLOORS (decision 4A, carts semantics) ──────────
+    # "Floor N carts of X" guarantees a served store N carts-equivalent of the
+    # directive's scope. Applies to stores already in the plan (floors never
+    # bypass the DUE gate); deficit carts are built from in-scope SKUs only,
+    # like the promo pass, and respect the per-store cart ceiling and any caps.
+    _floor_added = 0
+    for store_id in list(all_orders.keys()):
+        for d in playbook.floor_directives(store_id):
+            order_data = all_orders[store_id]
+            # carts-equivalent already committed, from actual cart contents
+            scope_units = defaultdict(int)
+            for c in order_data['carts']:
+                for _, c_sku, _, c_units, _, _ in c['contents']:
+                    if c_sku in d['skus']:
+                        scope_units[c_sku] += c_units
+            carts_equiv = 0.0
+            for c_sku, u in scope_units.items():
+                pid = sku_profiles.get(c_sku)
+                upc = shelf_configs.get(pid, {}).get('units_per_cart') or 0
+                if upc:
+                    carts_equiv += u / upc
+            deficit = d['carts'] - int(carts_equiv)
+            if deficit <= 0:
+                continue
+            room = MAX_CARTS_PER_STORE - len(order_data['carts'])
+            n_new = min(deficit, room)
+            if n_new <= 0:
+                log(f"  Floor '{d['label']}' store {store_id}: at cart ceiling, "
+                    f"{deficit} cart(s) short")
+                continue
+            scope_ranked = sorted(
+                ((s, inventory.get(s, 0)) for s in d['skus'] if inventory.get(s, 0) > 0),
+                key=lambda x: (-x[1], x[0]))
+            if not scope_ranked:
+                log(f"  Floor '{d['label']}' store {store_id}: no in-scope inventory left")
+                continue
+            f_carts, f_committed = build_carts_for_store(
+                store_id, scope_ranked, inventory, shelf_configs, sku_profiles,
+                n_new, avail_meta, run_profiles_allocated, is_promo=True,
+                cap_groups=cap_state_for(store_id))
+            if not f_carts:
+                continue
+            for sku_id, units in f_committed.items():
+                if '_jute' not in str(sku_id) and '_ceramic' not in str(sku_id):
+                    inventory[sku_id] = max(0, inventory.get(sku_id, 0) - units)
+            for c in f_carts:
+                for sp, sku_id, trays, units, kit, pid in c['contents']:
+                    run_profiles_allocated[pid] += units
+            ex = order_data['carts']; base = len(ex)
+            for i, c in enumerate(f_carts, 1):
+                c['cart_number'] = base + i
+            ex.extend(f_carts)
+            order_data['total_carts'] = len(ex)
+            order_data['total_units'] = sum(c['total_units'] for c in ex)
+            _floor_added += len(f_carts)
+    if _floor_added:
+        log(f"\nStage 3.45: Allocation floors added {_floor_added} cart(s)")
 
     # ── STAGE 3.4: PROMO CLEARANCE ────────────────────────────
     # For each ACTIVE promotion, drain its SKUs to in-scope stores that haven't gotten
@@ -1131,7 +1223,7 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
             carts, committed = build_carts_for_store(
                 store_id, promo_ranked, inventory, shelf_configs, sku_profiles,
                 min(PROMO_CARTS_PER_STORE, promo_room), avail_meta, run_profiles_allocated,
-                is_promo=True)
+                is_promo=True, cap_groups=cap_state_for(store_id))
             if not carts:
                 continue
             for sku_id, units in committed.items():
@@ -1374,6 +1466,16 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
     #   varieties: [(sku_id, avail_line_id, trays, units)]}}, cart_count, store_count, total_units}}
     template_map = {}  # config_code → template data
 
+    # Decision 3C (2026-11-16): consolidation relabels carts WITHOUT re-packing, so
+    # carts under one CC code are similar, not identical. Flag each cart that matches
+    # its CC template exactly — the warehouse can pre-build those blind; the rest get
+    # picked from their cart sheet. Kit type included: jute vs ceramic changes the build.
+    def _exact_sig(cart):
+        return tuple(sorted(
+            (sku_id, pid, kit, trays, units)
+            for _, sku_id, trays, units, kit, pid in cart['contents']
+        ))
+
     for store_id, order_data in all_orders.items():
         for cart_idx, cart in enumerate(order_data['carts']):
             cc = cart_config_codes.get((store_id, cart_idx), 'CC1')
@@ -1411,8 +1513,13 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
                         'unit_count': unit_count,
                     })
                 t['shelves'] = shelf_contents
+                t['_exact_sig'] = _exact_sig(cart)
+            cart['is_template_exact'] = (_exact_sig(cart) == t.get('_exact_sig'))
 
-    log(f"  {len(template_map)} unique CC templates built")
+    _exact_n = sum(1 for o in all_orders.values() for c in o['carts'] if c.get('is_template_exact'))
+    _all_n   = sum(len(o['carts']) for o in all_orders.values())
+    log(f"  {len(template_map)} unique CC templates built "
+        f"({_exact_n}/{_all_n} carts match their template exactly)")
     for cc, t in sorted(template_map.items()):
         log(f"  {cc}: {t['cart_count']} carts, {len(t['store_ids'])} stores, "
             f"{t['total_units']} units, {len(t['shelves'])} shelves")
@@ -1458,10 +1565,19 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         current_load_carts    = 0
         current_load_stores   = []
 
+    # Decision 1A (2026-11-16): a load also closes when the merchant or region
+    # changes, so no truck mixes merchants/regions and every load's merchant/
+    # region stamp (taken from its first store) is true. Trade-off accepted:
+    # more partially-filled loads at each boundary.
+    prev_boundary = None
     for store_id in sorted_for_loads:
+        meta = all_orders[store_id]['score_meta']
+        boundary = (meta['merchant'], meta['region'])
         store_carts = all_orders[store_id]['total_carts']
-        if current_load_carts + store_carts > CARTS_PER_TRUCK:
+        if current_load_stores and (boundary != prev_boundary
+                or current_load_carts + store_carts > CARTS_PER_TRUCK):
             flush_load()
+        prev_boundary = boundary
         current_load_carts += store_carts
         current_load_stores.append(store_id)
     flush_load()
@@ -1515,15 +1631,16 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
             (batch_id, shipping_week, stores_scored, stores_served,
              total_carts, total_units, inventory_clearance,
              weight_velocity, weight_recency, weight_breadth, weight_pace,
-             weight_sku_velocity, weight_sku_avail, status)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft')
+             weight_sku_velocity, weight_sku_avail, status, sales_cutoff_date)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft',%s)
         RETURNING id
     """, (
         batch_id, shipping_week,
         len(ranked_stores), len(all_orders),
         sum(o['total_carts'] for o in all_orders.values()), allocated_units,
         round(clearance, 2),
-        W_VELOCITY, W_RECENCY, W_BREADTH, W_PACE, W_SKU_VEL, W_SKU_AVAIL
+        W_VELOCITY, W_RECENCY, W_BREADTH, W_PACE, W_SKU_VEL, W_SKU_AVAIL,
+        anchor  # decision 2A: the data cutoff this run was anchored to
     ))
     run_id = cur.fetchone()['id']
     log(f"  Run ID: {run_id}")
@@ -1624,7 +1741,8 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
                 cart['total_units'],
                 cart['shelves_used'] >= eff_max,
                 cart['is_flagged'], cart.get('flag_reason'),
-                eff_max, cart_key, config_code
+                eff_max, cart_key, config_code,
+                cart.get('is_template_exact', False)
             ))
 
             for (shelf_pos, sku_id, tray_count, unit_count, kit_type, profile_id) \
@@ -1679,8 +1797,8 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
             (id, order_id, store_id, cart_number, cart_type_id,
              shelves_used, shelves_capacity, total_units,
              is_full, is_flagged, flag_reason, effective_max_shelves,
-             cart_key, config_code)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             cart_key, config_code, is_template_exact)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, cart_rows, page_size=500)
 
     psycopg2.extras.execute_batch(cur, """

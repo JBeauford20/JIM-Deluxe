@@ -89,6 +89,11 @@ class PlaybookEngine:
         self._sku_push           = defaultdict(float)    # sku_id → extra avail weight
         self._allocation_floors  = defaultdict(lambda: defaultdict(int))   # store_id → sku_id → min_carts
         self._allocation_caps    = defaultdict(lambda: defaultdict(int))   # store_id → sku_id → max_carts
+        # Decision 4A (2026-11-16): floors/caps are measured in CARTS and bind at the
+        # DIRECTIVE level — "floor 2 carts of H2O" means 2 carts of the whole scope,
+        # not 2 carts of every SKU in it. These lists are what the engine consumes.
+        self._floor_directives   = defaultdict(list)   # store_id → [{'skus', 'carts', 'label'}]
+        self._cap_directives     = defaultdict(list)   # store_id → [{'skus', 'carts', 'label'}]
         self._exclusions         = defaultdict(set)      # store_id → {sku_id, ...}
 
         self._summary = []  # human-readable summary of what was applied
@@ -146,6 +151,11 @@ class PlaybookEngine:
                     self._allocation_floors[sid][sku_id] = max(
                         self._allocation_floors[sid][sku_id], int(val)
                     )
+                if skus_in_scope:
+                    self._floor_directives[sid].append({
+                        'skus': frozenset(skus_in_scope), 'carts': int(val),
+                        'label': adj.get('label') or 'floor',
+                    })
             self._summary.append(
                 f"Floor {int(val)} carts of {adj['scope_family'] or 'SKU'} "
                 f"→ {n_stores} stores ({adj['label']})"
@@ -156,6 +166,11 @@ class PlaybookEngine:
             for sid in stores:
                 for sku_id in skus_in_scope:
                     self._allocation_caps[sid][sku_id] = int(val)
+                if skus_in_scope:
+                    self._cap_directives[sid].append({
+                        'skus': frozenset(skus_in_scope), 'carts': int(val),
+                        'label': adj.get('label') or 'cap',
+                    })
             self._summary.append(
                 f"Cap {int(val)} carts of {adj['scope_family'] or 'SKU'} "
                 f"→ {n_stores} stores ({adj['label']})"
@@ -211,6 +226,16 @@ class PlaybookEngine:
     def allocation_cap(self, store_id: int, sku_id: int) -> int | None:
         """Maximum carts of this SKU for this store (None = no cap)."""
         return self._allocation_caps[store_id].get(sku_id)
+
+    def floor_directives(self, store_id: int) -> list:
+        """Directive-level floors for this store: [{'skus', 'carts', 'label'}].
+        Carts semantics (decision 4A): minimum carts of the whole scope."""
+        return self._floor_directives.get(store_id, [])
+
+    def cap_directives(self, store_id: int) -> list:
+        """Directive-level caps for this store: [{'skus', 'carts', 'label'}].
+        Carts semantics (decision 4A): maximum carts of the whole scope."""
+        return self._cap_directives.get(store_id, [])
 
     def print_summary(self, log=print):
         if not self.adjustments:

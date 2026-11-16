@@ -188,6 +188,25 @@ except ImportError:
     pass
 
 
+# Decision 6A (2026-11-16): per-user daily AI budgets. Checked at the moment an
+# actual AI call is about to happen (cached responses don't count). A 429 raise
+# rolls the increment back with the request transaction, so the count parks at
+# the limit instead of growing.
+AI_DAILY_LIMITS = {"explain": 50, "audit": 5, "ask": 25, "summarize": 25}
+
+def _check_ai_budget(cur, user, kind: str):
+    limit = AI_DAILY_LIMITS[kind]
+    cur.execute("""
+        INSERT INTO ai_usage (user_email, day, kind, count)
+        VALUES (%s, CURRENT_DATE, %s, 1)
+        ON CONFLICT (user_email, day, kind) DO UPDATE SET count = ai_usage.count + 1
+        RETURNING count
+    """, ((user.get("email") if isinstance(user, dict) else None) or "unknown", kind))
+    n = cur.fetchone()["count"]
+    if n > limit:
+        raise HTTPException(429, f"Daily AI limit reached for {kind} ({limit}/day). Resets at midnight UTC.")
+
+
 def _client():
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
@@ -303,6 +322,8 @@ def explain_order(order_id: str, user=Depends(require_role("order_writer", "mana
             FROM order_carts WHERE order_id = %s ORDER BY cart_number
         """, (order_id,))
         carts = cur.fetchall()
+
+        _check_ai_budget(cur, user, "explain")  # cached path returned above — this is a real AI call
 
     prompt = _build_store_prompt(order, lines, carts)
     explanation = _call(
@@ -428,6 +449,8 @@ def summarize_run(run_id: str, user=Depends(require_role("order_writer", "manage
             LIMIT 5
         """, (run_id,))
         top_stores = cur.fetchall()
+
+        _check_ai_budget(cur, user, "summarize")
 
     prompt = _build_run_prompt(run, grades, configs, top_stores,
                                overcount, stores_excluded)
@@ -562,6 +585,8 @@ def audit_run(run_id: str, force: bool = False, user=Depends(require_role("order
         orders_ctx.append(od)
 
     # Batch through Claude Haiku (30 stores per call)
+    with get_db() as _bconn:
+        _check_ai_budget(cursor(_bconn), user, "audit")  # one audit = one budget unit, however many stores
     client = _client()
     all_flags = []
     parse_failures = 0
@@ -775,6 +800,9 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
 
     full_context = "\n".join(ctx)
     user_msg     = f"{full_context}\n\nQUESTION FROM ORDER WRITER: {body.question}"
+
+    with get_db() as _bconn:
+        _check_ai_budget(cursor(_bconn), user, "ask")
 
     answer = _call(
         _client(),

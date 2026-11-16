@@ -65,8 +65,17 @@ def percentile_rank(velocity, sorted_vels):
 
 def run_group_scoring(score_week=None, verbose=True):
     if score_week is None:
-        today = date.today()
-        score_week = today - timedelta(days=today.weekday())
+        # Decision 2A (2026-11-16): default to the Monday of the freshest sale in
+        # the data, not the wall clock (see velocity_engine.py).
+        conn0 = get_conn()
+        try:
+            c0 = conn0.cursor()
+            c0.execute("SELECT MAX(sale_date) FROM sales")
+            _mx = c0.fetchone()[0]
+        finally:
+            conn0.close()
+        base = _mx or date.today()
+        score_week = base - timedelta(days=base.weekday())
 
     log = print if verbose else lambda *a, **k: None
     log(f"\n{'='*60}")
