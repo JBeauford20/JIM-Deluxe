@@ -60,3 +60,8 @@ backend/workers/gen_*.py
 Exec Team Feedback/
 Sales Folders/
 WEEK44LogisticsAnalysis/
+
+# Weekly ingest working dirs (local only)
+backend/ingest/logs/
+backend/ingest/drop/
+backend/ingest/downloads/
