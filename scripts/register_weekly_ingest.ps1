@@ -13,8 +13,10 @@ $script = Join-Path $repo "backend\ingest\weekly_ingest.py"
 $logDir = Join-Path $repo "backend\ingest\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 
-$action = New-ScheduledTaskAction -Execute $python `
-    -Argument "`"$script`"" -WorkingDirectory $repo
+# Runs through the wrapper so a failed ingest launches Claude triage (/jim-ingest-triage)
+$wrapper = Join-Path $repo "scripts\run_weekly_ingest.ps1"
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$wrapper`"" -WorkingDirectory $repo
 
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 6:00AM
 
