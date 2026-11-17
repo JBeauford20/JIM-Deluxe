@@ -37,7 +37,8 @@ def last_week_range(today: date | None = None) -> tuple[date, date]:
     return this_monday - timedelta(days=7), this_monday - timedelta(days=1)
 
 
-def run_report() -> Path:
+def run_report(start: date | None = None, end: date | None = None) -> Path:
+    """Fetch the Sell-Thru CSV for [start, end] (default: prior Mon–Sun week)."""
     env = load_env()
     url, user, pw = env.get("DTS_URL"), env.get("DTS_USERNAME"), env.get("DTS_PASSWORD")
     log = Tee("fetch_dts")
@@ -47,7 +48,8 @@ def run_report() -> Path:
 
     from playwright.sync_api import sync_playwright
 
-    start, end = last_week_range()
+    if start is None or end is None:
+        start, end = last_week_range()
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     log(f"Fetching DTS Sell Thru by Store/SKU (All) for {start} .. {end}")
 
@@ -109,5 +111,9 @@ def run_report() -> Path:
 
 
 if __name__ == "__main__":
-    out = run_report()
+    # optional explicit window: fetch_dts.py 2026-10-05 2026-10-11 (backfills/repairs)
+    if len(sys.argv) == 3:
+        out = run_report(date.fromisoformat(sys.argv[1]), date.fromisoformat(sys.argv[2]))
+    else:
+        out = run_report()
     print(out)

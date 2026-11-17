@@ -215,7 +215,9 @@ def routing_request_export(run_id: str,
 
         cur.execute("""
             UPDATE recommendation_runs
-            SET routing_status = 'submitted', routing_submitted_at = now()
+            SET routing_status = 'submitted', routing_submitted_at = now(),
+                pipeline_status = CASE WHEN engine_version = 'v2'
+                                       THEN 'Sent to Pin Routes' ELSE pipeline_status END
             WHERE id = %s AND routing_status <> 'routed'
         """, (run_id,))
         log_change(cur, run_id, "run", run_id, "routing_request_export",
@@ -437,7 +439,9 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
 
         cur.execute("""
             UPDATE recommendation_runs
-            SET routing_status = 'routed', routing_imported_at = now(), routing_filename = %s
+            SET routing_status = 'routed', routing_imported_at = now(), routing_filename = %s,
+                pipeline_status = CASE WHEN engine_version = 'v2'
+                                       THEN 'Routing Response Received' ELSE pipeline_status END
             WHERE id = %s
         """, (file.filename, run_id))
         log_change(cur, run_id, "run", run_id, "routing_response_import",

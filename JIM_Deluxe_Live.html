@@ -176,7 +176,14 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
           </div>
         </div>
         <div class="d-grid gap-2 mt-2">
-          <button class="btn btn-cta py-2" id="gb" onclick="doGenerate()" disabled><i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders</button>
+          <div class="d-flex align-items-center gap-2" style="font-size:12px">
+            <label for="engSel" style="color:var(--is);white-space:nowrap">Engine</label>
+            <select id="engSel" class="form-select form-select-sm">
+              <option value="v2" selected>IPR v2 — demand-first (AI Replenishment spec)</option>
+              <option value="v1">Legacy v1 — availability-first (fallback)</option>
+            </select>
+          </div>
+          <button class="btn btn-cta py-2" id="gb" onclick="doGenerate()" disabled><i class="bi bi-lightning-fill me-2"></i>Run IPR Engine</button>
           <button class="btn btn-outline-secondary py-2" id="rb" onclick="go('plan',this)" style="display:none"><i class="bi bi-clipboard-check me-2"></i>Review Plan</button>
           <button class="btn btn-outline-secondary py-2" id="eb" onclick="doStartEmpty()" disabled><i class="bi bi-pencil-square me-2"></i>Start Empty Plan</button>
         </div>
@@ -189,6 +196,23 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 <div id="screen-plan" class="screen">
 <div class="container-fluid p-4">
   <div class="row g-3 mb-4" id="ps"><div class="col-12 text-center text-muted py-4"><i class="bi bi-inbox" style="font-size:32px;opacity:.2"></i><p class="mt-2">Generate a plan to see results</p></div></div>
+  <div class="card mb-3" id="iprPanel" style="display:none"><div class="card-body py-3">
+    <div class="d-flex align-items-center gap-2 flex-wrap mb-2">
+      <span style="font-weight:700;color:var(--fd)"><i class="bi bi-cpu me-1"></i>IPR Engine v2 — demand-first</span>
+      <span id="iprStage" style="font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;background:#e7f2ea;color:#2e7d43;border:1px solid #2e7d43"></span>
+      <span id="iprAsOf" class="text-muted" style="font-size:12px"></span>
+    </div>
+    <div class="row g-2" id="iprObj"></div>
+    <div class="row g-2 mt-1" id="iprAlloc"></div>
+    <div id="iprNotes" class="mt-2" style="font-size:12px"></div>
+    <div class="d-flex gap-2 mt-2 flex-wrap">
+      <button class="btn btn-sm btn-outline-danger" onclick="iprShow('block')" id="iprBtnBlock">Blocked</button>
+      <button class="btn btn-sm btn-outline-warning" onclick="iprShow('review_hold')" id="iprBtnHold">Held for DSM review</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="iprShow('allocation_shortfall')" id="iprBtnShort">Supply shortfalls</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="iprShow('validation')" id="iprBtnVal">Data validation</button>
+    </div>
+    <div id="iprList" style="display:none;max-height:340px;overflow:auto;margin-top:10px"></div>
+  </div></div>
   <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
     <input class="form-control form-control-sm" style="max-width:240px" placeholder="Search store, city..." oninput="filterO(this.value)">
     <select class="form-select form-select-sm" style="max-width:90px" onchange="filterT(this.value)"><option value="">All tiers</option><option>AA</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
@@ -760,30 +784,40 @@ function toast(m,t){
 }
 
 /* API */
+function _curTok(){var t=tokGet();return t&&t.access_token||null;}
+// A 401 may only clear the session it was sent with: a stale request issued before
+// sign-in must not wipe the token the user just obtained (it raced on page load).
+function _expire(sentTok){
+  if(_curTok()===sentTok){tokClear();showLogin();}
+  throw new Error('Session expired - please sign in again');
+}
 async function api(path,opts){
   opts=opts||{};
+  var sent=_curTok();
   var h=Object.assign({},DH,authHdr(),opts.headers||{});
   var r=await fetch(B+path,Object.assign({},opts,{headers:h}));
   if(r.status===401){
-    if(await tryRefresh()){h=Object.assign({},DH,authHdr(),opts.headers||{});r=await fetch(B+path,Object.assign({},opts,{headers:h}));}
+    if(await tryRefresh()){sent=_curTok();h=Object.assign({},DH,authHdr(),opts.headers||{});r=await fetch(B+path,Object.assign({},opts,{headers:h}));}
   }
-  if(r.status===401){tokClear();showLogin();throw new Error('Session expired - please sign in again');}
+  if(r.status===401)_expire(sent);
   if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
   return r.json();
 }
 async function apiBlob(path){
+  var sent=_curTok();
   var r=await fetch(B+path,{headers:authHdr()});
-  if(r.status===401){ if(await tryRefresh()){ r=await fetch(B+path,{headers:authHdr()}); } }
-  if(r.status===401){tokClear();showLogin();throw new Error('Session expired - please sign in again');}
+  if(r.status===401){ if(await tryRefresh()){ sent=_curTok(); r=await fetch(B+path,{headers:authHdr()}); } }
+  if(r.status===401)_expire(sent);
   if(!r.ok)throw new Error('Download failed');
   return r.blob();
 }
 // File uploads (multipart) — same 401 refresh-and-retry as api(). Do NOT set
 // Content-Type; the browser adds the multipart boundary. FormData is re-sent on retry.
 async function apiUpload(path,fd){
+  var sent=_curTok();
   var r=await fetch(B+path,{method:'POST',headers:authHdr(),body:fd});
-  if(r.status===401){ if(await tryRefresh()){ r=await fetch(B+path,{method:'POST',headers:authHdr(),body:fd}); } }
-  if(r.status===401){tokClear();showLogin();throw new Error('Session expired - please sign in again');}
+  if(r.status===401){ if(await tryRefresh()){ sent=_curTok(); r=await fetch(B+path,{method:'POST',headers:authHdr(),body:fd}); } }
+  if(r.status===401)_expire(sent);
   if(!r.ok){var e=await r.json().catch(function(){return{detail:r.statusText};});throw new Error(e.detail||r.statusText);}
   return r.json();
 }
@@ -868,19 +902,22 @@ async function doGenerate(){
   var gb=document.getElementById('gb'),gs=document.getElementById('gs');
   gb.disabled=true;gb.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Running engine...';
   gs.style.cssText='display:block;background:#fff3cd;border:1px solid #e8d27c;color:#856404;font-size:13px;padding:.5rem 1rem;border-radius:.375rem;margin-bottom:.75rem';
-  gs.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Scoring 2,000 stores, allocating inventory, building carts...';
+  var eng=(document.getElementById('engSel')||{}).value||'v2';
+  gs.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>'+(eng==='v2'
+    ?'Validating data, forecasting store demand, applying availability, loading trays...'
+    :'Scoring 2,000 stores, allocating inventory, building carts...');
   try{
-    var j=await api('/api/engine/generate',{method:'POST',body:JSON.stringify({batch_id:bId,shipping_week:wk||new Date().toISOString().slice(0,10)})});
+    var j=await api('/api/engine/generate',{method:'POST',body:JSON.stringify({batch_id:bId,shipping_week:wk||new Date().toISOString().slice(0,10),engine:eng})});
     doPoll(j.job_id,gb,gs);
   }catch(e){
-    gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';
+    gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Run IPR Engine';
     gs.style.display='none';toast('Failed: '+e.message,'err');
   }
 }
 
 function doPoll(jid,gb,gs,retries){
   retries=(retries||0)+1;
-  if(retries>60){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';if(gs)gs.style.display='none';toast('Engine timed out','err');return;}
+  if(retries>60){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Run IPR Engine';if(gs)gs.style.display='none';toast('Engine timed out','err');return;}
   setTimeout(async function(){
     try{
       var j=await api('/api/engine/jobs/'+jid);
@@ -900,7 +937,7 @@ function doPoll(jid,gb,gs,retries){
         loadCfgs().catch(function(){});
         loadDraw().catch(function(){});
       }else if(j.status==='failed'){
-        gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';
+        gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Run IPR Engine';
         gs.style.display='none';toast('Engine error: '+(j.error_text||'unknown'),'err');
       }else{
         if(j.progress_msg)gs.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>'+j.progress_msg;
@@ -917,7 +954,7 @@ async function loadPlan(){
     var r=await Promise.all([api('/api/orders/runs/'+rId),api('/api/orders/runs/'+rId+'/loads'),api('/api/orders/runs/'+rId+'/summary').catch(function(){return null;})]);
     orders=Array.isArray(r[0])?r[0]:[];
     loads=Array.isArray(r[1])?r[1]:[];
-    buildStats(r[2]);buildTable();buildLoads();buildEL();rxRefresh();
+    buildStats(r[2]);buildTable();buildLoads();buildEL();rxRefresh();iprRefresh();
     _startRunPolling(rId);  // presence + change-feed polling for this plan (Phase 2/3)
   }catch(e){toast('Load failed: '+e.message,'err');}
 }
@@ -1364,7 +1401,10 @@ async function approveAll(){
 /* LOADS */
 function buildLoads(){
   var el=document.getElementById('lg');if(!el)return;
-  if(!loads.length){el.innerHTML='';return;}
+  if(!loads.length){
+    el.innerHTML=orders.length?'<div class="col-12 text-muted" style="font-size:13px"><i class="bi bi-signpost-split me-1"></i>No trucks yet — routing is done by the routing team. Use <b>Export Routing Request</b> above, then <b>Import Routing File</b> when they return the routes.</div>':'';
+    return;
+  }
   el.innerHTML=loads.map(function(l,i){
     var u=parseFloat(l.utilization_pct||0);var lw=u<95;
     return '<div class="col-6 col-md-4 col-xl-2"><div class="card p-3 lcard" onclick="openLoad('+i+')">'
@@ -1399,6 +1439,74 @@ async function doExport(){
   toast('Generating Aster import file...','ok');
   try{var b=await apiBlob('/api/exports/runs/'+rId+'/aster-import');var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download='JIM_Aster_'+(wk||'export')+'.csv';a.click();URL.revokeObjectURL(u);toast('Downloaded','ok');}
   catch(e){toast('Export failed: '+e.message,'err');}
+}
+
+/* IPR ENGINE v2 — objective readout (§2), allocation outputs (§15), evidence lists (§24-25) */
+var _iprType=null;
+function _iprTile(label,val,sub,tone){
+  var c=tone==='bad'?'#b42318':tone==='warn'?'#8a4b00':tone==='ok'?'#166534':'var(--fd)';
+  return '<div class="col-6 col-md-3 col-xl-2"><div style="border:1px solid #dbe4ef;border-radius:8px;padding:8px 10px;background:#f8fafc">'+
+    '<div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.03em">'+escH(label)+'</div>'+
+    '<div style="font-size:18px;font-weight:700;color:'+c+';font-variant-numeric:tabular-nums">'+escH(val)+'</div>'+
+    (sub?'<div style="font-size:11px;color:#64748b">'+escH(sub)+'</div>':'')+'</div></div>';
+}
+function _usd(n){return '$'+Math.round(n||0).toLocaleString();}
+async function iprRefresh(){
+  var p=document.getElementById('iprPanel');if(!p)return;
+  if(!rId){p.style.display='none';return;}
+  try{
+    var s=await api('/api/ipr/runs/'+rId+'/summary');
+    if(s.engine_version!=='v2'||!s.ipr_summary){p.style.display='none';return;}
+    p.style.display='block';
+    var S=s.ipr_summary,o=S.objective,a=S.allocation,c=S.counts,dq=S.data_quality;
+    document.getElementById('iprStage').textContent=(s.pipeline_status||'Reviewed').toUpperCase();
+    document.getElementById('iprAsOf').textContent='sales through '+(S.sales_anchor||'?')+' · arrival '+(S.arrival||'?');
+    var gap=o.gap_to_minimum;
+    document.getElementById('iprObj').innerHTML=
+      _iprTile('Baseline / wk',_usd(o.baseline_weekly_retail),'no new orders')+
+      _iprTile('Incremental',  '+'+_usd(o.incremental_weekly_retail),'from this plan','ok')+
+      _iprTile('Expected / wk',_usd(o.expected_weekly_retail),'retail register $')+
+      _iprTile(gap>0?'Gap to $900K':'Above $900K',_usd(Math.abs(gap)),gap>0?'below the weekly minimum':'growth territory',gap>0?'bad':'ok')+
+      _iprTile('Lost — no supply',_usd(o.lost_unavailable_inventory),'per week','warn')+
+      _iprTile('Lost — blocks/holds',_usd(o.lost_blocks_and_holds),'per week','warn');
+    document.getElementById('iprAlloc').innerHTML=
+      _iprTile('Store demand (need)',(a.unconstrained_need_units||0).toLocaleString()+'u','before availability')+
+      _iprTile('Allocated',(a.allocated_units||0).toLocaleString()+'u','of '+(a.available_units||0).toLocaleString()+' available')+
+      _iprTile('Unfilled demand',(a.unfilled_demand_units||0).toLocaleString()+'u','supply short',a.unfilled_demand_units?'warn':'')+
+      _iprTile('Unallocated supply',(a.unallocated_supply_units||0).toLocaleString()+'u','OK — no demand for it')+
+      _iprTile('Stores · carts',c.stores_shipped+' · '+c.carts,'no cart caps (Josh)')+
+      _iprTile('Blocked · held',c.lines_blocked+' · '+c.lines_review_held,'lines not shipped',c.lines_blocked?'bad':'');
+    var notes=[];
+    if(dq&&dq.onhand_source)notes.push('On-hand: '+dq.onhand_source+'.');
+    if(dq&&dq.family_mappings_unapproved)notes.push(dq.family_mappings_unapproved+' SKU→family mappings await business approval (§4.5).');
+    if(c.stores_edi_gap)notes.push(c.stores_edi_gap+' stores with a suspected EDI gap — demand held at baseline, not zeroed.');
+    if(o.price_basis_units&&o.price_basis_units.pricebook&&!o.price_basis_units.realized)notes.push('Dollars use pricebook retail until DTS realized prices load.');
+    document.getElementById('iprNotes').innerHTML=notes.map(function(n){return '<div class="text-muted"><i class="bi bi-info-circle me-1"></i>'+escH(n)+'</div>';}).join('');
+    var dc=s.decision_counts||{};
+    [['iprBtnBlock','block','Blocked'],['iprBtnHold','review_hold','Held for DSM review'],['iprBtnShort','allocation_shortfall','Supply shortfalls'],['iprBtnVal','validation','Data validation']].forEach(function(b){
+      var el=document.getElementById(b[0]);if(el)el.textContent=b[2]+' ('+(dc[b[1]]||0)+')';});
+  }catch(e){p.style.display='none';}
+}
+async function iprShow(type){
+  var box=document.getElementById('iprList');
+  if(_iprType===type&&box.style.display==='block'){box.style.display='none';_iprType=null;return;}
+  _iprType=type;box.style.display='block';box.innerHTML='<div class="text-muted p-2" style="font-size:12px">Loading…</div>';
+  try{
+    var rows=await api('/api/ipr/runs/'+rId+'/decisions?type='+type+'&limit=1000');
+    if(!rows.length){box.innerHTML='<div class="text-muted p-2" style="font-size:12px">None this run.</div>';return;}
+    box.innerHTML='<table class="table jt mb-0" style="font-size:12px"><thead><tr><th>Store</th><th>SKU</th><th>Why</th><th>Detail</th></tr></thead><tbody>'+
+      rows.map(function(r){
+        var d=r.data||{},det=[];
+        if(d.grade)det.push('grade '+d.grade);
+        if(d.conversion!=null)det.push('conv '+Math.round(d.conversion*100)+'%');
+        if(d.proposed_units)det.push(d.proposed_units+'u proposed');
+        if(d.required_approval)det.push('needs '+d.required_approval);
+        if(d.unfilled_units)det.push(d.unfilled_units+'u unfilled');
+        return '<tr><td>'+(r.store_id?escH(String(r.store_id))+' '+escH(r.store_name||''):'—')+'</td>'+
+          '<td>'+(r.sku_id?escH(sn(r.description||String(r.sku_id))):'—')+'</td>'+
+          '<td>'+escH(r.reason||'')+'</td><td class="text-muted">'+escH(det.join(' · '))+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }catch(e){box.innerHTML='<div class="text-danger p-2" style="font-size:12px">'+escH(e.message)+'</div>';}
 }
 
 /* ROUTING EXCHANGE — export request, import the routing team's trucks, pack plans */
@@ -2889,7 +2997,7 @@ async function doFinalizeWeek(){
     rId=null;bId=null;wk=null;orders=[];loads=[];
     buildStats();buildTable();buildLoads();buildEL();
     var gs=document.getElementById('gs');if(gs)gs.style.display='none';
-    var gb=document.getElementById('gb');if(gb){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Generate Recommended Orders';}
+    var gb=document.getElementById('gb');if(gb){gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Run IPR Engine';}
     var rb=document.getElementById('rb');if(rb)rb.style.display='none';
     var xb=document.getElementById('xb');if(xb)xb.disabled=true;
     var elb2=document.getElementById('elb');if(elb2)elb2.disabled=true;

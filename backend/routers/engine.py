@@ -19,6 +19,9 @@ class GenerateRequest(BaseModel):
     batch_id:     str
     shipping_week: str
     scenario_id:  str | None = None
+    # 'v2' = IPR demand-first engine (AI Replenishment spec 2026-11-17, the default);
+    # 'v1' = legacy availability-first engine, kept selectable as a fallback/comparison.
+    engine:       str = "v2"
 
 @router.post("/generate")
 def queue_recommendation_run(
@@ -60,9 +63,11 @@ def queue_recommendation_run(
         except psycopg2.errors.UniqueViolation:
             raise HTTPException(409, "A recommendation run is already in progress for this batch")
 
+    if req.engine not in ("v1", "v2"):
+        raise HTTPException(400, "engine must be 'v1' or 'v2'")
     background.add_task(_run_recommendations, job_id, req.batch_id,
-                        req.shipping_week, req.scenario_id)
-    return {"job_id": job_id, "status": "queued"}
+                        req.shipping_week, req.scenario_id, req.engine)
+    return {"job_id": job_id, "status": "queued", "engine": req.engine}
 
 
 @router.get("/jobs/{job_id}")
@@ -111,13 +116,17 @@ def _update_job(job_id, status, progress_pct=None, progress_msg=None, error=None
         """, (status, progress_pct, progress_msg, error, run_id, status, status, job_id))
 
 
-def _run_recommendations(job_id, batch_id, shipping_week, scenario_id):
-    _update_job(job_id, 'running', 0, 'Starting recommendation engine...')
+def _run_recommendations(job_id, batch_id, shipping_week, scenario_id, engine="v2"):
+    label = "IPR engine v2 (demand-first)" if engine == "v2" else "legacy engine v1"
+    _update_job(job_id, 'running', 0, f'Starting {label}...')
     try:
-        from recommendation_engine import run as engine_run
         from datetime import date
-        _update_job(job_id, 'running', 10, 'Loading data...')
-        run_id = engine_run(batch_id, shipping_week=date.fromisoformat(shipping_week))
+        if engine == "v2":
+            from ipr_engine import run as engine_run
+        else:
+            from recommendation_engine import run as engine_run
+        _update_job(job_id, 'running', 10, 'Validating data and calculating demand...')
+        run_id = engine_run(batch_id, shipping_week=date.fromisoformat(shipping_week), verbose=False)
         _update_job(job_id, 'complete', 100, 'Done', run_id=run_id)
     except Exception as e:
         _update_job(job_id, 'failed', error=str(e))
