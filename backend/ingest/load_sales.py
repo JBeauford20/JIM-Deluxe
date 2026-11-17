@@ -14,6 +14,7 @@ Run:  python backend/ingest/load_sales.py --file "path\\to\\report.csv"
 """
 import argparse
 import csv
+import re
 import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
@@ -28,6 +29,15 @@ COLS = {
     "store": "StoreIDNum", "sku": "SKU", "name": "ItemName",
     "sales_qty": "SalesQty", "sale_date": "LastSalesDate",
     "deliv_qty": "DeliveryQty", "deliv_date": "LastDeliveryDate",
+}
+# Rich columns discovered 2026-11-17 (report carries 44; all optional — the loader
+# still accepts a minimal 7-column file). SalesAmount = RETAIL dollars; the $900K
+# weekly objective is retail register sales (Josh, 2026-11-17).
+RICH = {
+    "sales_amt": "SalesAmount", "onhand_qty": "OnHandQty", "onhand_amt": "OnHandAmount",
+    "dump_qty": "DumpQty", "dump_amt": "DumpAmount",
+    "py_qty": "PrevYrQty", "py_amt": "PrevYrAmt",
+    "wos": "WOS", "days_since": "DaysSinceLastDeliv",
 }
 
 
@@ -46,6 +56,13 @@ def parse_date(s):
 def safe_int(v):
     try:
         return int(float(v)) if v not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def safe_num(v):
+    try:
+        return float(v) if v not in (None, "") else None
     except (ValueError, TypeError):
         return None
 
@@ -81,7 +98,8 @@ def main():
     log(f"Reading {path.name} ...")
     rows = read_csv(path)
 
-    sales, delivs, new_skus = [], [], {}
+    has_rich = RICH["sales_amt"] in (rows[0].keys() if rows else [])
+    sales, delivs, new_skus, snaps = [], [], {}, []
     sd_list, dd_list = [], []
     skip_bad = skip_noact = 0
     for r in rows:
@@ -92,6 +110,21 @@ def main():
         if not store or not sku:
             skip_bad += 1
             continue
+        amt = safe_num(r.get(RICH["sales_amt"])) if has_rich else None
+        # snapshot rows capture EVERY store×SKU line (incl. zero-sales rows —
+        # on-hand/dumps/prior-year matter even when nothing sold this period)
+        if has_rich:
+            snaps.append((store, sku, sq,
+                          amt,
+                          round(amt / sq, 4) if amt and sq else None,
+                          safe_int(r.get(RICH["onhand_qty"])),
+                          safe_num(r.get(RICH["onhand_amt"])),
+                          safe_int(r.get(RICH["dump_qty"])),
+                          safe_num(r.get(RICH["dump_amt"])),
+                          safe_int(r.get(RICH["py_qty"])),
+                          safe_num(r.get(RICH["py_amt"])),
+                          safe_num(r.get(RICH["wos"])),
+                          safe_int(r.get(RICH["days_since"]))))
         if sq == 0 and dq == 0:
             skip_noact += 1
             continue
@@ -99,7 +132,7 @@ def main():
             new_skus[sku] = (str(r[COLS["name"]]).strip() if r[COLS["name"]] else None)
         if sq > 0:
             sd = parse_date(r[COLS["sale_date"]]) or report_date
-            sales.append((store, sku, sd, sq))
+            sales.append((store, sku, sd, sq, amt))
             sd_list.append(sd)
         if dq > 0:
             dd = parse_date(r[COLS["deliv_date"]]) or report_date
@@ -107,10 +140,13 @@ def main():
             dd_list.append(dd)
 
     rng = (min(sd_list) if sd_list else None, max(sd_list) if sd_list else None)
+    retail_total = sum(s[4] or 0 for s in sales)
     log(f"  rows {len(rows):,} | sales {len(sales):,} ({len({s[0] for s in sales}):,} stores)"
         f" | deliveries {len(delivs):,} | skus {len(new_skus):,}"
         f" | skipped bad {skip_bad:,} / no-activity {skip_noact:,}")
-    log(f"  sale dates {rng[0]} -> {rng[1]}")
+    log(f"  sale dates {rng[0]} -> {rng[1]}"
+        + (f" | retail ${retail_total:,.0f}" if has_rich else " | (minimal file: no dollar columns)")
+        + (f" | snapshot rows {len(snaps):,}" if snaps else ""))
     for w, n in sorted(Counter((s[2] - timedelta(days=s[2].weekday())) for s in sales).items()):
         log(f"    week {w}: {n:,}")
 
@@ -170,12 +206,12 @@ def main():
         cur.execute("DELETE FROM deliveries WHERE feed_source=%s", (f,))
         log(f"  deleted feed '{f}': {sdel:,} sales + {cur.rowcount:,} deliveries")
 
-    sclean = [(s[0], s[1], s[2], s[3], feed) for s in sales if s[0] in valid_stores and s[1] in valid_skus]
+    sclean = [(s[0], s[1], s[2], s[3], s[4], feed) for s in sales if s[0] in valid_stores and s[1] in valid_skus]
     dclean = [(d[0], d[1], d[2], d[3], feed) for d in delivs if d[0] in valid_stores and d[1] in valid_skus]
 
     log(f"  inserting {len(sclean):,} sales + {len(dclean):,} deliveries (feed={feed})")
     psycopg2.extras.execute_batch(cur,
-        "INSERT INTO sales (store_id, sku_id, sale_date, units_sold, feed_source) VALUES (%s,%s,%s,%s,%s)",
+        "INSERT INTO sales (store_id, sku_id, sale_date, units_sold, dollars, feed_source) VALUES (%s,%s,%s,%s,%s,%s)",
         sclean, page_size=500)
     psycopg2.extras.execute_batch(cur,
         "INSERT INTO deliveries (store_id, sku_id, delivery_date, units_delivered, feed_source) VALUES (%s,%s,%s,%s,%s)",
@@ -190,6 +226,25 @@ def main():
         ON CONFLICT (store_id, week_start) DO UPDATE SET
             data_received=EXCLUDED.data_received, feed_source=EXCLUDED.feed_source
     """, [(sid, wk, True, feed) for sid, wk in cov.items()], page_size=500)
+
+    # Rich snapshot (on-hand, dumps, prior-year, WOS) — one row per store×SKU per pull.
+    # Period = the fetch window when the filename carries it, else the sale-date range.
+    if snaps:
+        m = re.search(r"(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})", path.name)
+        p_start = datetime.strptime(m.group(1), "%Y-%m-%d").date() if m else rng[0]
+        p_end = datetime.strptime(m.group(2), "%Y-%m-%d").date() if m else (rng[1] or report_date)
+        cur.execute("DELETE FROM dts_weekly_snapshot WHERE feed_source = %s", (feed,))
+        if cur.rowcount:
+            log(f"  replaced {cur.rowcount:,} prior snapshot rows for feed '{feed}'")
+        psycopg2.extras.execute_batch(cur, """
+            INSERT INTO dts_weekly_snapshot
+                (store_id, sku_id, sales_qty, sales_amount, realized_price,
+                 onhand_qty, onhand_amount, dump_qty, dump_amount,
+                 prev_yr_qty, prev_yr_amount, weeks_of_supply, days_since_last_delivery,
+                 period_start, period_end, feed_source)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, [s + (p_start, p_end, feed) for s in snaps], page_size=500)
+        log(f"  snapshot: {len(snaps):,} store×SKU rows for {p_start} -> {p_end}")
 
     cur.execute("""
         INSERT INTO sales_import_log
