@@ -124,6 +124,17 @@ def main():
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
+    # Idempotent re-run guard: the overlap check below excludes our OWN feed name,
+    # and sales/deliveries have no unique constraints — re-running the same weekly
+    # file would silently double-count. Replace our own prior rows instead.
+    cur.execute("SELECT COUNT(*) AS n FROM sales WHERE feed_source = %s", (feed,))
+    if cur.fetchone()["n"]:
+        cur.execute("DELETE FROM sales WHERE feed_source = %s", (feed,))
+        sdel = cur.rowcount
+        cur.execute("DELETE FROM deliveries WHERE feed_source = %s", (feed,))
+        log(f"  re-run detected: replacing existing feed '{feed}' "
+            f"({sdel:,} sales + {cur.rowcount:,} deliveries removed)")
+
     # Overlap guard: refuse to double-count a window that already has data.
     if rng[0] and not args.allow_overlap:
         cur.execute("""SELECT feed_source, COUNT(*) n FROM sales

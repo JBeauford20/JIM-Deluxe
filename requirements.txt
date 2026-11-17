@@ -1,4 +1,7 @@
-fastapi==0.115.0
+# Runtime deps (Railway installs this file per nixpacks.toml). Exact pins only.
+# fastapi 0.115.14 = last 0.115 patch; pulls starlette>=0.40 (fixes CVE-2024-47874,
+# reachable since the routing response-import added our first multipart endpoint).
+fastapi==0.115.14
 uvicorn[standard]==0.31.0
 psycopg2-binary==2.9.9
 python-multipart==0.0.20
@@ -7,4 +10,6 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 httpx==0.28.1
 h11==0.16.0
-anthropic>=0.36.0
+# anthropic was an unpinned floor (>=0.36.0) — prod has been resolving 2.x already;
+# this pin freezes current behavior instead of drifting on every build.
+anthropic==2.9.0

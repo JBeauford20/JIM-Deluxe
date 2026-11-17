@@ -34,6 +34,8 @@ SHIPMENTS = Path(r"C:\Users\JoshBeauford\The Plant Company\TPC Sales - Documents
 
 
 def latest_week() -> int:
+    """Newest week folder that actually HAS a Compiled source — a pre-created
+    empty WK folder must not hard-fail the Monday ingest."""
     weeks = []
     for p in SHIPMENTS.glob("WK *"):
         m = re.fullmatch(r"WK (\d{1,2})", p.name)
@@ -41,7 +43,13 @@ def latest_week() -> int:
             weeks.append(int(m.group(1)))
     if not weeks:
         raise SystemExit(f"No 'WK NN' folders under {SHIPMENTS}")
-    return max(weeks)
+    for wk in sorted(weeks, reverse=True):
+        try:
+            find_source(wk, None)
+            return wk
+        except SystemExit:
+            print(f"  (WK {wk} folder has no Compiled source yet — skipping)")
+    raise SystemExit("No week folder contains a Compiled source")
 
 
 def find_source(week: int, override: str | None) -> tuple[Path, str]:

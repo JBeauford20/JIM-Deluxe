@@ -2,6 +2,7 @@
 (export request -> external routing team -> import response -> truck pack plans)."""
 import csv
 import io
+import re
 import urllib.request, urllib.parse, json, time, uuid
 from collections import defaultdict
 from datetime import datetime, date
@@ -254,9 +255,11 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
     Replaces the engine's provisional loads for this run with the real trucks,
     reassigns every cart, and upserts the week's delivery_manifest rows so the
     DUE gate sees the shipments as in-transit immediately."""
-    raw = await file.read()
-    if len(raw) > 5 * 1024 * 1024:
-        raise HTTPException(400, "File too large")
+    # Read with a hard cap BEFORE buffering the whole body (CVE-2024-47874 class)
+    MAX = 5 * 1024 * 1024
+    raw = await file.read(MAX + 1)
+    if len(raw) > MAX:
+        raise HTTPException(400, "File too large (5MB max)")
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -278,7 +281,11 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
     if not (c_store and c_route):
         raise HTTPException(400, f"Need Store and Route columns; found {list(headers)}")
 
-    entries, bad = [], 0
+    # Route names come from an EXTERNAL party's file and are rendered in the UI and
+    # written into the pack-plan xlsx — whitelist them (also kills formula injection).
+    ROUTE_RE = re.compile(r"^[\w\s\-./#]{1,40}$")
+
+    entries, bad, bad_routes = [], 0, set()
     for row in rdr:
         try:
             store = int(float(str(row[c_store]).strip()))
@@ -288,6 +295,10 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
         route = str(row[c_route]).strip()
         if not route:
             bad += 1
+            continue
+        if not ROUTE_RE.match(route):
+            bad += 1
+            bad_routes.add(route[:60])
             continue
         try:
             drop = int(float(str(row[c_drop]).strip())) if c_drop and str(row[c_drop]).strip() else None
@@ -325,7 +336,18 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
         file_stores = {e["store_id"] for e in entries}
         unmatched = sorted(file_stores - run_stores)          # in file, not in run
         unrouted = sorted(run_stores - file_stores)           # in run, not in file
-        matched = [e for e in entries if e["store_id"] in run_stores]
+        # Dedupe: one row per store (first occurrence wins). A store listed twice —
+        # or on two routes — would otherwise get its carts assigned to BOTH trucks
+        # and pack plans would build them twice.
+        matched, _seen, multi_route = [], set(), set()
+        for e in entries:
+            if e["store_id"] not in run_stores:
+                continue
+            if e["store_id"] in _seen:
+                multi_route.add(e["store_id"])
+                continue
+            _seen.add(e["store_id"])
+            matched.append(e)
         if not matched:
             raise HTTPException(400, "No stores in the file belong to this run")
 
@@ -350,8 +372,9 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
             cart_ids = [c for e in stops for c in carts_by_store[e["store_id"]]]
             regions = [smeta.get(e["store_id"], {}).get("region") for e in stops]
             merchants = [smeta.get(e["store_id"], {}).get("merchant") for e in stops]
-            region = max(set(filter(None, regions)), key=regions.count) if any(regions) else None
-            merchant = max(set(filter(None, merchants)), key=merchants.count) if any(merchants) else None
+            # sorted() makes the majority tie-break deterministic across processes
+            region = max(sorted(set(filter(None, regions))), key=regions.count) if any(regions) else None
+            merchant = max(sorted(set(filter(None, merchants))), key=merchants.count) if any(merchants) else None
             ship = next((e["ship"] for e in stops if e["ship"]), None)
             deliv = next((e["deliv"] for e in stops if e["deliv"]), None)
             util = round(len(cart_ids) / 45 * 100, 1)
@@ -367,8 +390,8 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
                   util < 70, f"Under-utilized ({util:.0f}%)" if util < 70 else None,
                   ship, deliv))
             rows = []
-            for e in stops:
-                seq = e["drop"] if e["drop"] is not None else (stops.index(e) + 1)
+            for pos, e in enumerate(stops, start=1):
+                seq = e["drop"] if e["drop"] is not None else pos
                 for cid in carts_by_store[e["store_id"]]:
                     rows.append((str(uuid.uuid4()), load_id, cid, e["store_id"], seq))
             cur.executemany("""
@@ -377,9 +400,16 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
             """, rows)
             load_count += 1
 
-        # Manifest upsert: the routed shipments become this week's in-transit truth
+        # Manifest upsert: the routed shipments become this week's in-transit truth.
+        # First clear THIS import's prior rows for the run's stores — a re-import with
+        # different routes must not leave stale (store, old_route) rows that would
+        # wrongly keep a store "in transit" and suppress it from the next DUE gate.
         manifest_new = manifest_upd = 0
         if week_number is not None:
+            cur.execute("""DELETE FROM delivery_manifest
+                           WHERE week_number = %s AND source = 'routing_import'
+                             AND store_id = ANY(%s)""", (week_number, list(run_stores)))
+            manifest_cleared = cur.rowcount
             cur.execute("""SELECT store_id, load_code, ship_date, delivery_date
                            FROM delivery_manifest WHERE week_number = %s""", (week_number,))
             existing = {(r["store_id"], r["load_code"]): (r["ship_date"], r["delivery_date"])
@@ -418,6 +448,8 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
         "loads": load_count,
         "stores_routed": len({e['store_id'] for e in matched}),
         "rows_bad": bad,
+        "bad_route_names": sorted(bad_routes),
+        "stores_on_multiple_routes": sorted(multi_route),
         "stores_in_file_not_in_run": unmatched,
         "stores_in_run_not_routed": unrouted,
         "manifest_rows_added": manifest_new,
@@ -463,7 +495,8 @@ def pack_plan_export(run_id: str,
         cur.execute("SELECT sku_id, description, family, size_category FROM skus")
         sku_ref = {r["sku_id"]: r for r in cur.fetchall()}
         cur.execute("""SELECT sku_id, plant_id AS aster_code, units_available
-                       FROM availability_lines WHERE batch_id = %s AND plant_id IS NOT NULL
+                       FROM availability_lines
+                       WHERE batch_id = %s AND plant_id IS NOT NULL AND units_available > 0
                        ORDER BY sku_id, units_available DESC""", (run["batch_id"],))
         aster_pool = defaultdict(list)
         for r in cur.fetchall():
@@ -495,6 +528,12 @@ def pack_plan_export(run_id: str,
     for c in ws[1]:
         c.font = Font(bold=True)
 
+    def xl(v):
+        """Excel formula-injection guard for string cells (= + - @ prefixes)."""
+        if isinstance(v, str) and v[:1] in ("=", "+", "-", "@"):
+            return "'" + v
+        return v
+
     var_counter = defaultdict(int)
     for (route, ship, cfg, sig), cart_ids in sorted(
             groups.items(), key=lambda kv: (kv[0][0], kv[0][2], -len(kv[1]))):
@@ -511,15 +550,20 @@ def pack_plan_export(run_id: str,
             if not split:
                 split = [(None, total_trays)]
             upt = (s["unit_count"] // s["tray_count"]) if s["tray_count"] else 0
+            if not s["tray_count"]:
+                # unit-only shelf (possible via manual cart edits): emit one
+                # un-split row rather than dropping the line entirely
+                split = [(None, 0)]
             for code, trays in split:
-                if trays <= 0:
+                if trays <= 0 and s["tray_count"]:
                     continue
                 eaches = trays * upt if upt else total_units
                 ws.append([
-                    ship, route, cfg or "", kit_qty, variation, s["shelf_position"],
-                    "", "", item_desc, s["tray_count"], s["unit_count"],
-                    aster_name.get(str(code), sk.get("description") or ""),
-                    str(s["sku_id"]), code or "", trays, eaches, eaches, "",
+                    ship, xl(route), xl(cfg or ""), kit_qty, variation, s["shelf_position"],
+                    "", "", xl(item_desc), s["tray_count"], s["unit_count"],
+                    xl(aster_name.get(str(code), sk.get("description") or "")),
+                    str(s["sku_id"]), xl(str(code) if code else ""), trays, eaches,
+                    eaches, "",
                 ])
 
     out = io.BytesIO()

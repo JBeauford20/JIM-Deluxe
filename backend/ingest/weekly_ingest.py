@@ -62,7 +62,11 @@ def stage_sales(args, log) -> bool:
         fetch = subprocess.run([PY, str(HERE / "fetch_dts.py")],
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
         if fetch.returncode == 0:
-            csv_path = fetch.stdout.strip().splitlines()[-1]
+            lines = (fetch.stdout or "").strip().splitlines()
+            if not lines:
+                log("  SALES FETCH returned no output — treating as failure")
+                return False
+            csv_path = lines[-1]
             log(f"  fetched: {csv_path}")
         elif fetch.returncode == 2:
             DROP.mkdir(exist_ok=True)

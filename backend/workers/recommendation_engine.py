@@ -325,6 +325,7 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
         shelves_left     = CART_SHELVES
         cart_height      = 0.0   # inches of clear height used by this cart's shelves
         cart_contents    = []
+        cart_cap_spend   = []    # [(cap_group, carts_consumed)] — refunded if cart is dropped
         profile_shelf_ct = defaultdict(int)
         shelf_pos        = 0
 
@@ -419,7 +420,9 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
                 if cap_groups and upc_cap:
                     for g in cap_groups:
                         if sku_id in g['skus']:
-                            g['remaining_carts'] -= units_to_take / upc_cap
+                            spend = units_to_take / upc_cap
+                            g['remaining_carts'] -= spend
+                            cart_cap_spend.append((g, spend))
 
             if not shelf_items:
                 shelf_pos -= 1
@@ -472,6 +475,7 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
             'is_flagged':   not is_full,
             'flag_reason':  flags[-1] if not is_full else None,
             'contents':     cart_contents,
+            '_cap_spend':   cart_cap_spend,
         })
 
         # Record this cart's size-group shelf counts so the next cart can diverge
@@ -495,8 +499,14 @@ def build_carts_for_store(store_id, ranked_skus, inventory,
         # carts fall below 3 — those get dropped (no more 2-shelf carts). — Josh, Nov 2026
         if height_full or c['shelves_used'] >= 3:
             kept.append(c)
+        else:
+            # Refund cap budget consumed by a dropped cart — otherwise small caps
+            # (1-2 carts) get phantom-exhausted and act like unintended exclusions.
+            for g, spend in c.get('_cap_spend', []):
+                g['remaining_carts'] += spend
     for i, c in enumerate(kept, 1):
         c['cart_number'] = i
+        c.pop('_cap_spend', None)  # internal bookkeeping — not for downstream/DB
     committed = defaultdict(int)
     for c in kept:
         for (_, sku_id, trays, units, kit, pid) in c['contents']:
@@ -566,7 +576,8 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
     # store-clock scans) to the freshest sale date in the data, not the wall
     # clock — a Friday re-run reproduces Tuesday's scores. shipping_week and
     # physical in-transit checks stay on the real calendar.
-    cur.execute("SELECT MAX(sale_date) AS mx FROM sales")
+    # <= CURRENT_DATE guards against one future-dated garbage row shifting every window
+    cur.execute("SELECT MAX(sale_date) AS mx FROM sales WHERE sale_date <= CURRENT_DATE")
     _mx = cur.fetchone()
     anchor = _mx['mx'] if _mx and _mx['mx'] else today
     log(f"Time anchor (sales cutoff): {anchor}")
@@ -1136,8 +1147,11 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
                 log(f"  Floor '{d['label']}' store {store_id}: at cart ceiling, "
                     f"{deficit} cart(s) short")
                 continue
+            # Exclusion beats floor: a scenario "exclude X" must not be overridden
+            # by an overlapping floor directive shipping X anyway.
             scope_ranked = sorted(
-                ((s, inventory.get(s, 0)) for s in d['skus'] if inventory.get(s, 0) > 0),
+                ((s, inventory.get(s, 0)) for s in d['skus']
+                 if inventory.get(s, 0) > 0 and not playbook.is_excluded(store_id, s)),
                 key=lambda x: (-x[1], x[0]))
             if not scope_ranked:
                 log(f"  Floor '{d['label']}' store {store_id}: no in-scope inventory left")
@@ -1382,7 +1396,8 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
                     break
                 carts, committed = build_carts_for_store(
                     store_id, ranked, inventory, shelf_configs, sku_profiles,
-                    1, avail_meta, run_profiles_allocated)
+                    1, avail_meta, run_profiles_allocated,
+                    cap_groups=cap_state_for(store_id))  # caps bind in top-ups too
                 if not carts:
                     continue
                 for sku_id, units in committed.items():

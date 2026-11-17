@@ -207,12 +207,13 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <span id="rxStatus"></span>
     <span id="rxInfo" class="text-muted" style="font-size:12px"></span>
     <div class="ms-auto d-flex gap-2 align-items-center">
-      <button class="btn btn-sm btn-outline-primary" onclick="rxExportRequest()" title="CSV of stores + carts for the external routing team"><i class="bi bi-box-arrow-up me-1"></i>Export Routing Request</button>
+      <button class="btn btn-sm btn-outline-primary" id="rxReq" data-requires-role="order_writer" onclick="rxExportRequest()" title="CSV of stores + carts for the external routing team. Marks the plan SENT TO ROUTING."><i class="bi bi-box-arrow-up me-1"></i>Export Routing Request</button>
       <input type="file" id="rxFile" accept=".csv" style="display:none" onchange="rxImport(this.files[0])">
-      <button class="btn btn-sm btn-outline-success" onclick="document.getElementById('rxFile').click()" title="Import the routing team's Store/Route/Drop/Ship/Del file — replaces the provisional loads with real trucks"><i class="bi bi-box-arrow-in-down me-1"></i>Import Routing File</button>
-      <button class="btn btn-sm btn-cta" id="rxPack" onclick="rxPackPlan()" disabled title="Truck-level pack plan (one kitting block per route)"><i class="bi bi-boxes me-1"></i>Pack Plans</button>
+      <button class="btn btn-sm btn-outline-success" id="rxImp" data-requires-role="order_writer" onclick="document.getElementById('rxFile').click()" title="Import the routing team's Store/Route/Drop/Ship/Del file — replaces the provisional loads with real trucks"><i class="bi bi-box-arrow-in-down me-1"></i>Import Routing File</button>
+      <button class="btn btn-sm btn-cta" id="rxPack" data-requires-role="order_writer" onclick="rxPackPlan()" disabled title="Truck-level pack plan (one kitting block per route)"><i class="bi bi-boxes me-1"></i>Pack Plans</button>
     </div>
-  </div></div>
+  </div>
+  <div id="rxWarn" style="display:none;margin:0 16px 10px;padding:8px 12px;background:#fff7e0;border:1px solid #ffe08a;border-radius:6px;font-size:12px"></div></div>
   <div class="card"><div class="table-responsive">
     <table class="table jt mb-0">
       <thead><tr><th>Store</th><th>Location</th><th>Tier</th><th class="text-end">Velocity</th><th>Grade</th><th>Clock</th><th>Last Delivery</th><th class="text-center">Carts</th><th class="text-center">Units</th><th>Load</th><th>Status</th><th>Actions</th></tr></thead>
@@ -751,7 +752,9 @@ function toast(m,t){
   var ic={'ok':'bi-check-circle-fill','warn':'bi-exclamation-triangle-fill','err':'bi-x-circle-fill'};
   var e=document.createElement('div');
   e.className='jts '+(t!=='ok'?t:'');
-  e.innerHTML='<i class="bi '+(ic[t]||ic.ok)+'" style="font-size:16px;flex-shrink:0"></i><span>'+m+'</span>';
+  // message set via textContent — toast text often carries server/user-derived strings
+  e.innerHTML='<i class="bi '+(ic[t]||ic.ok)+'" style="font-size:16px;flex-shrink:0"></i><span></span>';
+  e.querySelector('span').textContent=m;
   document.getElementById('tc').appendChild(e);
   setTimeout(function(){e.style.opacity='0';e.style.transform='translateX(40px)';e.style.transition='.25s';setTimeout(function(){e.remove();},260);},3800);
 }
@@ -1173,7 +1176,7 @@ function buildTable(d){
       +'<td>'+clockCell+'</td>'
       +'<td style="font-size:12px">'+days+'</td>'
       +'<td class="text-center fw-bold">'+(o.cart_count||0)+'</td><td class="text-center">'+fmt(o.total_units||0)+'</td>'
-      +'<td style="font-size:12px">'+(o.load_name||o.load||'--')+'</td><td>'+mkSP(o.status||'draft')+'</td>'
+      +'<td style="font-size:12px">'+escH(o.load_name||o.load||'--')+'</td><td>'+mkSP(o.status||'draft')+'</td>'
       +'<td onclick="event.stopPropagation()">'+act+why+edit+'</td></tr>'
       +'<tr id="'+rowId+'" style="display:none;background:#f8faf8"><td colspan="12" style="padding:0"><div id="sku-inner-'+o.id+'" class="p-3 text-muted" style="font-size:12px"><span class="spinner-border spinner-border-sm me-2"></span>Loading...</div></td></tr>';
   }).join('');
@@ -1338,7 +1341,7 @@ loadInTransitSummary();
 /* APPROVE */
 function doOpenApprove(enc){
   var d=JSON.parse(decodeURIComponent(enc));aT=d;
-  document.getElementById('ab').innerHTML='<p>Approve <strong>Store '+d.sid+' -- '+escH(d.name)+', '+escH(d.state)+'</strong>?</p><ul style="font-size:13px"><li>'+d.carts+' carts, '+fmt(d.units)+' units</li><li>Load: '+d.load+'</li></ul>';
+  document.getElementById('ab').innerHTML='<p>Approve <strong>Store '+d.sid+' -- '+escH(d.name)+', '+escH(d.state)+'</strong>?</p><ul style="font-size:13px"><li>'+d.carts+' carts, '+fmt(d.units)+' units</li><li>Load: '+escH(d.load)+'</li></ul>';
   aMod.show();
 }
 async function doApprove(){
@@ -1365,7 +1368,7 @@ function buildLoads(){
   el.innerHTML=loads.map(function(l,i){
     var u=parseFloat(l.utilization_pct||0);var lw=u<95;
     return '<div class="col-6 col-md-4 col-xl-2"><div class="card p-3 lcard" onclick="openLoad('+i+')">'
-      +'<div class="d-flex justify-content-between mb-1"><strong style="font-size:13px">'+(l.load_name||'L'+(i+1))+'</strong><span class="'+(lw?'text-danger':'text-success')+' fw-bold" style="font-size:12px">'+u+'%</span></div>'
+      +'<div class="d-flex justify-content-between mb-1"><strong style="font-size:13px">'+escH(l.load_name||'L'+(i+1))+'</strong><span class="'+(lw?'text-danger':'text-success')+' fw-bold" style="font-size:12px">'+u+'%</span></div>'
       +'<div style="font-size:11px;color:var(--is)">'+(l.merchant||'')+'</div>'
       +'<div style="font-size:11px;color:var(--is)" class="mb-2">'+(l.cart_count||0)+' carts, '+(l.store_count||0)+' stores</div>'
       +'<div class="lu"><div class="lf '+(lw?'wn':'')+'" style="width:'+u+'%"></div></div>'
@@ -1379,7 +1382,7 @@ function openLoad(i){
   var sids=(l.store_ids||[]).map(function(s){return parseInt(s);});
   var lo=orders.filter(function(o){return sids.includes(parseInt(o.store_id||o.id));});
   var u=parseFloat(l.utilization_pct||0),apprC=lo.filter(function(o){return o.status==='approved';}).length;
-  document.getElementById('lt').innerHTML='<i class="bi bi-truck me-2"></i>'+(l.load_name||'')+' -- '+(l.merchant||'');
+  document.getElementById('lt').innerHTML='<i class="bi bi-truck me-2"></i>'+escH(l.load_name||'')+' -- '+escH(l.merchant||'');
   document.getElementById('lb').innerHTML='<div class="row g-2 mb-3"><div class="col-3"><div class="sc py-2 text-center"><div class="n" style="font-size:1.3rem">'+(l.cart_count||0)+'</div><div class="l">Carts</div></div></div><div class="col-3"><div class="sc py-2 text-center"><div class="n" style="font-size:1.3rem">'+lo.length+'</div><div class="l">Stores</div></div></div><div class="col-3"><div class="sc '+(u<95?'wn':'')+' py-2 text-center"><div class="n" style="font-size:1.3rem">'+u+'%</div><div class="l">Util</div></div></div><div class="col-3"><div class="sc '+(apprC===lo.length?'ok':'')+' py-2 text-center"><div class="n" style="font-size:1.3rem">'+apprC+'/'+lo.length+'</div><div class="l">Approved</div></div></div></div><table class="table jt mb-0"><thead><tr><th>Store</th><th>Location</th><th>Tier</th><th class="text-center">Carts</th><th>Status</th></tr></thead><tbody>'+lo.map(function(o){return '<tr><td><strong>'+(o.store_id||o.id)+'</strong><br><small>'+escH(o.store_name||o.name||'')+'</small></td><td style="font-size:12px">'+escH(o.city||'')+', '+escH(o.state||'')+'</td><td>'+mkTB((o.dynamic_velocity_tier||o.tier||'').trim())+'</td><td class="text-center fw-bold">'+(o.cart_count||0)+'</td><td>'+mkSP(o.status||'draft')+'</td></tr>';}).join('')+'</tbody></table>'+(u<95?'<div class="alert alert-warning mt-3 py-2 mb-0" style="font-size:12.5px"><i class="bi bi-exclamation-triangle me-2"></i>Below 95% utilization</div>':'');
   lMod.show();
 }
@@ -1414,44 +1417,65 @@ async function rxRefresh(){
        'background:#eef0ee;color:#667;border:1px solid #ccc');
     var info='';
     if(st==='submitted'&&s.routing_submitted_at)info='sent '+new Date(s.routing_submitted_at).toLocaleDateString()+' '+new Date(s.routing_submitted_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-    if(st==='routed')info=escH(s.routing_filename||'')+' — '+s.external_loads+' trucks';
+    // textContent below is the escaping — no escH here (it double-displayed &amp;)
+    if(st==='routed')info=(s.routing_filename||'')+' — '+s.external_loads+' trucks';
+    if(st==='routed'&&!s.external_loads)info+=' — status says routed but this plan has no external trucks; re-import the routing file';
     document.getElementById('rxInfo').textContent=info;
     var pk=document.getElementById('rxPack');if(pk)pk.disabled=!s.load_count;
-  }catch(e){p.style.display='none';}
+  }catch(e){
+    // keep the panel visible with an explicit error state — hiding it made a
+    // 500 (e.g. missing migration) indistinguishable from "feature doesn't exist"
+    p.style.display='block';
+    var el2=document.getElementById('rxStatus');
+    el2.textContent='STATUS UNAVAILABLE';
+    el2.style.cssText='font-size:11px;font-weight:700;padding:2px 10px;border-radius:999px;background:#fde8e8;color:#b42318;border:1px solid #f3b7b2';
+    document.getElementById('rxInfo').textContent='Could not load routing status — '+(e.message||'retry');
+  }
 }
+function _rxBusy(b){['rxReq','rxImp','rxPack'].forEach(function(id){var x=document.getElementById(id);if(x)x.disabled=b;});if(!b)rxRefresh();}
 async function rxExportRequest(){
   if(!rId)return;
+  _rxBusy(true);
   try{
     var b=await apiBlob('/api/routing/runs/'+rId+'/request-export');
     var u=URL.createObjectURL(b);var a=document.createElement('a');
     a.href=u;a.download='Routing_Request_'+(wk||'wk')+'.csv';a.click();URL.revokeObjectURL(u);
-    toast('Routing request exported — send it to the routing team','ok');rxRefresh();
+    toast('Routing request exported — plan is now marked SENT TO ROUTING','ok');
   }catch(e){toast('Export failed: '+e.message,'err');}
+  _rxBusy(false);
 }
 async function rxImport(f){
   var inp=document.getElementById('rxFile');
   if(!f||!rId){if(inp)inp.value='';return;}
   if(!confirm('Importing the routing file REPLACES this plan\'s current loads with the routing team\'s trucks. Continue?')){if(inp)inp.value='';return;}
   var fd=new FormData();fd.append('file',f);
+  _rxBusy(true);
   try{
     var r=await apiUpload('/api/routing/runs/'+rId+'/response-import',fd);
     var warn=false,msg=r.loads+' trucks · '+r.stores_routed+' stores routed';
-    if(r.stores_in_run_not_routed&&r.stores_in_run_not_routed.length){msg+=' · '+r.stores_in_run_not_routed.length+' plan stores NOT in file';warn=true;}
-    if(r.stores_in_file_not_in_run&&r.stores_in_file_not_in_run.length){msg+=' · '+r.stores_in_file_not_in_run.length+' unknown stores skipped';warn=true;}
     if(r.manifest_rows_added||r.manifest_rows_updated)msg+=' · manifest +'+r.manifest_rows_added+'/~'+r.manifest_rows_updated;
+    // Persist the mismatch lists in the panel — operators need the store numbers,
+    // not a fading count (those stores have no truck until re-routed).
+    var w=document.getElementById('rxWarn'),parts=[];
+    if(r.stores_in_run_not_routed&&r.stores_in_run_not_routed.length){parts.push('<b>'+r.stores_in_run_not_routed.length+' plan stores NOT in the routing file (no truck):</b> '+r.stores_in_run_not_routed.map(function(s){return escH(String(s));}).join(', '));warn=true;}
+    if(r.stores_in_file_not_in_run&&r.stores_in_file_not_in_run.length){parts.push('<b>'+r.stores_in_file_not_in_run.length+' file stores not in this plan (skipped):</b> '+r.stores_in_file_not_in_run.map(function(s){return escH(String(s));}).join(', '));}
+    if(w){if(parts.length){w.innerHTML=parts.join('<br>');w.style.display='block';}else{w.style.display='none';}}
     toast(msg,warn?'warn':'ok');
     loadPlan();  // rebuilds the table + Truck Loads cards from the real trucks
   }catch(e){toast('Import failed: '+e.message,'err');}
+  _rxBusy(false);
   if(inp)inp.value='';
 }
 async function rxPackPlan(){
   if(!rId)return;
+  _rxBusy(true);
   try{
     var b=await apiBlob('/api/routing/runs/'+rId+'/pack-plan-export');
     var u=URL.createObjectURL(b);var a=document.createElement('a');
     a.href=u;a.download='Pack_Plan_'+(wk||'wk')+'.xlsx';a.click();URL.revokeObjectURL(u);
     toast('Pack plans downloaded','ok');
   }catch(e){toast('Pack plan failed: '+e.message,'err');}
+  _rxBusy(false);
 }
 
 /* EDITOR */
@@ -2807,7 +2831,7 @@ function renderHistDetail(runId,weekLabel,summary){
         '<td>'+mkTB(tier)+'</td>'+
         '<td class="text-center fw-bold">'+(o.cart_count||0)+'</td>'+
         '<td class="text-center">'+fmt(o.total_units||0)+'</td>'+
-        '<td style="font-size:12px">'+(o.load_name||o.load||'--')+'</td>'+
+        '<td style="font-size:12px">'+escH(o.load_name||o.load||'--')+'</td>'+
         '<td><span class="sp sp-approved">approved</span></td>'+
         '</tr>';
     }).join('')+
@@ -2816,7 +2840,7 @@ function renderHistDetail(runId,weekLabel,summary){
     histLoads.map(function(l,i){
       var u=parseFloat(l.utilization_pct||0);
       return '<div class="col-6 col-md-4 col-xl-2"><div class="card p-3">'+
-        '<div class="d-flex justify-content-between mb-1"><strong style="font-size:13px">'+(l.load_name||'L'+(i+1))+'</strong><span class="fw-bold" style="font-size:12px;color:var(--ok)">'+u+'%</span></div>'+
+        '<div class="d-flex justify-content-between mb-1"><strong style="font-size:13px">'+escH(l.load_name||'L'+(i+1))+'</strong><span class="fw-bold" style="font-size:12px;color:var(--ok)">'+u+'%</span></div>'+
         '<div style="font-size:11px;color:var(--is)">'+(l.merchant||'')+'</div>'+
         '<div style="font-size:11px;color:var(--is)" class="mb-2">'+(l.cart_count||0)+' carts &middot; '+(l.store_count||0)+' stores</div>'+
         '<div class="lu"><div class="lf" style="width:'+u+'%"></div></div>'+
@@ -3068,7 +3092,7 @@ function rtRenderSidebar(){
   if(el)el.innerHTML=_rtData.loads.map(function(l,i){
     var color=RT_COLORS[i%RT_COLORS.length];
     return '<div class="rt-load-item" onclick="rtSelectLoad('+i+')" style="padding:8px;border-radius:6px;cursor:pointer;margin-bottom:4px;border-left:3px solid transparent;transition:.15s">'
-      +'<div style="font-weight:700;color:var(--fd)">'+(l.load_name||'Load '+i)+'</div>'
+      +'<div style="font-weight:700;color:var(--fd)">'+escH(l.load_name||'Load '+i)+'</div>'
       +'<div style="color:var(--is);margin-top:2px">'+(l.store_count||0)+' stores \xb7 '+(l.cart_count||0)+' carts</div>'
       +'<div style="color:var(--is)">'+(l.region||'')+(l.merchant?' \xb7 '+l.merchant:'')+'</div>'
       +'</div>';

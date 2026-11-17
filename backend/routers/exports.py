@@ -192,10 +192,20 @@ def _distribute_trays(total_trays, aster_list):
     """
     if not aster_list or total_trays <= 0:
         return []
+    # Collapse duplicate codes (sum their units) — duplicates would double-emit
+    # rows below because the result dict is keyed by code.
+    if len({c for c, _ in aster_list}) != len(aster_list):
+        agg = {}
+        for code, units in aster_list:
+            agg[code] = agg.get(code, 0) + units
+        aster_list = list(agg.items())
     total_units = sum(u for _, u in aster_list)
     if total_units == 0:
-        base = total_trays // len(aster_list)
-        return [(code, base) for code, _ in aster_list]
+        # Even split that still conserves the total (old floor-only split lost trays)
+        n = len(aster_list)
+        base, rem = divmod(total_trays, n)
+        return [(code, base + (1 if i < rem else 0))
+                for i, (code, _) in enumerate(aster_list)]
 
     raw      = [(code, total_trays * units / total_units)
                 for code, units in aster_list]
