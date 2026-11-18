@@ -176,13 +176,6 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
           </div>
         </div>
         <div class="d-grid gap-2 mt-2">
-          <div class="d-flex align-items-center gap-2" style="font-size:12px">
-            <label for="engSel" style="color:var(--is);white-space:nowrap">Engine</label>
-            <select id="engSel" class="form-select form-select-sm">
-              <option value="v2" selected>IPR v2 — demand-first (AI Replenishment spec)</option>
-              <option value="v1">Legacy v1 — availability-first (fallback)</option>
-            </select>
-          </div>
           <button class="btn btn-cta py-2" id="gb" onclick="doGenerate()" disabled><i class="bi bi-lightning-fill me-2"></i>Run IPR Engine</button>
           <button class="btn btn-outline-secondary py-2" id="rb" onclick="go('plan',this)" style="display:none"><i class="bi bi-clipboard-check me-2"></i>Review Plan</button>
           <button class="btn btn-outline-secondary py-2" id="eb" onclick="doStartEmpty()" disabled><i class="bi bi-pencil-square me-2"></i>Start Empty Plan</button>
@@ -208,6 +201,8 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
     <div class="d-flex gap-2 mt-2 flex-wrap">
       <button class="btn btn-sm btn-outline-danger" onclick="iprShow('block')" id="iprBtnBlock">Blocked</button>
       <button class="btn btn-sm btn-outline-warning" onclick="iprShow('review_hold')" id="iprBtnHold">Held for DSM review</button>
+      <button class="btn btn-sm btn-outline-secondary" onclick="iprShow('deferral')" id="iprBtnDef">Deferred</button>
+      <button class="btn btn-sm btn-outline-primary" onclick="iprReacts()" id="iprBtnReact">Reactivations</button>
       <button class="btn btn-sm btn-outline-secondary" onclick="iprShow('allocation_shortfall')" id="iprBtnShort">Supply shortfalls</button>
       <button class="btn btn-sm btn-outline-secondary" onclick="iprShow('validation')" id="iprBtnVal">Data validation</button>
     </div>
@@ -902,12 +897,9 @@ async function doGenerate(){
   var gb=document.getElementById('gb'),gs=document.getElementById('gs');
   gb.disabled=true;gb.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Running engine...';
   gs.style.cssText='display:block;background:#fff3cd;border:1px solid #e8d27c;color:#856404;font-size:13px;padding:.5rem 1rem;border-radius:.375rem;margin-bottom:.75rem';
-  var eng=(document.getElementById('engSel')||{}).value||'v2';
-  gs.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>'+(eng==='v2'
-    ?'Validating data, forecasting store demand, applying availability, loading trays...'
-    :'Scoring 2,000 stores, allocating inventory, building carts...');
+  gs.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Validating data, forecasting store demand, applying availability, loading trays...';
   try{
-    var j=await api('/api/engine/generate',{method:'POST',body:JSON.stringify({batch_id:bId,shipping_week:wk||new Date().toISOString().slice(0,10),engine:eng})});
+    var j=await api('/api/engine/generate',{method:'POST',body:JSON.stringify({batch_id:bId,shipping_week:wk||new Date().toISOString().slice(0,10),engine:'v2'})});
     doPoll(j.job_id,gb,gs);
   }catch(e){
     gb.disabled=false;gb.innerHTML='<i class="bi bi-lightning-fill me-2"></i>Run IPR Engine';
@@ -1480,10 +1472,12 @@ async function iprRefresh(){
     if(dq&&dq.onhand_source)notes.push('On-hand: '+dq.onhand_source+'.');
     if(dq&&dq.family_mappings_unapproved)notes.push(dq.family_mappings_unapproved+' SKU→family mappings await business approval (§4.5).');
     if(c.stores_edi_gap)notes.push(c.stores_edi_gap+' stores with a suspected EDI gap — demand held at baseline, not zeroed.');
+    if(c.stores_deferred)notes.push(c.stores_deferred+' stores deferred (need under one full shelf, '+(a.deferred_units||0).toLocaleString()+'u, ~'+_usd(o.lost_deferrals)+'/wk) — recalculated next week, never padded.');
+    if(c.lines_reactivated)notes.push(c.lines_reactivated+' lines shipping as approved reactivation tests.');
     if(o.price_basis_units&&o.price_basis_units.pricebook&&!o.price_basis_units.realized)notes.push('Dollars use pricebook retail until DTS realized prices load.');
     document.getElementById('iprNotes').innerHTML=notes.map(function(n){return '<div class="text-muted"><i class="bi bi-info-circle me-1"></i>'+escH(n)+'</div>';}).join('');
     var dc=s.decision_counts||{};
-    [['iprBtnBlock','block','Blocked'],['iprBtnHold','review_hold','Held for DSM review'],['iprBtnShort','allocation_shortfall','Supply shortfalls'],['iprBtnVal','validation','Data validation']].forEach(function(b){
+    [['iprBtnBlock','block','Blocked'],['iprBtnHold','review_hold','Held for DSM review'],['iprBtnDef','deferral','Deferred'],['iprBtnShort','allocation_shortfall','Supply shortfalls'],['iprBtnVal','validation','Data validation']].forEach(function(b){
       var el=document.getElementById(b[0]);if(el)el.textContent=b[2]+' ('+(dc[b[1]]||0)+')';});
   }catch(e){p.style.display='none';}
 }
@@ -1494,7 +1488,7 @@ async function iprShow(type){
   try{
     var rows=await api('/api/ipr/runs/'+rId+'/decisions?type='+type+'&limit=1000');
     if(!rows.length){box.innerHTML='<div class="text-muted p-2" style="font-size:12px">None this run.</div>';return;}
-    box.innerHTML='<table class="table jt mb-0" style="font-size:12px"><thead><tr><th>Store</th><th>SKU</th><th>Why</th><th>Detail</th></tr></thead><tbody>'+
+    box.innerHTML='<table class="table jt mb-0" style="font-size:12px"><thead><tr><th>Store</th><th>SKU</th><th>Why</th><th>Detail</th><th></th></tr></thead><tbody>'+
       rows.map(function(r){
         var d=r.data||{},det=[];
         if(d.grade)det.push('grade '+d.grade);
@@ -1502,11 +1496,68 @@ async function iprShow(type){
         if(d.proposed_units)det.push(d.proposed_units+'u proposed');
         if(d.required_approval)det.push('needs '+d.required_approval);
         if(d.unfilled_units)det.push(d.unfilled_units+'u unfilled');
+        if(d.need_units&&type==='deferral')det.push(d.need_units+'u need · '+d.shelves_equivalent+' shelves');
+        var act='';
+        if((type==='block'||type==='review_hold')&&d.family&&r.store_id&&canRole('order_writer')){
+          act='<button class="btn btn-sm btn-outline-primary py-0" style="font-size:11px" onclick="iprReqForm(this,'+
+              Number(r.store_id)+','+JSON.stringify(String(d.family)).replace(/"/g,'&quot;')+','+Number(d.proposed_units||6)+')">Request reactivation</button>';
+        }
         return '<tr><td>'+(r.store_id?escH(String(r.store_id))+' '+escH(r.store_name||''):'—')+'</td>'+
           '<td>'+(r.sku_id?escH(sn(r.description||String(r.sku_id))):'—')+'</td>'+
-          '<td>'+escH(r.reason||'')+'</td><td class="text-muted">'+escH(det.join(' · '))+'</td></tr>';
+          '<td>'+escH(r.reason||'')+'</td><td class="text-muted">'+escH(det.join(' · '))+'</td><td>'+act+'</td></tr>';
       }).join('')+'</tbody></table>';
   }catch(e){box.innerHTML='<div class="text-danger p-2" style="font-size:12px">'+escH(e.message)+'</div>';}
+}
+/* Structured reactivation request (§11.5) — inline form under the blocked/held row */
+function iprReqForm(btn,storeId,family,units){
+  var tr=btn.closest('tr');
+  if(tr.nextSibling&&tr.nextSibling.className==='rx-form'){tr.nextSibling.remove();return;}
+  var f=document.createElement('tr');f.className='rx-form';
+  f.innerHTML='<td colspan="5" style="background:#f8fafc"><div class="row g-2" style="font-size:12px">'+
+    '<div class="col-12"><b>Reactivate '+escH(family)+' at store '+storeId+'</b> — needs the DSM, then the HD Sales Director (§27)</div>'+
+    '<div class="col-md-6"><label>DSM diagnosis (why it underperformed)</label><textarea class="form-control form-control-sm rx-dx" rows="2" placeholder="e.g. product not received / not merchandised / EDI missing"></textarea></div>'+
+    '<div class="col-md-6"><label>Corrective action</label><textarea class="form-control form-control-sm rx-ca" rows="2" placeholder="e.g. verified count, reset display, confirmed receiving"></textarea></div>'+
+    '<div class="col-4 col-md-2"><label>Test units</label><input type="number" min="1" class="form-control form-control-sm rx-u" value="'+Number(units)+'"></div>'+
+    '<div class="col-8 col-md-10 d-flex align-items-end gap-2"><button class="btn btn-sm btn-cta rx-go">Submit request</button>'+
+    '<span class="text-muted">Expires in 30 days · review in 21 days</span></div></div></td>';
+  tr.parentNode.insertBefore(f,tr.nextSibling);
+  f.querySelector('.rx-go').onclick=async function(){
+    var dx=f.querySelector('.rx-dx').value.trim(),ca=f.querySelector('.rx-ca').value.trim(),u=parseInt(f.querySelector('.rx-u').value,10);
+    if(dx.length<5||ca.length<5||!(u>0)){toast('Diagnosis, corrective action and a test quantity are required','warn');return;}
+    try{
+      await api('/api/ipr/reactivations',{method:'POST',body:JSON.stringify({store_id:storeId,ipr_family:family,diagnosis:dx,corrective_action:ca,test_units:u})});
+      toast('Reactivation requested — waiting on the DSM','ok');f.remove();
+    }catch(e){toast(e.message,'err');}
+  };
+}
+async function iprReacts(){
+  var box=document.getElementById('iprList');
+  if(_iprType==='react'&&box.style.display==='block'){box.style.display='none';_iprType=null;return;}
+  _iprType='react';box.style.display='block';box.innerHTML='<div class="text-muted p-2" style="font-size:12px">Loading…</div>';
+  try{
+    var rows=await api('/api/ipr/reactivations');
+    if(!rows.length){box.innerHTML='<div class="text-muted p-2" style="font-size:12px">No reactivation requests yet. Use “Request reactivation” on a blocked or held row.</div>';return;}
+    var lbl={pending_dsm:'Waiting on DSM',pending_director:'Waiting on Sales Director',approved:'Approved — ships as a test',rejected:'Rejected'};
+    box.innerHTML='<table class="table jt mb-0" style="font-size:12px"><thead><tr><th>Store</th><th>Family</th><th>Status</th><th>Diagnosis / action</th><th>Test</th><th></th></tr></thead><tbody>'+
+      rows.map(function(r){
+        var open=(r.status==='pending_dsm'||r.status==='pending_director');
+        return '<tr><td>'+escH(String(r.store_id))+' '+escH(r.store_name||'')+'</td><td>'+escH(r.ipr_family)+'</td>'+
+          '<td>'+escH(lbl[r.status]||r.status)+(r.dsm_by?'<div class="text-muted">DSM: '+escH(r.dsm_by)+'</div>':'')+(r.director_by?'<div class="text-muted">Director: '+escH(r.director_by)+'</div>':'')+(r.reject_reason?'<div class="text-danger">'+escH(r.reject_reason)+'</div>':'')+'</td>'+
+          '<td>'+escH(r.diagnosis)+'<div class="text-muted">'+escH(r.corrective_action)+'</div></td>'+
+          '<td>'+escH(String(r.test_units))+'u<div class="text-muted">until '+escH(String(r.expires_at))+'</div></td>'+
+          '<td>'+(open?'<button class="btn btn-sm btn-outline-success py-0" style="font-size:11px" onclick="iprDecide(\''+escH(String(r.id))+'\',true)">Approve</button> '+
+          '<button class="btn btn-sm btn-outline-danger py-0" style="font-size:11px" onclick="iprDecide(\''+escH(String(r.id))+'\',false)">Reject</button>':'')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }catch(e){box.innerHTML='<div class="text-danger p-2" style="font-size:12px">'+escH(e.message)+'</div>';}
+}
+async function iprDecide(id,approve){
+  try{
+    if(approve){var r=await api('/api/ipr/reactivations/'+id+'/approve',{method:'POST'});
+      toast(r.status==='approved'?'Approved — the next engine run ships the test quantity':'Step 1 signed — now waiting on the Sales Director','ok');}
+    else{var reason=prompt('Reason for rejecting?');if(!reason)return;
+      await api('/api/ipr/reactivations/'+id+'/reject',{method:'POST',body:JSON.stringify({reason:reason})});toast('Rejected','ok');}
+    _iprType=null;iprReacts();
+  }catch(e){toast(e.message,'err');}
 }
 
 /* ROUTING EXCHANGE — export request, import the routing team's trucks, pack plans */

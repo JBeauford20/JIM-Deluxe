@@ -47,10 +47,14 @@ RISK_SCORE = {"Critical": 1.0, "High": .75, "Moderate": .4, "Low": .1, "Unknown"
 BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
 
 
-def run(batch_id, shipping_week=None, preview=False, verbose=True):
+def run(batch_id, shipping_week=None, preview=False, verbose=True, what_if_unlimited=False):
+    """what_if_unlimited (preview only): every mapped, packable SKU treated as available in
+    unlimited quantity — the spec's unconstrained-need view, for analysis. Never writes."""
+    if what_if_unlimited and not preview:
+        raise ValueError("what_if_unlimited is preview-only")
     conn = get_conn()
     try:
-        return _run(conn, batch_id, shipping_week, preview, verbose)
+        return _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited)
     finally:
         try:
             conn.rollback()
@@ -68,7 +72,7 @@ def _norm(vals):
     return {k: (v / mx if mx else 0.0) for k, v in vals.items()}
 
 
-def _run(conn, batch_id, shipping_week, preview, verbose):
+def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=False):
     log = print if verbose else (lambda *a, **k: None)
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     today = date.today()
@@ -151,6 +155,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
     pack = {}
     for r in cur.fetchall():
         pack.setdefault(r["sku_id"], dict(r))
+
+    if what_if_unlimited:
+        for sku_id in sku_info:
+            if pack.get(sku_id, {}).get("trays_per_shelf"):
+                supply[sku_id] = 10 ** 7
+                avail_meta.setdefault(sku_id, {"code_level": "3M", "hard_good_type": None})
+        total_supply = sum(supply.values())
+        log("WHAT-IF: every mapped, packable SKU treated as available (preview only)")
 
     plannable = set()
     for sku_id in supply:
@@ -391,10 +403,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
             status = "ELIGIBLE"
         service[k] = (status, round(conv, 3), confd)
 
+    # Approved, unexpired reactivations (§11.5, §27): DSM + Sales Director signed off; the
+    # family ships as a controlled test quantity instead of being blocked/held.
+    cur.execute("""SELECT id, store_id, ipr_family, test_units FROM ipr_reactivations
+                   WHERE status = 'approved' AND expires_at >= %s""", (today,))
+    react = {(r["store_id"], r["ipr_family"]): {"id": str(r["id"]), "left": int(r["test_units"])}
+             for r in cur.fetchall()}
+
     # Gate every line (§24): store status, family service status
     ship, held = {}, {}
     blocked_units = held_units = 0.0
-    for key, l in lines.items():
+    for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
+        l = lines[key]
         if l["trays"] <= 0:
             continue                                            # existing/inbound covers demand
         st = stores[l["store_id"]]
@@ -402,11 +422,22 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
         fk = (l["store_id"], l["family"])
         g = grade[fk]
         svc, conv, confd = service[fk]
-        l.update(grade=g, service=svc, conversion=conv, conv_conf=confd)
+        l.update(grade=g, service=svc, conversion=conv, conv_conf=confd, reactivation=None)
         if not st.get("active") or status_s in BLOCK_STATUSES:
             held[key] = "store inactive / do-not-ship"
             blocked_units += l["trays"] * l["upt"]
             continue
+        if svc in ("BLOCKED", "REVIEW") and fk in react:
+            r = react[fk]
+            allowed = min(l["trays"], r["left"] // l["upt"])
+            if allowed > 0:
+                r["left"] -= allowed * l["upt"]
+                l["trays"], l["reactivation"] = allowed, r["id"]
+                decide("reactivation", f"{l['family']} reactivated (approved test) — {allowed} trays "
+                                       f"within the approved test quantity", store_id=l["store_id"],
+                       sku_id=l["sku_id"], reactivation_id=r["id"], conversion=conv, grade=g)
+                ship[key] = l
+                continue
         if svc == "BLOCKED":
             held[key] = f"{l['family']} conversion {conv:.0%} < {hard_block:.0%} after 13 wks — hard block"
             blocked_units += l["trays"] * l["upt"]
@@ -430,6 +461,30 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
                                   else "DSM" if kind == "review_hold" else None))
     log(f"Gates: {len(ship):,} lines eligible · {sum(1 for w in held.values() if 'hard block' in w or 'inactive' in w):,} "
         f"blocked · {sum(1 for w in held.values() if 'hard block' not in w and 'inactive' not in w):,} held for review")
+
+    # Deferral (§23, Josh decision 1A): a store whose eligible need is below one full shelf
+    # does not ship this week — its need is recalculated next week. Carts are never padded.
+    # Approved reactivation tests are exempt: a controlled test quantity must actually ship.
+    min_drop = float(S.get("min_drop_shelves", 0) or 0)
+    deferred = {}
+    if min_drop > 0:
+        store_shelves = defaultdict(float)
+        has_react = set()
+        for k, l in ship.items():
+            store_shelves[l["store_id"]] += l["trays"] / float(pack[l["sku_id"]]["trays_per_shelf"])
+            if l.get("reactivation"):
+                has_react.add(l["store_id"])
+        for store_id, shelves_eq in store_shelves.items():
+            if shelves_eq < min_drop and store_id not in has_react:
+                ks = [k for k in ship if k[0] == store_id]
+                units = sum(ship[k]["trays"] * ship[k]["upt"] for k in ks)
+                for k in ks:
+                    deferred[k] = ship.pop(k)
+                decide("deferral", f"Need is {shelves_eq:.2f} shelves (< {min_drop:g}) — deferred; "
+                                   f"recalculated next week, never padded (§23)",
+                       store_id=store_id, need_units=units, shelves_equivalent=round(shelves_eq, 2))
+        log(f"Deferral: {len({k[0] for k in deferred}):,} stores below {min_drop:g} shelf "
+            f"({sum(l['trays'] * l['upt'] for l in deferred.values()):,} units) — recalculated next week")
 
     # ══ 6. ALLOCATE AVAILABILITY (§12, §13, §15) — only after need exists ═══
     if ship:
@@ -573,6 +628,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
     incr_rev = with_rev - base_units_rev
     lost_unavail = sum(l.get("short_units", 0) * l["price"] for l in ship.values()) / cover_wk
     lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * lines[k]["price"] for k in held) / cover_wk
+    lost_deferred = sum(l["trays"] * l["upt"] * l["price"] for l in deferred.values()) / cover_wk
     edi_risk = sum(l["fc"] * l["price"] for l in lines.values() if l["store_id"] in edi_gap)
     price_srcs = defaultdict(int)
     for l in ship.values():
@@ -590,6 +646,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
             "unconstrained_weekly_demand_retail": round(demand_rev),
             "lost_unavailable_inventory": round(lost_unavail),
             "lost_blocks_and_holds": round(lost_held),
+            "lost_deferrals": round(lost_deferred),
             "edi_uncertainty_at_risk": round(edi_risk),
             "price_basis_units": dict(price_srcs),
             "method_note": ("Arrival-week retail across every store x SKU with velocity: "
@@ -604,6 +661,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
             "unfilled_demand_units": int(sum(unfilled.values())),
             "unallocated_supply_units": int(total_supply - alloc_units_total),
             "blocked_units": int(blocked_units), "review_held_units": int(held_units),
+            "deferred_units": int(sum(l["trays"] * l["upt"] for l in deferred.values())),
         },
         "counts": {
             "stores_with_velocity": len({l["store_id"] for l in lines.values()}),
@@ -613,6 +671,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
             "lines_blocked": sum(1 for w in held.values() if "hard block" in w or "inactive" in w),
             "lines_review_held": sum(1 for w in held.values() if "hard block" not in w and "inactive" not in w),
             "stores_edi_gap": len(edi_gap),
+            "stores_deferred": len({k[0] for k in deferred}),
+            "lines_reactivated": sum(1 for l in ship.values() if l.get("reactivation")),
             "review_pass": sum(1 for v in review.values() if v[0] == "PASS"),
             "review_warning": sum(1 for v in review.values() if v[0] == "WARNING"),
         },
@@ -626,7 +686,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose):
         },
         "not_yet_implemented": [
             "§14 seasonal/ad 13-week protection (needs event records: target in-store date, eligible stores)",
-            "§26-27 DSM portal + structured reactivation approvals (blocked lines carry the approval chain)",
+            "§26 DSM portal (two-step reactivation approvals ARE live via /api/ipr/reactivations)",
             "§29 post-delivery measurement, §30 back-testing harness",
             "§25 LLM reviewer (deterministic reviewer runs now; the AI /audit endpoint can layer on)",
         ],
