@@ -31,6 +31,9 @@ def queue_recommendation_run(
     user=Depends(require_role("order_writer", "manager", "admin"))
 ):
     """Queue a recommendation run. Returns job_id immediately."""
+    # Validate before touching the database: a refused request must not create a job row.
+    if req.engine != "v2":
+        raise HTTPException(400, "The legacy v1 engine was retired on 2026-11-17 — only 'v2' runs")
     job_id = str(uuid.uuid4())
     with get_db() as conn:
         cur = cursor(conn)
@@ -64,8 +67,6 @@ def queue_recommendation_run(
         except psycopg2.errors.UniqueViolation:
             raise HTTPException(409, "A recommendation run is already in progress for this batch")
 
-    if req.engine != "v2":
-        raise HTTPException(400, "The legacy v1 engine was retired on 2026-11-17 — only 'v2' runs")
     background.add_task(_run_recommendations, job_id, req.batch_id,
                         req.shipping_week, req.scenario_id, req.engine)
     return {"job_id": job_id, "status": "queued", "engine": req.engine}
