@@ -35,6 +35,23 @@ def run_summary(run_id: str, user=Depends(get_current_user)):
         return r
 
 
+# Mirrors workers/ipr_engine.py STALE_SALES_WARN_DAYS / STALE_SALES_BLOCK_DAYS (Sec 5).
+FRESH_WARN_DAYS = 9
+FRESH_BLOCK_DAYS = 21
+
+
+@router.get("/freshness")
+def data_freshness(user=Depends(get_current_user)):
+    """Sales-through date for the This Week strip, read before any run exists."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT MAX(sale_date) AS mx FROM sales WHERE sale_date <= CURRENT_DATE")
+        mx = cur.fetchone()["mx"]
+        age = (date.today() - mx).days if mx else None
+        return {"sales_through": str(mx) if mx else None, "age_days": age,
+                "warn_days": FRESH_WARN_DAYS, "block_days": FRESH_BLOCK_DAYS}
+
+
 @router.get("/runs/{run_id}/decisions")
 def run_decisions(run_id: str, type: str = Query("block"), limit: int = Query(500, le=5000),
                   store_id: int | None = None, user=Depends(get_current_user)):
