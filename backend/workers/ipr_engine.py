@@ -59,6 +59,14 @@ RELEASED_PIPELINE = ("Aster Exported", "Released", "Shipped", "Received or Estim
 # Delivery cadence by store grade (Josh 2026-11-19; §10 coverage varies by delivery frequency,
 # §19.1 release on service urgency). Defaults; ipr_settings rows override.
 DEFAULT_CADENCE_WEEKS = {"AA": 1, "A": 1, "B": 2, "C+": 3, "C": 3, "C-": 4, "D": 4}
+# One-full-CC-cart minimum (leadership 2026-11-20) + calibration (2026-11-20): a full cart is
+# ~240 units = 3.6 wks of a median AA store's in-season sales, 8 wks of a D store's. Cadence
+# by season so each due store's order can fill a cart. Off season = Sep-Feb (sales ~0.65x Apr-Jul).
+SEASONAL_CADENCE_WEEKS = {
+    "in":  {"AA": 3, "A": 3, "B": 3, "C+": 4, "C": 4, "C-": 5, "D": 5},
+    "off": {"AA": 4, "A": 4, "B": 5, "C+": 6, "C": 6, "C-": 6, "D": 6},
+}
+OFF_SEASON_MONTHS = {9, 10, 11, 12, 1, 2}
 DEFAULT_CADENCE_BUFFER_WEEKS = 1
 DUE_SLACK_DAYS = 3
 
@@ -182,7 +190,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     cur.execute("SELECT key, value FROM ipr_settings")
     S = {r["key"]: r["value"] for r in cur.fetchall()}
     cover_wk = float(S["coverage_weeks"])        # legacy flat coverage; cadence coverage below
-    cadence = {**DEFAULT_CADENCE_WEEKS, **(S.get("delivery_cadence_weeks") or {})}
+    _season = "off" if (shipping_week or date.today()).month in OFF_SEASON_MONTHS else "in"
+    _base_cad = (SEASONAL_CADENCE_WEEKS[_season] if int(S.get("min_order_full_carts", 1) or 0) > 0
+                 else DEFAULT_CADENCE_WEEKS)
+    cadence = {**_base_cad, **(S.get("delivery_cadence_weeks") or {})}
     _cb = S.get("cadence_buffer_weeks")
     cad_buffer = float(DEFAULT_CADENCE_BUFFER_WEEKS if _cb is None else _cb)
     econ_defer_due = str(S.get("economic_deferral_for_due_stores", False)).lower() in ("true", "1", "yes")
@@ -379,6 +390,21 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     # ══ 2. WHAT CAN THE STORE SELL? (§7) ═════════════════════════════════
     d = lambda n: anchor - timedelta(days=n)
+    # Historical store peak (Frank Paul, 2026-11-20; calibrated): Apr-Jul healthy-season rate per
+    # store x SKU. Forecast floor = 0.5 x peak rate x seasonal index (Oct-Nov 0.65) — restores
+    # demand on lines starved by short supply (back-test: -44% -> -4% on well-stocked lines where
+    # it binds). Months without a calibrated index get no floor.
+    pk_win = S.get("peak_window") or ["2026-04-01", "2026-07-31"]
+    pk_idx = {int(k): float(v) for k, v in (S.get("peak_seasonal_index") or {"10": 0.65, "11": 0.65}).items()}
+    pk_share = float(S.get("peak_floor_share", 0.5) or 0.5)
+    pk_month = (shipping_week or anchor).month
+    peak_rate = {}
+    if pk_month in pk_idx:
+        cur.execute("""SELECT store_id, sku_id, SUM(units_sold)::float AS u FROM sales
+                       WHERE sale_date BETWEEN %s AND %s GROUP BY 1, 2""", tuple(pk_win))
+        _wk = ((date.fromisoformat(pk_win[1]) - date.fromisoformat(pk_win[0])).days + 1) / 7.0
+        peak_rate = {(r["store_id"], r["sku_id"]): r["u"] / _wk for r in cur.fetchall() if r["u"]}
+    peak_mult = pk_share * pk_idx.get(pk_month, 0.0)
     cur.execute("""
         WITH fw AS (SELECT * FROM unnest(%s::bigint[], %s::int[]) AS t(sku_id, days))
         SELECT s.store_id, s.sku_id,
@@ -665,6 +691,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             fc, method = r13, "13-wk baseline (likely stocked out — low recent sales not trusted)"
         if store_id in edi_gap:
             fc, method = r13, "13-wk baseline (EDI gap)"
+        pf = peak_rate.get((store_id, sku_id), 0.0) * peak_mult
+        if pf > fc:
+            fc, method = pf, (f"Apr-Jul peak floor ({peak_rate[(store_id, sku_id)]:.1f}u/wk x "
+                              f"{peak_mult:.2f}) — recent sales held down by short supply")
         if fc < min_rate:
             continue                        # no velocity → not in scope (Josh: only ship velocity)
 
