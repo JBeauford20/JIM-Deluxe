@@ -117,10 +117,16 @@ def browser_suite():
             except Exception:
                 record("FAIL", "S4 login succeeds, nav shows user", "nav-user never showed email")
 
-            # S5 every visible screen activates; attribute console errors per screen
+            # S5 every visible screen activates; attribute console errors per screen.
+            # Since the v2 shell (Nov 20), the classic screens live inside the collapsed
+            # "Classic" dropdown — open it before each click so the nav link is visible.
             for sid, label in SCREENS:
                 before = len(page_errors)
                 try:
+                    link = page.locator(f"span.nl:has-text('{label}')").first
+                    if not link.is_visible():
+                        page.click("#xClassicBtn", timeout=10000)
+                        page.wait_for_selector("#xCMenu:not([hidden])", timeout=5000)
                     page.click(f"span.nl:has-text('{label}')", timeout=10000)
                     page.wait_for_selector(f"#screen-{sid}.active", timeout=15000)
                     time.sleep(1.2)  # let the screen's fetches land
@@ -143,9 +149,10 @@ def browser_suite():
                   "e => !!(e.offsetWidth || e.offsetHeight)") if page.query_selector("#it-clear-btn") else False
             check("S6 in-transit Clear hidden for order_writer", not itc)
 
-            # S7 change-password modal opens
+            # S7 change-password modal opens (the control sits in the v2 header's user chip;
+            # target the onclick precisely — text selectors also match the wrapper span)
             try:
-                page.click("span:has-text('Change password')", timeout=10000)
+                page.click("span[onclick='openChangePw()']", timeout=10000)
                 page.wait_for_selector("#chpwM", state="visible", timeout=10000)
                 record("PASS", "S7 change-password modal opens")
                 page.keyboard.press("Escape")
