@@ -329,9 +329,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         aster_lines[s].sort(key=lambda x: (-x[1], x[0]))
     total_supply = sum(supply.values())
 
-    # SKU master: family, prices, packing (units per tray, shelf capacity, height)
+    # SKU master: family, prices, packing (units per tray, shelf capacity, height).
+    # k.family / k.legacy_product_group are the v1 naming the scenario scopes match on.
     cur.execute("""
         SELECT k.sku_id, k.description, k.wholesale_price_whl, k.is_holiday,
+               k.family, k.legacy_product_group,
                fm.ipr_family, fm.approved, pb.retail_price
         FROM skus k
         LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
@@ -400,6 +402,48 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # it is excluded from every $ total and counted in summary.incomplete_price_units.
         return None, "missing"
 
+    # ── SCENARIOS (approved plain-English directives; checks-and-balances chain of
+    # 2026-11-20: an LLM parses the English, a DIFFERENT person approves, the engine applies
+    # DETERMINISTICALLY and BOUNDED here, and the independent scenario audit verifies the
+    # result after the run). Only approved + active scenarios reach this query.
+    scn_max_mult = float(S.get("scenario_max_multiplier", 3.0) or 3.0)
+    scn_boost_cap = float(S.get("scenario_priority_boost_cap", 0.2) or 0.2)
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'planning_scenarios' AND column_name = 'status'""")
+    _scn_status = bool(cur.fetchone())
+    cur.execute(f"""
+        SELECT wa.id::text AS adj_id, wa.scenario_id::text AS scenario_id, wa.label,
+               wa.adjustment_type, wa.value_numeric,
+               wa.scope_merchant, wa.scope_region, wa.scope_state, wa.scope_velocity_tier,
+               wa.scope_store_ids, wa.scope_sku_id, wa.scope_family, wa.scope_legacy_tier,
+               ps.name AS scenario_name, ps.created_by AS requested_by
+               {", ps.approved_by" if _scn_status else ", NULL AS approved_by"}
+        FROM weekly_adjustments wa
+        LEFT JOIN planning_scenarios ps ON ps.id = wa.scenario_id
+        WHERE wa.shipping_week = %s AND wa.active
+          AND (wa.scenario_id IS NULL OR
+               (COALESCE(ps.is_active, true) {"AND ps.status = 'approved'" if _scn_status else ""}))
+        ORDER BY wa.created_at
+    """, (shipping_week,))
+    scn_all = [dict(r) for r in cur.fetchall()]
+    scn_mult = [a for a in scn_all if a["adjustment_type"] == "demand_multiplier"]
+    scn_excl = ([a for a in scn_all if a["adjustment_type"] == "exclusion"]
+                + [a for a in scn_all if a["adjustment_type"] == "cart_target_override"
+                   and not float(a["value_numeric"] or 0)])
+    scn_floor = [a for a in scn_all if a["adjustment_type"] == "allocation_floor"]
+    scn_cap = [a for a in scn_all if a["adjustment_type"] == "allocation_cap"]
+    scn_boost = [a for a in scn_all if a["adjustment_type"] == "priority_boost"]
+    scn_unsupported = [a for a in scn_all
+                       if a["adjustment_type"] == "sku_push"
+                       or (a["adjustment_type"] == "cart_target_override" and float(a["value_numeric"] or 0))]
+    scn_fx = {a["adj_id"]: {"label": a["label"], "scenario_id": a["scenario_id"],
+                            "type": a["adjustment_type"], "lines": 0, "stores": set(),
+                            "trays_requested": 0, "trays_granted": 0, "trays_trimmed": 0}
+              for a in scn_all}
+    if scn_all:
+        log(f"Scenarios: {len(scn_all)} approved directive(s) for {shipping_week} "
+            f"({len(scn_unsupported)} unsupported in v2)")
+
     # Stores. §1/§4.1 hard-block fields (store capacity, approved assortment, receiving
     # restrictions, DSM assignment) ship in the dsm_portal_2026_11_20 migration; read them
     # when present so the engine works against a database that predates it.
@@ -419,6 +463,30 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "receiving_restrictions_set": sum(1 for s in stores.values() if s.get("receiving_restrictions")),
         "note": "§1/§4.1 hard blocks are inert for stores where the field is NULL",
     }
+
+    def _scn_store(a, store_id):
+        st_ = stores.get(store_id) or {}
+        if a["scope_store_ids"] and store_id not in a["scope_store_ids"]:
+            return False
+        if a["scope_merchant"] and st_.get("merchant") != a["scope_merchant"]:
+            return False
+        if a["scope_region"] and st_.get("region") != a["scope_region"]:
+            return False
+        if a["scope_state"] and st_.get("state") != a["scope_state"]:
+            return False
+        if a["scope_velocity_tier"] and (st_.get("dynamic_velocity_tier") or "").strip() != a["scope_velocity_tier"]:
+            return False
+        return True
+
+    def _scn_sku(a, sku_id):
+        info = sku_info.get(sku_id) or {}
+        if a["scope_sku_id"] and sku_id != a["scope_sku_id"]:
+            return False
+        if a["scope_family"] and (info.get("family") or "") != a["scope_family"]:
+            return False
+        if a["scope_legacy_tier"] and (info.get("legacy_product_group") or "") != a["scope_legacy_tier"]:
+            return False
+        return True
 
     # Freshness window by family (§4.5, Josh's dump cycle 2026-11-19): ipr_settings
     # freshness_days_by_family {family: days, "_default": 90} + freshness_days_by_sku overrides.
@@ -726,6 +794,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             trays = int(need // l["upt"])                                 # never exceed: round down
         else:
             trays = int(math.floor(need / l["upt"] + 0.5))                # nearest valid tray
+        # approved scenario cap/floor (pre-bounded to pace at line creation; survives every
+        # re-size). Floor runs BEFORE the §5 unreliable-inventory cap so data safety wins.
+        if l.get("scn_cap_trays") is not None and trays > l["scn_cap_trays"]:
+            trays = l["scn_cap_trays"]
+            cap_note = (cap_note or "") + " scenario cap"
+        if l.get("scn_floor_trays") and trays < l["scn_floor_trays"]:
+            trays = l["scn_floor_trays"]
+            cap_note = (cap_note or "") + " scenario floor (pace-bounded)"
         if l["conf"] == "UNUSABLE" and trays:
             trays = min(trays, max(1, int((l["fc"] * 2) // l["upt"])))    # §5: cap / review
             cap_note = (cap_note or "") + " inventory unreliable — capped at 2 wks"
@@ -772,6 +848,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if pf > fc and (not pk_starve or float(dv.get("d13") or 0) < pf * 13):
             fc, method = pf, (f"Apr-Jul peak floor ({peak_rate[(store_id, sku_id)]:.1f}u/wk x "
                               f"{peak_mult:.2f}) — recent sales held down by short supply")
+        # approved scenario demand multipliers (clamped; the parser never touches the engine —
+        # this deterministic application is the only path, and every hit is counted for audit)
+        for _a in scn_mult:
+            if _scn_store(_a, store_id) and _scn_sku(_a, sku_id):
+                _m = max(0.0, min(scn_max_mult,
+                                  float(_a["value_numeric"]) if _a["value_numeric"] is not None else 1.0))
+                if _m != 1.0:
+                    fc *= _m
+                    method = f"{method} × scenario '{_a['label']}' ({_m:g}x)"
+                    scn_fx[_a["adj_id"]]["lines"] += 1
+                    scn_fx[_a["adj_id"]]["stores"].add(store_id)
         if fc < min_rate:
             continue                        # no velocity → not in scope (Josh: only ship velocity)
 
@@ -866,6 +953,36 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             trays=0, cap_note=None, price=unit_price, price_src=price_src,
             last_del=last_del, sales13=sv["w13"], cohort=float(dv.get("cohort") or 0),
             plannable=is_plannable)
+        # scenario floor/cap, computed ONCE here (value_numeric is SHELVES) and pre-bounded to
+        # the store's selling pace — §17's 13-week window for H2O/Terrarium, the sell-through
+        # cover limit otherwise. "Add 2 shelves of bowls in the South" never ships more than
+        # the store's pace supports; the trim is counted and audited (scenario_applied).
+        l_ = lines[(store_id, sku_id)]
+        tps = max(1, int(pk.get("trays_per_shelf") or 1))
+        for _a in scn_cap:
+            if _scn_store(_a, store_id) and _scn_sku(_a, sku_id):
+                _c = int(float(_a["value_numeric"] or 0) * tps)
+                if l_.get("scn_cap_trays") is None or _c < l_["scn_cap_trays"]:
+                    l_["scn_cap_trays"] = _c
+                scn_fx[_a["adj_id"]]["lines"] += 1
+                scn_fx[_a["adj_id"]]["stores"].add(store_id)
+        for _a in scn_floor:
+            if is_plannable and _scn_store(_a, store_id) and _scn_sku(_a, sku_id):
+                req_t = int(float(_a["value_numeric"] or 0) * tps)
+                if fam in H2O_TERR_FAMILIES:
+                    _win = float(S["h2o_terrarium_window_weeks"])
+                    hard = int(max(0.0, fc * _win - oh_adj - inbound) // upt)
+                else:
+                    hard = int((fc * max_cover_wk) // upt)
+                grant = max(0, min(req_t, hard))
+                scn_fx[_a["adj_id"]]["trays_requested"] += req_t
+                scn_fx[_a["adj_id"]]["trays_granted"] += grant
+                if grant < req_t:
+                    scn_fx[_a["adj_id"]]["trays_trimmed"] += req_t - grant
+                if grant > (l_.get("scn_floor_trays") or 0):
+                    l_["scn_floor_trays"] = grant
+                scn_fx[_a["adj_id"]]["lines"] += 1
+                scn_fx[_a["adj_id"]]["stores"].add(store_id)
         size_line(lines[(store_id, sku_id)])
     log(f"Store x SKU lines with velocity: {len(lines):,} (all SKUs, for the objective) · "
         f"plannable: {sum(1 for l in lines.values() if l['plannable']):,} · with need: "
@@ -1019,6 +1136,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             held_kind[key] = "assortment_block"
             blocked_units += l["trays"] * l["upt"]
             continue
+        # approved scenario exclusions (incl. cart_target_override 0 = store removed this week)
+        _ex = next((a for a in scn_excl
+                    if _scn_store(a, l["store_id"]) and _scn_sku(a, l["sku_id"])), None)
+        if _ex:
+            held[key] = (f"excluded by approved scenario '{_ex['label']}'"
+                         + (f" (approved by {_ex['approved_by']})" if _ex.get("approved_by") else ""))
+            held_kind[key] = "scenario_exclusion"
+            scn_fx[_ex["adj_id"]]["lines"] += 1
+            scn_fx[_ex["adj_id"]]["stores"].add(l["store_id"])
+            blocked_units += l["trays"] * l["upt"]
+            continue
         if not store_due[l["store_id"]][0]:
             not_due_lines[key] = l
             continue
@@ -1097,6 +1225,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                         + sf_w["mature_delivery_sales"] * conv01
                         + sf_w["projected_need"] * min(1.0, l["need"] / max(1e-9, l["fc"] * l["cover_wk"]))
                         + sf_w["seasonal"] * 0.0 + sf_w["comparable_fit"] * GRADE_SCORE[l["grade"]])
+        for _a in scn_boost:                 # approved scenario priority boosts, clamped
+            if _scn_store(_a, l["store_id"]) and _scn_sku(_a, l["sku_id"]):
+                l["priority"] += max(0.0, min(scn_boost_cap, float(_a["value_numeric"] or 0)))
+                scn_fx[_a["adj_id"]]["lines"] += 1
+                scn_fx[_a["adj_id"]]["stores"].add(l["store_id"])
 
     by_sku = defaultdict(list)
     for k, l in ship.items():
@@ -1179,6 +1312,33 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if gaps:
         log(f"Gap fill: {gap_fills:,} fills · {gap_fill_trays:,} trays · {gap_fill_units:,}u across "
             f"{len(gaps):,} short store x families")
+
+    # Scenario audit trail: one decision per directive — what was asked, what the pace
+    # allowed, what was trimmed. The independent post-run audit reads exactly these.
+    for a in scn_all:
+        fx = scn_fx[a["adj_id"]]
+        if a in scn_unsupported:
+            decide("scenario_applied",
+                   f"Scenario '{a['label']}' NOT applied: '{a['adjustment_type']}' is unsupported "
+                   f"in v2 (availability must not drive demand §13; cart counts are demand-driven "
+                   f"§18). Rephrase as a demand multiplier, floor/cap or exclusion.",
+                   severity="warning", scenario_id=a["scenario_id"], applied=False,
+                   adjustment_type=a["adjustment_type"], requested_by=a["requested_by"],
+                   approved_by=a.get("approved_by"))
+            continue
+        trim = (f"; requested {fx['trays_requested']} trays, granted {fx['trays_granted']}, "
+                f"trimmed {fx['trays_trimmed']} to the stores' selling pace"
+                if a["adjustment_type"] in ("allocation_floor", "allocation_cap") else "")
+        decide("scenario_applied",
+               f"Scenario '{a['label']}' ({a['adjustment_type']}): {fx['lines']} line(s) at "
+               f"{len(fx['stores'])} store(s){trim}"
+               + ("" if fx["lines"] else " — matched nothing (no store in scope sells at pace)"),
+               severity="info" if fx["lines"] else "warning",
+               scenario_id=a["scenario_id"], applied=fx["lines"] > 0,
+               adjustment_type=a["adjustment_type"], lines=fx["lines"], stores=len(fx["stores"]),
+               trays_requested=fx["trays_requested"], trays_granted=fx["trays_granted"],
+               trays_trimmed=fx["trays_trimmed"], requested_by=a["requested_by"],
+               approved_by=a.get("approved_by"))
 
     # ══ 7. TRAYS -> CART-LOADING PLAN (§17–19): physical fit only ═══════════
     # §19.1 cart economics — editable assumptions, not rules: delivered cart cost is roughly
@@ -1615,6 +1775,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "delivery_cadence": cadence_summary,
         "shipping_efficiency": eff_summary,
         "shrink": shrink_summary,
+        "scenarios": {
+            "directives": len(scn_all),
+            "applied": sum(1 for a in scn_all if scn_fx[a["adj_id"]]["lines"] > 0),
+            "unsupported": len(scn_unsupported),
+            "by_directive": [{"label": a["label"], "type": a["adjustment_type"],
+                              "lines": scn_fx[a["adj_id"]]["lines"],
+                              "stores": len(scn_fx[a["adj_id"]]["stores"]),
+                              "trays_trimmed": scn_fx[a["adj_id"]]["trays_trimmed"],
+                              "requested_by": a["requested_by"],
+                              "approved_by": a.get("approved_by")} for a in scn_all],
+        },
         "post_delivery": {
             "mode": pd_mode,
             "store_families_measured": len(pd_response),
