@@ -14,7 +14,7 @@ router = APIRouter()
 DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", "review", "line",
                   "duplicate_run", "stopped_13wk", "reduced_13wk", "gap_fill", "low_value_cart", "deferred_economics", "not_due",
                   "deferral", "reactivation", "pushed_min_cart", "min_cart_service_review",
-                  "assortment_block", "capacity_cap")
+                  "assortment_block", "capacity_cap", "response_adjustment")
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
 # role (Josh), but one person can never sign both steps.
@@ -322,6 +322,38 @@ def list_ai_reviews(run_id: str, user=Depends(get_current_user)):
                        FROM ipr_ai_reviews WHERE run_id = %s
                        ORDER BY created_at DESC LIMIT 20""", (run_id,))
         return cur.fetchall()
+
+
+# ── §29 post-delivery measurement (7–28 day shipment response; leadership 11/20) ──
+
+@router.post("/post-delivery/compute")
+def post_delivery_compute(user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Rebuild the shipment-response measurement from the sales/delivery record. Runs
+    automatically after the Monday ingest; this endpoint is the manual trigger."""
+    from services.post_delivery import compute
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT to_regclass('public.delivery_performance') IS NOT NULL AS ok")
+        if not cur.fetchone()["ok"]:
+            raise HTTPException(503, "Run the post_delivery_2026_11_21 migration first")
+        cur.execute("SELECT value FROM ipr_settings WHERE key = 'post_delivery_window_weeks'")
+        r = cur.fetchone()
+        window = int(r["value"]) if r else 26
+        result = compute(cur, window)
+        log_change(cur, None, "analysis", "post_delivery",
+                   f"recomputed: {result.get('cohorts', 0)} cohorts", user.get("email"))
+        return result
+
+
+@router.get("/post-delivery/summary")
+def post_delivery_summary(user=Depends(get_current_user)):
+    from services.post_delivery import network_summary
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT to_regclass('public.delivery_performance') IS NOT NULL AS ok")
+        if not cur.fetchone()["ok"]:
+            raise HTTPException(503, "Post-delivery measurement is not set up yet (migration pending)")
+        return network_summary(cur)
 
 
 @router.get("/family-map")

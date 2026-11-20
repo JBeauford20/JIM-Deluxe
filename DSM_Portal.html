@@ -256,6 +256,8 @@ async function openStore(id){
 
       '<div class="card"><h2>SKU performance</h2><div id="skus" class="muted">Loading…</div></div>'+
 
+      '<div class="card"><h2>Shipment response</h2><div id="resp" class="muted">Loading…</div></div>'+
+
       '<div class="card"><h2>What the engine decided (latest run)</h2>'+
       (decs?('<div class="twrap"><table>'+decs+'</table></div>'):'<div class="muted">No decisions recorded for this store in the latest run.</div>')+'</div>'+
 
@@ -275,7 +277,7 @@ async function openStore(id){
       '<div class="card"><h2>Recent visits</h2>'+
       (visits?('<div class="twrap"><table><tr><th>Date</th><th>By</th><th>Merchandising</th><th>Comments</th></tr>'+visits+'</table></div>')
              :'<div class="muted">No visits recorded for this store yet.</div>')+'</div>';
-    loadSkus(id);
+    loadSkus(id);loadResponse(id);
     window.scrollTo({top:0});
   }catch(e){box.innerHTML='';err(e.message,function(){openStore(id)})}
 }
@@ -308,6 +310,28 @@ async function loadSkus(id){
         tbl(k.weakest_families,[['family','Family'],['u13','13wk u'],['d13','13wk $']])+'</details>';
   }catch(e){box.className='muted';box.textContent='SKU performance did not load.';
     err('Could not load SKU performance: '+e.message,function(){loadSkus(id)})}
+}
+
+async function loadResponse(id){
+  var box=document.getElementById('resp');if(!box)return;
+  try{
+    var d=await api('/stores/'+id+'/response');
+    if(!d.available){box.textContent='Shipment-response measurement is not set up yet.';return}
+    if(!(d.cohorts||[]).length){box.textContent='No measured deliveries for this store yet — the first read comes 4 weeks after a delivery.';return}
+    var L={strong:['Strong','g'],expected:['As expected',''],weak:['Weak','r'],no_baseline:['New placement','y'],too_recent:['Too recent','b']};
+    var fam=(d.by_family||[]).map(function(r){var l=L[r.response_class]||[r.response_class,''];
+      return '<tr><td>'+esc(r.ipr_family)+'</td><td class="num">'+n(r.cohorts)+'</td>'+
+        '<td class="num">'+(r.avg_sell28!=null?Math.round(r.avg_sell28*100)+'%':'—')+'</td>'+
+        '<td><span class="chip '+l[1]+'">'+esc(l[0])+'</span></td></tr>'}).join('');
+    var rows=(d.cohorts||[]).slice(0,10).map(function(r){var l=L[r.classification]||[r.classification,''];
+      return '<tr><td>'+esc(r.delivery_date)+'</td><td>'+esc(r.ipr_family)+'</td><td class="num">'+n(r.cohort_units)+'u</td>'+
+        '<td class="num">'+(r.sell_through_28!=null?Math.round(r.sell_through_28*100)+'%':'—')+'</td>'+
+        '<td><span class="chip '+l[1]+'">'+esc(l[0])+'</span></td></tr>'}).join('');
+    box.className='';
+    box.innerHTML='<div class="muted" style="margin-bottom:4px">How each delivery sold in its first 28 days (sales lift measured days 7–28). 60% sold is the target.</div>'+
+      '<div class="twrap"><table><tr><th>Family</th><th class="num">Deliveries</th><th class="num">Sold in 28d</th><th>Response</th></tr>'+fam+'</table></div>'+
+      '<details style="margin-top:6px"><summary>Recent deliveries</summary><div class="twrap"><table><tr><th>Delivered</th><th>Family</th><th class="num">Units</th><th class="num">Sold 28d</th><th>Read</th></tr>'+rows+'</table></div></details>';
+  }catch(e){box.textContent='Shipment response did not load: '+e.message}
 }
 
 async function askAI(){
@@ -389,8 +413,55 @@ async function loadManager(){
       '<button class="btn" id="mgr-send" onclick="sendDigests()">Email digests to DSMs</button>'+
       (o.smtp_configured?'<button class="btn sec" onclick="flushOutbox()">Retry queued emails</button>':'')+'</div>'+
       (rows?('<div class="twrap"><table><tr><th>To</th><th>Subject</th><th>Status</th></tr>'+rows+'</table></div>')
-           :'<div class="muted">No digest emails yet.</div>');
+           :'<div class="muted">No digest emails yet.</div>')+
+      (ME.role==='admin'?'<div id="logins" style="margin-top:12px"><h2>Logins</h2><div class="muted">Loading…</div></div>':'');
+    if(ME.role==='admin')loadLogins();
   }catch(e){/* non-managers and load errors: card stays hidden */}
+}
+var ROLES=['viewer','dsm','sales_director','order_writer','manager','admin'];
+async function loadLogins(){
+  var box=document.getElementById('logins');if(!box)return;
+  try{
+    var r=await fetch('/api/auth/users',{headers:authHdr()});
+    if(!r.ok)throw new Error((await r.json().catch(function(){return{}})).detail||('HTTP '+r.status));
+    var users=await r.json();
+    var rows=users.map(function(u){
+      return '<tr><td>'+esc(u.email)+(u.confirmed?'':' <span class="chip y">invite pending</span>')+'</td>'+
+        '<td><select onchange="setRole(\''+esc(u.id)+'\',this)" style="width:auto;padding:4px 6px;font-size:13px">'+
+        ROLES.map(function(x){return '<option'+(x===u.role?' selected':'')+'>'+x+'</option>'}).join('')+'</select></td>'+
+        '<td class="muted">'+(u.last_sign_in?('last seen '+esc(String(u.last_sign_in).slice(0,10))):'never signed in')+'</td></tr>'}).join('');
+    box.innerHTML='<h2>Logins</h2>'+
+      '<div class="muted" style="margin-bottom:4px">Accounts exist by invite only (self sign-up should be OFF in Supabase). Roles: viewer reads, dsm records visits and approvals, manager releases.</div>'+
+      '<div class="twrap"><table><tr><th>Email</th><th>Role</th><th></th></tr>'+rows+'</table></div>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">'+
+      '<input type="text" id="inv-em" placeholder="email to invite" style="flex:1;min-width:180px" inputmode="email">'+
+      '<select id="inv-role" style="width:auto">'+ROLES.map(function(x){return '<option'+(x==='dsm'?' selected':'')+'>'+x+'</option>'}).join('')+'</select>'+
+      '<button class="btn" id="inv-go" onclick="inviteUser()">Invite</button></div>'+
+      '<div class="ferr" id="inv-err"></div>';
+  }catch(e){box.innerHTML='<h2>Logins</h2><div class="muted">Could not load logins: '+esc(e.message)+'</div>'}
+}
+async function inviteUser(){
+  var em=document.getElementById('inv-em').value.trim(),role=document.getElementById('inv-role').value;
+  var btn=document.getElementById('inv-go'),verr=document.getElementById('inv-err');verr.textContent='';
+  if(em.indexOf('@')<1){verr.textContent='Enter a valid email address.';return}
+  if(btn.disabled)return;btn.disabled=true;btn.textContent='Inviting…';
+  try{
+    var r=await fetch('/api/auth/users/invite',{method:'POST',
+      headers:Object.assign({'Content-Type':'application/json'},authHdr()),
+      body:JSON.stringify({email:em,role:role})});
+    if(!r.ok)throw new Error((await r.json().catch(function(){return{}})).detail||('HTTP '+r.status));
+    toast('Invited '+em+' as '+role);loadLogins();
+  }catch(e){verr.textContent=e.message}
+  btn.disabled=false;btn.textContent='Invite';
+}
+async function setRole(id,sel){
+  try{
+    var r=await fetch('/api/auth/users/'+id+'/role',{method:'PATCH',
+      headers:Object.assign({'Content-Type':'application/json'},authHdr()),
+      body:JSON.stringify({role:sel.value})});
+    if(!r.ok)throw new Error((await r.json().catch(function(){return{}})).detail||('HTTP '+r.status));
+    toast('Role updated');
+  }catch(e){err('Could not change the role: '+e.message);loadLogins();}
 }
 async function sendDigests(){
   var b=document.getElementById('mgr-send');if(b.disabled)return;

@@ -75,3 +75,72 @@ def require_role(*roles: str):
 @router.get("/me")
 async def me(user=Depends(get_current_user)):
     return user
+
+
+# ── Admin user management (logins) ─────────────────────────────────────────────
+# Self sign-up is to be OFF in Supabase (audit 11/20): accounts exist only by invite.
+# These endpoints use the service-role key server-side; the browser never sees it.
+VALID_ROLES = ("viewer", "dsm", "sales_director", "order_writer", "manager", "admin")
+
+
+def _svc_headers():
+    if not SUPABASE_KEY:
+        raise HTTPException(503, "SUPABASE_SERVICE_ROLE_KEY not configured on this server")
+    return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"}
+
+
+@router.get("/users")
+async def list_users(user=Depends(require_role("admin"))):
+    """Who can sign in, with their role. Admin only."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(f"{SUPABASE_URL}/auth/v1/admin/users?per_page=200",
+                             headers=_svc_headers())
+    if r.status_code != 200:
+        raise HTTPException(502, f"Supabase admin API: {r.status_code}")
+    users = (r.json() or {}).get("users", [])
+    return [{"id": u.get("id"), "email": u.get("email"),
+             "role": (u.get("app_metadata") or {}).get("role", "viewer"),
+             "confirmed": bool(u.get("email_confirmed_at")),
+             "last_sign_in": u.get("last_sign_in_at"), "created": u.get("created_at")}
+            for u in users]
+
+
+@router.post("/users/invite", status_code=201)
+async def invite_user(body: dict, user=Depends(require_role("admin"))):
+    """Invite a new login by email with a role (sends Supabase's invite email).
+    Body: {"email": ..., "role": one of VALID_ROLES}."""
+    email = str(body.get("email", "")).strip().lower()
+    role = str(body.get("role", "viewer")).strip()
+    if "@" not in email or len(email) > 200:
+        raise HTTPException(400, "A valid email is required")
+    if role not in VALID_ROLES:
+        raise HTTPException(400, f"role must be one of {VALID_ROLES}")
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(f"{SUPABASE_URL}/auth/v1/invite", headers=_svc_headers(),
+                              json={"email": email, "data": {}})
+        if r.status_code not in (200, 201):
+            detail = (r.json() or {}).get("msg", r.text[:200]) if r.content else r.status_code
+            raise HTTPException(502, f"Invite failed: {detail}")
+        uid = (r.json() or {}).get("id")
+        # role lives in app_metadata — only the service role can set it (never user-editable)
+        r2 = await client.put(f"{SUPABASE_URL}/auth/v1/admin/users/{uid}",
+                              headers=_svc_headers(), json={"app_metadata": {"role": role}})
+        if r2.status_code != 200:
+            raise HTTPException(502, "User invited but the role could not be set — set it again")
+    return {"invited": email, "role": role, "id": uid}
+
+
+@router.patch("/users/{user_id}/role")
+async def set_role(user_id: str, body: dict, user=Depends(require_role("admin"))):
+    role = str(body.get("role", "")).strip()
+    if role not in VALID_ROLES:
+        raise HTTPException(400, f"role must be one of {VALID_ROLES}")
+    if user_id == user.get("id") and role != "admin":
+        raise HTTPException(400, "You cannot remove your own admin role")
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.put(f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+                             headers=_svc_headers(), json={"app_metadata": {"role": role}})
+    if r.status_code != 200:
+        raise HTTPException(502, f"Supabase admin API: {r.status_code}")
+    return {"id": user_id, "role": role}

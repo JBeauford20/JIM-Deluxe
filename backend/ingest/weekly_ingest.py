@@ -8,6 +8,9 @@ Stages (each skippable):
   2. MANIFEST  load the newest week's Compiled sheet into delivery_manifest
                (in-transit + last-delivery truth for the DUE gate).
   3. VELOCITY  recompute store + group velocity (EWMA) on the fresh sales.
+  4. RESPONSE  recompute the §29 post-delivery shipment-response measurement
+               (services/post_delivery.py) so the week's engine run reads fresh
+               response data — the measure → adjust → measure training loop.
 
 Availability is NOT ingested here: it arrives with the weekly greenhouse upload
 through the app (or a future Aster pull) and is a different cadence.
@@ -93,11 +96,39 @@ def stage_sales(args, log) -> bool:
     return ok
 
 
+def stage_response(log) -> bool:
+    """Recompute §29 post-delivery response in-process (no subprocess: the service only
+    needs a DB connection). Skips quietly when the migration has not run yet."""
+    import psycopg2
+    import psycopg2.extras
+    sys.path.insert(0, str(HERE.parent))
+    try:
+        from services.post_delivery import compute
+        conn = psycopg2.connect(os.environ["SUPABASE_DB_URL"], connect_timeout=25)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT to_regclass('public.delivery_performance') IS NOT NULL AS ok")
+        if not cur.fetchone()["ok"]:
+            log("  RESPONSE: delivery_performance table missing (migration pending) — SKIPPED")
+            conn.close()
+            return True
+        cur.execute("SELECT value FROM ipr_settings WHERE key = 'post_delivery_window_weeks'")
+        r = cur.fetchone()
+        res = compute(cur, int(r["value"]) if r else 26)
+        conn.commit()
+        conn.close()
+        log(f"  RESPONSE: {res.get('cohorts', 0)} cohorts, classes {res.get('by_class')}")
+        return True
+    except Exception as e:
+        log(f"  RESPONSE FAILED: {e}")
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-sales", action="store_true")
     ap.add_argument("--skip-manifest", action="store_true")
     ap.add_argument("--skip-velocity", action="store_true")
+    ap.add_argument("--skip-response", action="store_true")
     ap.add_argument("--sales-file")
     args = ap.parse_args()
 
@@ -118,6 +149,9 @@ def main():
         for script in ("velocity_engine.py", "group_velocity_engine.py"):
             if not run([PY, str(workers / script)], log):
                 failures.append(script)
+    if not args.skip_response and "sales" not in failures:
+        if not stage_response(log):
+            failures.append("post_delivery_response")
 
     if failures:
         log(f"INGEST FAILED: {failures} — see {LOG_DIR}")

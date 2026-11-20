@@ -3886,7 +3886,12 @@ var X_KINDS=[
   ['low_value_cart','Low-value cart','warn','Ships with a warning showing wholesale value and freight (Sec 19.1).'],
   ['deferred_economics','Light cart, waiting a week','warn','Waiting one week costs less than delivering now. Ships next due week regardless.'],
   ['not_due','Not due this week','n','The store is not due a delivery yet under its grade\'s delivery cadence.'],
+  ['pushed_min_cart','Pushed: under one full cart','warn','Below the one-full-cart minimum, so the whole order waits a week; need recalculated with extra coverage (leadership, Nov 20).'],
+  ['min_cart_service_review','Needs service review','bad','Pushed 4+ due cycles in a row under the cart minimum — an effective service stop that needs a DSM decision.'],
+  ['assortment_block','Not in approved assortment','bad','The family is outside this store\'s approved assortment on the store master (Sec 24).'],
+  ['capacity_cap','Cut to store capacity','warn','The order exceeded the store\'s cart capacity; lowest-value carts were cut (Sec 1).'],
   ['review_warning','Review warning','warn','The reviewer flagged the order but it ships.'],
+  ['response_adjustment','Cadence adjusted from measured response','info','The store\'s 7-28 day shipment response moved its delivery cadence one week (Sec 29, feedback = apply).'],
   ['deferral','Deferred','n','Need is under one shelf; recalculated next week, never padded.'],
   ['validation','Data check','info','A data problem the engine found before planning.'],
   ['gap_fill','Gap fill','ok','A short SKU was filled with a same-family best seller that has its own need (Sec 21).'],
@@ -4095,7 +4100,10 @@ function xPoll(n){
 /* ---------- results ---------- */
 async function xLoadRun(id,quiet){
   var r=await Promise.all([api('/api/ipr/runs/'+id+'/summary').catch(function(){return null;}),api('/api/orders/runs/'+id+'/summary').catch(function(){return null;})]);
-  if(!r[0]||r[0].engine_version!=='v2'||!r[0].ipr_summary){if(!quiet)toast('That run was not made by the v2 engine','warn');return;}
+  if(!r[0]){
+    // A failed load must never masquerade as "No run yet" — the writer might re-upload.
+    toast('Could not load the run — connection or server problem. Refresh before re-uploading anything.','err');return;}
+  if(r[0].engine_version!=='v2'||!r[0].ipr_summary){if(!quiet)toast('That run was not made by the v2 engine','warn');return;}
   X.run=id;X.ipr=r[0];X.meta=r[1]||{};
   X.exc={rows:[],kind:'all',page:0,loaded:null};X.fc={rows:[],page:0,loaded:null,more:false};X.cl={orders:[],page:0,loaded:null};X.ex=null;
   xRenderResults();xRenderSteps();xExcBadge();xRenderHandoff();xLoadExc().then(xExcBadge,xExcBadge);
@@ -4116,7 +4124,7 @@ function xRenderResults(){
   /* objective */
   var min=o.minimum_weekly_retail||900000,exp=o.expected_weekly_retail||0,base=o.baseline_weekly_retail||0,inc=o.incremental_weekly_retail||0,gap=o.gap_to_minimum;
   var scale=Math.max(exp,min)*1.1||1;
-  h+='<div class="xpanel"><div class="xph"><h2>Weekly sales objective</h2><span class="sub">Expected register sales in the arrival week, with and without this plan (Sec 2).</span><span class="act"><span class="xsrc">Sec 2 &middot; objective</span></span></div>'+
+  h+='<div class="xpanel"><div class="xph"><h2>Weekly sales objective</h2><span class="sub">Expected sales in the arrival week at WHOLESALE (leadership, Nov 20), with and without this plan (Sec 2).</span><span class="act"><span class="xsrc">Sec 2 &middot; objective</span></span></div>'+
     '<div class="xobj">'+xTile('Baseline, no new orders',xUsd(base),'what stores sell from stock on hand')+
       xTile('Added by this plan','+'+xUsd(inc),'incremental sales')+
       '<div class="xob hero"><div class="v">'+xUsd(exp)+'</div><div class="l">Expected weekly sales</div><div class="f">baseline + this plan</div></div>'+
@@ -4173,7 +4181,7 @@ function xRenderResults(){
   if(ce&&typeof ce==='object'){
     var fp=ce.freight_pct;
     var pm=ce.pushed_min_cart||{};
-    h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Shipping carts only. Minimum order is one full CC cart (leadership, Nov 20); smaller orders wait a week and are counted separately.</span></div><div class="xobj">'+
+    h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Shipping carts only, as of when the run was written — later edits or routing deferrals are not reflected here. Minimum order is one full CC cart (leadership, Nov 20); smaller orders wait a week and are counted separately.</span></div><div class="xobj">'+
       xTile('Carts shipping',xN(ce.carts),ce.avg_tray_fill_shipping!=null?Math.round(ce.avg_tray_fill_shipping*100)+'% avg tray fill':'this week')+
       xTile('Avg wholesale per cart',ce.avg_wholesale_per_cart!=null?xUsdFull(ce.avg_wholesale_per_cart):'&mdash;','shipping carts')+
       xTile('Wholesale shipping',ce.wholesale_value!=null?xUsd(ce.wholesale_value):'&mdash;','in shipping carts')+
@@ -4272,8 +4280,14 @@ function xRenderFiles(){
 }
 async function xDownload(k){
   var f=X_FILES.filter(function(x){return x.k===k;})[0];if(!f||!X.run)return;
-  var b=document.getElementById('xf-'+k);if(b)b.disabled=true;
   var path=f.p.replace('{run_id}',X.run);
+  if(k==='sc'){
+    // Downloading Stores & Carts normally marks the run "Sent to Pin Routes", which locks
+    // the week (a rerun is refused by the duplicate-run control). Say so, offer both ways.
+    var mark=confirm('Send to routing?\n\nOK = download AND mark this run "Sent to Pin Routes" — the week is then locked and a rerun will be refused.\n\nCancel = download a copy WITHOUT marking (week stays open).');
+    if(!mark)path+='?mark_submitted=false';
+  }
+  var b=document.getElementById('xf-'+k);if(b)b.disabled=true;
   try{
     var sent=_curTok(),r=await fetch(B+path,{headers:authHdr()});
     if(r.status===401&&await tryRefresh()){sent=_curTok();r=await fetch(B+path,{headers:authHdr()});}
@@ -4373,7 +4387,7 @@ function xCloseDw(){var d=document.getElementById('xDw');if(!d||!d.classList.con
 var X_FIELDS={forecast_wk:['Forecast (units / week)','n1'],method:['How it was forecast','method'],onhand:['On hand now (units)','n0'],onhand_conf:['On-hand confidence','low'],
   onhand_src:['On-hand source','t'],inbound:['On the way (units)','n0'],inbound_src:['On-the-way source','t'],projected:['Expected on hand at arrival','n0'],risk:['Stockout risk','t'],
   need_units:['Need (units)','n0'],need_trays:['Need (trays)','n0'],alloc_trays:['Ships (trays)','n0'],upt:['Units per tray','n0'],cap_note:['Cap applied','t'],
-  conversion:['Sold of last delivery (13 weeks)','pct'],priority:['Priority score','n2'],sku_fit:['SKU fit score','n2'],price:['Retail price','usd2'],price_src:['Price source','t'],
+  conversion:['Sold of last delivery (13 weeks)','pct'],priority:['Priority score','n2'],sku_fit:['SKU fit score','n2'],price:['Unit price (wholesale)','usd2'],price_src:['Price source','t'],
   family:['Product family','t'],grade:['Store grade','t'],cadence_grade:['Delivery grade','t'],cadence_weeks:['Delivers every (weeks)','n0'],last_delivery:['Last delivery','date'],
   next_due:['Next due','date'],arrival:['Arrives','date'],lines:['Lines','n0'],shipping_efficiency:['Shipping efficiency (sold / delivered)','pct'],verdict:['Review result','t'],
   severity:['Severity','t'],required_approval:['Needs approval from','t'],unfilled_units:['Short (units)','n0'],proposed_units:['Proposed (units)','n0'],action:['Action','t'],
@@ -4492,6 +4506,7 @@ function xRenderHandoff(){
 }
 async function xImportWb(inp){
   var f=inp.files&&inp.files[0];if(!f||!X.run)return;
+  if(!confirm('Import "'+f.name+'"?\n\nThis REPLACES the current loads, ship dates and delivery dates for this run with the workbook’s. This cannot be undone from here.')){inp.value='';return;}
   var m=document.getElementById('clWbMsg');if(m)m.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Importing '+escH(f.name)+'&hellip;';
   try{var fd=new FormData();fd.append('file',f);
     var r=await apiUpload('/api/routing/runs/'+X.run+'/workbook',fd);
@@ -4723,7 +4738,7 @@ function xRenderRep(){
   var S=X.ipr.ipr_summary||{},o=S.objective||{},a=S.allocation||{},se=S.shipping_efficiency||{},gf=S.gap_fill||{},pct=function(v){return Math.round(v*100)+'%';};
   var h='';
   if(X.rep==='r1'){
-    h='<div class="xobj">'+xTile('Store demand, unlimited supply',xUsd(o.unconstrained_weekly_demand_retail),'weekly retail if every need were filled','')+xTile('What stores need',xN(a.unconstrained_need_units),'units, before rules')+
+    h='<div class="xobj">'+xTile('Store demand, unlimited supply',xUsd(o.unconstrained_weekly_demand_retail),'weekly wholesale if every need were filled','')+xTile('What stores need',xN(a.unconstrained_need_units),'units, before rules')+
       xTile('Eligible need',xN(a.eligible_need_units),'after 13-week stops, blocks and holds')+xTile('Available units',xN(a.available_units),'this week\'s greenhouse file')+'</div>'+
       '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Shipping efficiency by family</h2><span class="sub">Units sold &divide; units delivered, last 13 weeks. Below 60% is the Sec 11.3 bar.</span></div>'+
       xFamBars(se.by_family,pct,Math.max(1,Math.max.apply(null,Object.keys(se.by_family||{}).map(function(k){return se.by_family[k]||0;}))),'var(--x-chart-1)',0.6);
@@ -4735,10 +4750,39 @@ function xRenderRep(){
       '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Where the need went</h2><span class="sub">Units, this run</span></div>'+
       xFamBars({'Allocated':a.allocated_units,'Unfilled (no supply)':a.unfilled_demand_units,'Stopped at 13 weeks':a.stopped_13wk_units,'Removed at 13-week reduce':a.reduced_13wk_units_removed,'Deferred':a.deferred_units,'Blocked':a.blocked_units,'Held for review':a.review_held_units},xN,null,'var(--x-chart-2)');
   }else{
-    h='<div class="xbanner info" style="margin:14px 16px"><i class="bi bi-info-circle"></i><span><b>Post-delivery report is not built yet.</b> It measures each run about 5 weeks after delivery, once sales mature (Sec 29). Until then, the closest read is last-13-week shipping efficiency on Report 1.</span></div>'+
-      ((S.not_yet_implemented||[]).length?'<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Not built yet in the engine</h2></div><ul class="xsmall" style="padding:10px 16px 14px 34px;margin:0">'+S.not_yet_implemented.map(function(t){return '<li>'+escH(xPlain(t))+'</li>';}).join('')+'</ul>':'');
+    el.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading shipment response&hellip;</div>';
+    xRenderPd(el);return;
   }
   el.innerHTML=h;
+}
+/* Report 3: Sec 29 shipment response — what actually sold 7-28 days after landing. */
+async function xRenderPd(el){
+  try{
+    var d=X.pd||(X.pd=await api('/api/ipr/post-delivery/summary'));
+    var bc={};(d.by_class||[]).forEach(function(r){bc[r.classification]=r;});
+    var tone={strong:'ok',expected:'',weak:'bad',no_baseline:'warn',too_recent:''};
+    var label={strong:'Strong response',expected:'Expected response',weak:'Weak response',no_baseline:'New placement',too_recent:'Too recent to judge'};
+    var tiles=['strong','expected','weak','no_baseline','too_recent'].filter(function(k){return bc[k];}).map(function(k){var r=bc[k];
+      return xTile(label[k],xN(r.n),xN(r.units)+'u'+(r.avg_sell28!=null?' &middot; '+Math.round(r.avg_sell28*100)+'% sold in 28d':''),tone[k]);}).join('');
+    var fam={};(d.by_family||[]).forEach(function(r){if(r.avg_sell28!=null)fam[r.ipr_family]=Number(r.avg_sell28);});
+    var lists=function(rows,t){return rows&&rows.length?('<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>'+t+'</h2><span class="sub">2+ measured deliveries</span></div><div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th>Family</th><th class="r">Deliveries</th><th class="r">Avg lift</th><th class="r">Sold in 28d</th></tr></thead><tbody>'+
+      rows.map(function(r){return '<tr><td><b>'+r.store_id+'</b> '+escH(r.store_name||'')+', '+escH(r.state||'')+'</td><td>'+escH(r.ipr_family)+'</td><td class="r">'+xN(r.cohorts)+'</td><td class="r">'+(r.avg_lift!=null?(r.avg_lift>=1?'+':'')+Math.round((r.avg_lift-1)*100)+'%':'&mdash;')+'</td><td class="r">'+(r.avg_sell28!=null?Math.round(r.avg_sell28*100)+'%':'&mdash;')+'</td></tr>';}).join('')+'</tbody></table></div>'):'';};
+    el.innerHTML='<div class="xph"><h2>Shipment response, 7&ndash;28 days after landing</h2><span class="sub">Each store &times; family delivery, measured against its own 28 days before (Sec 29). Computed '+(d.computed_at?escH(xWhen(d.computed_at)):'never')+' &middot; '+xN(d.cohorts)+' deliveries measured. This feeds the engine: strong responders can earn a shorter cadence when post_delivery_feedback is set to apply (observe = report only, today’s mode).</span>'+
+      (canRole('order_writer')?'<span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xPdCompute()"><i class="bi bi-arrow-repeat"></i>Recompute now</button></span>':'')+'</div>'+
+      '<div class="xobj">'+tiles+'</div>'+
+      '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Sold within 28 days, by family</h2><span class="sub">Share of delivered units; 60% is the leadership target.</span></div>'+
+      xFamBars(fam,function(v){return Math.round(v*100)+'%';},1,'var(--x-chart-1)',0.6)+
+      lists(d.strongest_store_families,'Strongest responders')+lists(d.weakest_store_families,'Weakest responders');
+  }catch(e){
+    el.innerHTML='<div class="xbanner info" style="margin:14px 16px"><i class="bi bi-info-circle"></i><span><b>Shipment response is not available yet.</b> '+escH(e.message)+' &mdash; it computes automatically after each Monday ingest once the migration has run.</span></div>';
+  }
+}
+async function xPdCompute(){
+  X.pd=null;var el=document.getElementById('r-body');
+  if(el)el.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Measuring every delivery in the window&hellip;</div>';
+  try{await api('/api/ipr/post-delivery/compute',{method:'POST'});toast('Shipment response recomputed','ok');}
+  catch(e){toast('Recompute failed: '+e.message,'err');}
+  if(el&&X.rep==='r3')xRenderPd(el);
 }
 
 /* ---------- history ---------- */

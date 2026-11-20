@@ -315,6 +315,25 @@ def ask_store(store_id: int, body: AskStore,
     return {"answer": answer, "store_id": store_id, "data_as_of": profile["data_as_of"]}
 
 
+# ── §29 shipment response for one store (feeds the DSM visit conversation) ────
+@router.get("/stores/{store_id}/response")
+def store_response(store_id: int, user=Depends(get_current_user)):
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT to_regclass('public.delivery_performance') IS NOT NULL AS ok")
+        if not cur.fetchone()["ok"]:
+            return {"available": False, "note": "Post-delivery measurement is not set up yet"}
+        cur.execute("""SELECT ipr_family, delivery_date, cohort_units, pre28_units, post7_28_units,
+                              lift, sell_through_28, classification
+                       FROM delivery_performance WHERE store_id = %s
+                       ORDER BY delivery_date DESC LIMIT 40""", (store_id,))
+        cohorts = cur.fetchall()
+        cur.execute("""SELECT ipr_family, cohorts, avg_lift, avg_sell28, response_class
+                       FROM store_family_response WHERE store_id = %s
+                       ORDER BY cohorts DESC""", (store_id,))
+        return {"available": True, "cohorts": cohorts, "by_family": cur.fetchall()}
+
+
 # ── §26.6 store-visit input ───────────────────────────────────────────────────
 class VisitIn(BaseModel):
     visited_at: date | None = None
