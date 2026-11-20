@@ -425,6 +425,25 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     """, (*fresh_arr, d(182), d(91 + lag_days), d(lag_days), anchor, fresh_days, d(182), d(182),
           d(91), anchor, d(max(182, fresh_max))))
     dels = {(r["store_id"], r["sku_id"]): dict(r) for r in cur.fetchall()}
+    # Lot-age sellable credit (calibration 2026-11-20, 4,474 clean delivery cohorts, Apr-Jul 2026
+    # + 2025 replicate): only ~60% of delivered units ever sell, and the sellable share left in a
+    # lot falls with its age. Each delivery lot counts units x share(age at the sales anchor).
+    lot_curve = [tuple(x) for x in (S.get("sellable_share_by_age_days")
+                                    or [[0, 0.60], [28, 0.25], [42, 0.14], [56, 0.07], [63, 0.05], [70, 0.0]])]
+
+    def sellable_share(age):
+        if age <= lot_curve[0][0]:
+            return lot_curve[0][1]
+        for (a0, v0), (a1, v1) in zip(lot_curve, lot_curve[1:]):
+            if age <= a1:
+                return v0 + (v1 - v0) * (age - a0) / (a1 - a0)
+        return 0.0
+    cur.execute("""SELECT store_id, sku_id, delivery_date, SUM(units_delivered) AS u FROM deliveries
+                   WHERE delivery_date > %s AND delivery_date <= %s GROUP BY 1, 2, 3""",
+                (d(lot_curve[-1][0]), anchor))
+    lot_credit = defaultdict(float)
+    for r in cur.fetchall():
+        lot_credit[(r["store_id"], r["sku_id"])] += float(r["u"] or 0) * sellable_share((anchor - r["delivery_date"]).days)
     # store-level delivery count (26 wk) for the manifest fallback: a store's average truck carries
     # d26 / store deliveries of a SKU — NOT the SKU's own average drop (which assumed every SKU the
     # store ever received is on every truck and overstated inbound ~5x on the week-48 test).
@@ -658,6 +677,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         shr = shrink.get(fam_s, 0.0)
         fresh_est = max(0.0, float(dv.get("recent8") or 0) * (1.0 - shr) - sv["w8"])
         shr_txt = f"; shrink {shr:.0%} ({fam_s})"
+        lc = lot_credit.get((store_id, sku_id), 0.0)
+        if lc < fresh_est:                  # lot-age credit is the tighter, evidence-based bound
+            fresh_est = lc
+            shr_txt = "; lot-age sellable credit (units x sellable share by age, ~60% lifetime)"
         sn = snap.get((store_id, sku_id))
         if sn is not None and sn["onhand_qty"] is not None and float(sn["onhand_qty"]) < 0:
             oh, conf, oh_src = 0.0, "UNUSABLE", f"DTS snapshot {sn['period_end']} negative — implausible"
