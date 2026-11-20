@@ -45,6 +45,12 @@ GRADE_ORDER = ["AA", "A", "B", "C+", "C", "C-", "D"]
 GRADE_SCORE = {"AA": 1.0, "A": .85, "B": .7, "C+": .55, "C": .4, "C-": .25, "D": .1}
 RISK_SCORE = {"Critical": 1.0, "High": .75, "Moderate": .4, "Low": .1, "Unknown": .3}
 BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
+# Duplicate-run control (§1, §24, §28): run statuses that no longer represent live orders,
+# and statuses/pipeline stages meaning the week's orders have already left the building.
+CANCELLED_RUN_STATUSES = ("cancelled", "canceled", "failed", "rejected", "superseded", "deleted")
+RELEASED_RUN_STATUSES = ("exported", "released", "shipped")
+RELEASED_PIPELINE = ("Aster Exported", "Released", "Shipped", "Received or Estimated Received",
+                     "Performance Matured", "Sent to Pin Routes", "Routing Response Received")
 
 
 def run(batch_id, shipping_week=None, preview=False, verbose=True, what_if_unlimited=False):
@@ -116,6 +122,40 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     arrival = shipping_week + timedelta(days=ARRIVAL_OFFSET_DAYS)
     days_to_arrival = max(0, (arrival - anchor).days)
     log(f"Sales anchor {anchor} ({stale}d old) · arrival {arrival} · {days_to_arrival}d of sales before arrival")
+
+    # Duplicate-run control (§1 "may not override duplicate-order controls", §24 "block when the
+    # order duplicates covered inbound supply"). A released/exported run for this ship week
+    # refuses outright; earlier live runs for the same week are counted as inbound below so a
+    # rerun ships only the residual need, never the same order twice.
+    cur.execute("""SELECT id, status, pipeline_status FROM recommendation_runs
+                   WHERE shipping_week = %s
+                     AND COALESCE(status, '') NOT IN %s""",
+                (shipping_week, CANCELLED_RUN_STATUSES))
+    prior_runs = cur.fetchall()
+    released = [r for r in prior_runs
+                if r["status"] in RELEASED_RUN_STATUSES or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
+    if released:
+        raise ValueError(
+            f"Duplicate run refused: ship week {shipping_week} already has a released/exported run "
+            f"({', '.join(str(r['id']) + ' ' + str(r['status']) for r in released)}). Cancel that run "
+            f"before planning this week again, or plan the next ship week.")
+    same_week_prior = {}
+    if prior_runs:
+        cur.execute("""
+            SELECT o.store_id, ol.sku_id,
+                   SUM(COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty)) AS qty
+            FROM orders o JOIN order_lines ol ON ol.order_id = o.id
+            WHERE o.run_id = ANY(%s::uuid[])
+            GROUP BY o.store_id, ol.sku_id
+        """, ([str(r["id"]) for r in prior_runs],))
+        same_week_prior = {(r["store_id"], r["sku_id"]): int(r["qty"] or 0) for r in cur.fetchall()}
+        decide("duplicate_run", f"{len(prior_runs)} earlier run(s) exist for ship week {shipping_week} — "
+                                f"their {sum(same_week_prior.values()):,} units are counted as inbound; "
+                                f"this run plans only the residual need", severity="warning",
+               prior_runs=[{"id": str(r["id"]), "status": r["status"]} for r in prior_runs],
+               prior_units=sum(same_week_prior.values()))
+        log(f"Duplicate-run control: {len(prior_runs)} earlier run(s) for {shipping_week} — "
+            f"{sum(same_week_prior.values()):,}u counted as inbound")
 
     cur.execute("""SELECT al.id, al.sku_id, al.units_available, al.code_level, al.hard_good_type
                    FROM availability_lines al WHERE al.batch_id = %s ORDER BY al.sku_id, al.id""",
@@ -316,7 +356,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             inbound_src = "in transit (manifest) — qty estimated from avg delivery"
 
         before_arrival = fc / 7.0 * days_to_arrival
-        projected = max(0.0, oh_adj + inbound - before_arrival)
+        dup = same_week_prior.get((store_id, sku_id), 0)        # duplicate-run control (§24)
+        if dup:
+            inbound_src = (f"{inbound_src} + {dup}u earlier run, same ship week" if inbound
+                           else f"{dup}u earlier run, same ship week (duplicate-run control)")
+            inbound += dup
+        projected =max(0.0, oh_adj + inbound - before_arrival)
         cover_days = projected / (fc / 7.0) if fc else 999
 
         if conf == "UNUSABLE" or store_id in edi_gap:
@@ -705,7 +750,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     if preview:
         log("\nPREVIEW — nothing written.")
-        return {"summary": summary, "orders": orders, "lines": lines, "held": held}
+        return {"summary": summary, "orders": orders, "lines": lines, "held": held, "decisions": decisions}
 
     # ══ WRITE (same tables as legacy, so downstream tools work unchanged) ═══
     total_carts = summary["counts"]["carts"]
