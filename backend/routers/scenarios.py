@@ -10,12 +10,20 @@ Hard principle: English -> structured spec -> human review -> engine.
 Never English mutating the engine directly. The parser may ONLY emit the
 adjustment types + scope values the engine actually honors (listed below).
 
-Flow:
-  POST /parse   -> Claude drafts adjustments from English (no DB write, preview)
-  POST /        -> save reviewed scenario + its adjustments (goes live)
-  GET  /        -> list scenarios for a week (active + inactive) with adjustments
-  PATCH /{id}/toggle -> turn a scenario on/off for the run
+Flow (checks and balances, 2026-11-20 — no one approves their own work):
+  POST /parse        -> Claude drafts adjustments from English (no DB write, preview)
+  POST /             -> submit the reviewed scenario: status pending_approval, directives
+                        saved INACTIVE — the engine cannot see them yet
+  GET  /pending      -> the approval queue (Mike's dashboard)
+  POST /{id}/approve -> approver (manager/sales_director/admin, NEVER the submitter)
+                        activates it; the engine applies it deterministically + bounded
+  POST /{id}/reject  -> approver declines with a reason
+  GET  /             -> list scenarios for a week with status + adjustments
+  PATCH /{id}/toggle -> turn an APPROVED scenario on/off for the run
   DELETE /{id}  -> remove a scenario from the engine for that run
+After the run, the independent scenario audit (services/ipr_reviewer.run_scenario_audit)
+verifies every applied scenario against store pace — a different model pass, fed raw
+evidence, never the parser's or approver's reasoning.
 """
 import os, json
 from datetime import date, timedelta
@@ -196,7 +204,12 @@ class CreateReq(BaseModel):
     name: Optional[str] = None
     text: str
     shipping_week: str
+    interpretation: Optional[str] = None     # the parser's restatement, shown to the approver
     adjustments: List[AdjItem]
+
+
+class RejectReq(BaseModel):
+    reason: str
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -211,8 +224,8 @@ def parse_scenario(body: ParseReq,
         cat = _catalog(cur)
         user_msg = (f"CATALOG (valid scope values):\n{json.dumps(cat)}\n\n"
                     f"SCENARIO: {body.text.strip()}")
-        raw = _call(_client(), model="claude-sonnet-4-6",
-                    system=_PARSE_SYSTEM, user_msg=user_msg, max_tokens=1500)
+        from services.ipr_ai import call_model
+        raw = call_model(_PARSE_SYSTEM, user_msg, max_tokens=1500)
         try:
             s, e = raw.find("{"), raw.rfind("}") + 1
             parsed = json.loads(raw[s:e])
@@ -228,8 +241,10 @@ def parse_scenario(body: ParseReq,
 
 @router.post("/", status_code=201)
 def create_scenario(body: CreateReq,
-                    user=Depends(require_role("order_writer", "manager", "admin"))):
-    """Save a reviewed scenario + its adjustments — goes live for the week's run."""
+                    user=Depends(require_role("order_writer", "manager", "sales_director", "admin"))):
+    """Submit a reviewed scenario for approval. Directives are saved INACTIVE and the
+    scenario is pending_approval — the engine cannot see it until a DIFFERENT person
+    with approval rights approves it (checks and balances, 2026-11-20)."""
     week = _resolve_week(body.shipping_week)
     if not body.adjustments:
         raise HTTPException(400, "A scenario needs at least one directive.")
@@ -242,9 +257,10 @@ def create_scenario(body: CreateReq,
         if not clean:
             raise HTTPException(400, "No valid directives to save.")
         cur.execute("""
-            INSERT INTO planning_scenarios (name, description, shipping_week, is_active, created_by)
-            VALUES (%s, %s, %s, true, %s) RETURNING id
-        """, (name, body.text.strip(), week, email))
+            INSERT INTO planning_scenarios (name, description, shipping_week, is_active,
+                                            created_by, status, interpretation)
+            VALUES (%s, %s, %s, false, %s, 'pending_approval', %s) RETURNING id
+        """, (name, body.text.strip(), week, email, (body.interpretation or "").strip()[:600] or None))
         sid = cur.fetchone()["id"]
         for a in clean:
             cur.execute("""
@@ -254,14 +270,78 @@ def create_scenario(body: CreateReq,
                      scope_store_ids, scope_sku_id, scope_family, scope_legacy_tier,
                      value_numeric, value_text, effective_start, effective_end,
                      active, source, created_by, stores_affected, scenario_id)
-                VALUES (%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, true,'scenario',%s,%s,%s)
+                VALUES (%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, false,'scenario',%s,%s,%s)
             """, (week, a.get("label", name)[:120], body.text.strip()[:500], a["adjustment_type"],
                   a.get("scope_merchant"), a.get("scope_region"), a.get("scope_state"),
                   a.get("scope_velocity_tier"), a.get("scope_store_ids"), a.get("scope_sku_id"),
                   a.get("scope_family"), a.get("scope_legacy_tier"),
                   a.get("value_numeric"), a.get("value_text"), week, week,
                   email, _store_count(cur, a), sid))
-    return {"id": str(sid), "shipping_week": str(week), "adjustments_saved": len(clean)}
+    return {"id": str(sid), "shipping_week": str(week), "adjustments_saved": len(clean),
+            "status": "pending_approval"}
+
+
+APPROVER_ROLES = ("manager", "sales_director", "admin")
+
+
+@router.get("/pending")
+def pending_scenarios(user=Depends(get_current_user)):
+    """The approval queue, newest first — Mike's dashboard feed."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT id, name, description, interpretation, shipping_week, created_by, created_at
+            FROM planning_scenarios WHERE status = 'pending_approval'
+            ORDER BY created_at DESC LIMIT 100
+        """)
+        rows = cur.fetchall()
+        for s in rows:
+            cur.execute("""SELECT adjustment_type, label, value_numeric, scope_merchant, scope_region,
+                                  scope_state, scope_velocity_tier, scope_sku_id, scope_family,
+                                  scope_legacy_tier, stores_affected
+                           FROM weekly_adjustments WHERE scenario_id = %s ORDER BY created_at""",
+                        (s["id"],))
+            s["adjustments"] = cur.fetchall()
+    return {"pending": rows, "can_approve": user.get("role") in APPROVER_ROLES}
+
+
+@router.post("/{scenario_id}/approve")
+def approve_scenario(scenario_id: str, user=Depends(require_role(*APPROVER_ROLES))):
+    """Activate a pending scenario. The approver can never be the submitter."""
+    email = user.get("email", "")
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""SELECT created_by, status FROM planning_scenarios
+                       WHERE id = %s FOR UPDATE""", (scenario_id,))
+        s = cur.fetchone()
+        if not s:
+            raise HTTPException(404, "Scenario not found")
+        if s["status"] != "pending_approval":
+            raise HTTPException(409, f"Scenario is already {s['status']}")
+        if (s["created_by"] or "").lower() == email.lower():
+            raise HTTPException(403, "You cannot approve your own scenario — a second person signs off")
+        cur.execute("""UPDATE planning_scenarios
+                       SET status = 'approved', is_active = true, approved_by = %s, approved_at = now()
+                       WHERE id = %s""", (email, scenario_id))
+        cur.execute("UPDATE weekly_adjustments SET active = true WHERE scenario_id = %s", (scenario_id,))
+    return {"id": scenario_id, "status": "approved", "approved_by": email}
+
+
+@router.post("/{scenario_id}/reject")
+def reject_scenario(scenario_id: str, body: RejectReq, user=Depends(require_role(*APPROVER_ROLES))):
+    if not body.reason.strip():
+        raise HTTPException(400, "Give the submitter a reason")
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""UPDATE planning_scenarios
+                       SET status = 'rejected', is_active = false, approved_by = %s,
+                           approved_at = now(), reject_reason = %s
+                       WHERE id = %s AND status = 'pending_approval' RETURNING id""",
+                    (user.get("email"), body.reason.strip()[:500], scenario_id))
+        if not cur.fetchone():
+            raise HTTPException(404, "Scenario not found or no longer pending")
+        cur.execute("UPDATE weekly_adjustments SET active = false WHERE scenario_id = %s", (scenario_id,))
+    return {"id": scenario_id, "status": "rejected"}
 
 
 @router.get("/")
@@ -271,7 +351,8 @@ def list_scenarios(shipping_week: Optional[str] = None, user=Depends(get_current
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
-            SELECT id, name, description, shipping_week, is_active, created_by, created_at
+            SELECT id, name, description, interpretation, shipping_week, is_active, created_by,
+                   created_at, status, approved_by, approved_at, reject_reason
             FROM planning_scenarios WHERE shipping_week = %s
             ORDER BY is_active DESC, created_at DESC
         """, (week,))
@@ -291,10 +372,12 @@ def list_scenarios(shipping_week: Optional[str] = None, user=Depends(get_current
 @router.patch("/{scenario_id}/toggle")
 def toggle_scenario(scenario_id: str,
                     user=Depends(require_role("order_writer", "manager", "admin"))):
-    """Turn a scenario on/off for the run (its directives follow)."""
+    """Turn an APPROVED scenario on/off for the run (its directives follow).
+    A pending or rejected scenario cannot be switched on this way."""
     with get_db() as conn:
         cur = cursor(conn)
-        cur.execute("UPDATE planning_scenarios SET is_active = NOT is_active WHERE id = %s RETURNING is_active",
+        cur.execute("""UPDATE planning_scenarios SET is_active = NOT is_active
+                       WHERE id = %s AND status = 'approved' RETURNING is_active""",
                     (scenario_id,))
         row = cur.fetchone()
         if not row:

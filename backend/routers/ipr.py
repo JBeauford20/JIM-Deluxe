@@ -14,12 +14,14 @@ router = APIRouter()
 DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", "review", "line",
                   "duplicate_run", "stopped_13wk", "reduced_13wk", "gap_fill", "low_value_cart", "deferred_economics", "not_due",
                   "deferral", "reactivation", "pushed_min_cart", "min_cart_service_review",
-                  "assortment_block", "capacity_cap", "response_adjustment")
+                  "assortment_block", "capacity_cap", "response_adjustment",
+                  "scenario_applied", "scenario_exclusion")
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
-# role (Josh), but one person can never sign both steps.
+# role (Josh), but one person can never sign both steps. 'manager' joined the director step
+# 2026-11-20: all approvals run through the IPR Manager/Approver (Mike Underwood).
 DSM_ROLES = ("dsm", "admin")
-DIRECTOR_ROLES = ("sales_director", "admin")
+DIRECTOR_ROLES = ("sales_director", "manager", "admin")
 
 
 # Mirrors workers/ipr_engine.py CANCELLED_RUN_STATUSES: runs in these statuses are ignored by
@@ -312,6 +314,23 @@ def consolidate_configs(run_id: str, apply: bool = False,
             log_change(cursor(conn), run_id, "run", run_id,
                        f"config consolidation applied: {result['verdict']}", user.get("email"))
     return result
+
+
+@router.post("/runs/{run_id}/scenario-audit")
+def scenario_audit(run_id: str, user=Depends(require_role("order_writer", "manager",
+                                                          "sales_director", "admin"))):
+    """Independent audit of every scenario applied to a run (check 4 of the chain:
+    parser LLM → human approver ≠ submitter → bounded deterministic apply → this audit)."""
+    from routers.ai_explanations import _check_ai_budget
+    from services.ipr_reviewer import run_scenario_audit
+    with get_db() as conn:
+        _check_ai_budget(cursor(conn), user, "audit")
+    report = run_scenario_audit(run_id, user.get("email"))
+    if report.get("id"):
+        with get_db() as conn:
+            log_change(cursor(conn), run_id, "run", run_id,
+                       f"scenario audit: {report.get('verdict')}", user.get("email"))
+    return report
 
 
 @router.get("/runs/{run_id}/ai-reviews")

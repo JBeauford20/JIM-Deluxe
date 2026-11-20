@@ -95,6 +95,93 @@ def run_ai_review(run_id: str, user_email: str | None) -> dict:
     return report
 
 
+# ── Independent scenario audit (checks and balances, 2026-11-20) ──────────────
+# A scenario passes FOUR independent hands before it is considered done:
+#   1. the parser LLM turns English into directives (preview only),
+#   2. a human approver who is never the submitter signs off,
+#   3. the engine applies deterministically, bounded by pace (trims are logged),
+#   4. THIS audit — a separate model pass, fed the raw engine evidence, not the
+#      parser's or approver's reasoning — verifies the effect was justified.
+
+SCENARIO_AUDIT_SYSTEM = """You are the INDEPENDENT scenario auditor for TPC — IPR Engine. You did
+not write, parse or approve these scenarios, and you must not defend them. Approved plain-English
+scenarios (promotions, exclusions, pushes) were applied to this week's run by deterministic engine
+code that trims every request to the store's measured selling pace. Your job: verify from the raw
+evidence that each scenario's effect is commercially justified, that the engine's pace trims were
+right, and that nothing shipped a store cannot sell.
+
+For each scenario directive, judge:
+- Did it reach the stores/products the plain English intended (lines/stores touched vs scope)?
+- Where the engine trimmed a request to pace, was the trim correct — or still too generous?
+- Did any boost push product past what the 13-week record supports?
+- Did an exclusion starve stores with real demand (lost sales)?
+- Was anything approved by the same person who requested it (a control failure to flag)?
+
+Return STRICT JSON only:
+{"verdict": "PASS"|"WARNING"|"BLOCK",
+ "summary": "<3-5 sentences for the order writer and the approver>",
+ "per_scenario": [{"label": "...", "verdict": "PASS"|"WARNING"|"BLOCK",
+                   "evidence": "<numbers from the data>",
+                   "finding": "<what is right or wrong>",
+                   "recommendation": "<keep / trim further / reject next week / none>"}]}"""
+
+
+def run_scenario_audit(run_id: str, user_email: str | None) -> dict:
+    """Audit every scenario_applied decision of a run against the affected lines' raw
+    evidence. Reads in one transaction, calls the model with none open, stores the verdict."""
+    with get_db() as conn:
+        cur = _cursor(conn)
+        cur.execute("""SELECT shipping_week, sales_cutoff_date, ipr_summary
+                       FROM recommendation_runs WHERE id = %s""", (run_id,))
+        run = cur.fetchone()
+        if not run:
+            raise HTTPException(404, "Run not found")
+        summ = run["ipr_summary"] or {}
+        cur.execute("""SELECT reason, data FROM run_decisions
+                       WHERE run_id = %s AND decision_type = 'scenario_applied'
+                       ORDER BY created_at""", (run_id,))
+        applied = [dict(r) for r in cur.fetchall()]
+        if not applied:
+            return {"verdict": "PASS", "summary": "No scenarios were applied to this run.",
+                    "per_scenario": [], "id": None}
+        cur.execute("""SELECT store_id, sku_id, reason FROM run_decisions
+                       WHERE run_id = %s AND decision_type = 'scenario_exclusion'
+                       ORDER BY store_id LIMIT 60""", (run_id,))
+        exclusions = [dict(r) for r in cur.fetchall()]
+        # raw line evidence for scenario-touched lines: forecast vs 13-wk rate vs allocation
+        cur.execute("""SELECT store_id, sku_id, data FROM run_decisions
+                       WHERE run_id = %s AND decision_type = 'line'
+                         AND (data->>'method' LIKE %s OR data->>'cap_note' LIKE %s)
+                       LIMIT 120""", (run_id, "%scenario%", "%scenario%"))
+        touched = [{"store_id": r["store_id"], "sku_id": r["sku_id"],
+                    "forecast_wk": (r["data"] or {}).get("forecast_wk"),
+                    "r13": ((r["data"] or {}).get("rates") or {}).get("r13"),
+                    "projected": (r["data"] or {}).get("projected"),
+                    "alloc_trays": (r["data"] or {}).get("alloc_trays"),
+                    "method": (r["data"] or {}).get("method"),
+                    "cap_note": (r["data"] or {}).get("cap_note")} for r in cur.fetchall()]
+    ctx = {"shipping_week": str(run["shipping_week"]), "data_as_of": str(run["sales_cutoff_date"]),
+           "scenarios_applied": applied, "exclusion_samples": exclusions,
+           "touched_line_evidence": touched,
+           "run_scenario_summary": summ.get("scenarios")}
+    raw = call_model(SCENARIO_AUDIT_SYSTEM,
+                     "RAW RUN EVIDENCE (JSON):\n" + json.dumps(ctx, default=str)
+                     + "\n\nAudit every scenario. STRICT JSON only.",
+                     max_tokens=2500)
+    try:
+        report = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except Exception:
+        report = {"verdict": "WARNING", "summary": raw[:1500], "per_scenario": []}
+    with get_db() as conn:
+        cur = _cursor(conn)
+        cur.execute("""INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
+                       VALUES (%s, 'scenario_audit', 'claude-opus-5-5', %s, %s::jsonb, %s)
+                       RETURNING id""",
+                    (run_id, report.get("verdict"), json.dumps(report, default=str), user_email))
+        report["id"] = str(cur.fetchone()["id"])
+    return report
+
+
 # ── Cart-config consolidation (§20) ──────────────────────────────────────────
 
 def _load_carts(cur, run_id: str):

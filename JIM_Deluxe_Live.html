@@ -278,6 +278,7 @@ body{background:var(--x-bg);}
     <button type="button" class="xtab" data-x="xbld" onclick="xGo('xbld')">Builds</button>
     <button type="button" class="xtab" data-x="xrep" onclick="xGo('xrep')">Reports</button>
     <button type="button" class="xtab" data-x="xhist" onclick="xGo('xhist')">History</button>
+    <button type="button" class="xtab" data-x="xappr" onclick="xGo('xappr')">Approvals <span class="xbadge zero" id="xApprBadge">0</span></button>
     <span class="sep"></span>
     <button type="button" class="xtab alt" data-x="xpol" onclick="xGo('xpol')">Policies</button>
     <button type="button" class="xtab alt" onclick="window.open('/dsm','_blank')" title="Store lookup, visits and alerts for District Sales Managers (Sec 26)">DSM Portal <i class="bi bi-box-arrow-up-right"></i></button>
@@ -427,6 +428,35 @@ body{background:var(--x-bg);}
 </div>
 
 <!-- ===== IPR ENGINE V2: POLICIES ===== -->
+<!-- ===== IPR ENGINE V2: APPROVALS (Mike's dashboard) ===== -->
+<div id="screen-xappr" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Scenarios &amp; approvals</h2><span class="sub">Plain-English changes to the week (a promotion, a region push, an exclusion). An AI interprets, a second person approves &mdash; never the submitter &mdash; the engine applies it bounded by what stores actually sell, and an independent audit checks the result after the run.</span></div>
+    <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Submit a scenario</h2><span class="sub">e.g. &ldquo;H2O Bowls sale in the South&rdquo; &middot; &ldquo;Arnie Sherman removed this week&rdquo;</span></div>
+    <div style="padding:0 16px 14px">
+      <textarea id="scn2-text" class="form-control form-control-sm" rows="2" placeholder="Describe the change in plain English&hellip;"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="xbtn xbtn-s" id="scn2-parse" onclick="xScnParse()"><i class="bi bi-translate"></i>Interpret</button>
+        <button class="xbtn xbtn-p" id="scn2-submit" onclick="xScnSubmit()" style="display:none"><i class="bi bi-send"></i>Submit for approval</button>
+      </div>
+      <div id="scn2-preview"></div>
+    </div>
+  </div>
+  <div class="xpanel">
+    <div class="xph"><h2>Waiting for approval</h2><span class="sub">A different set of eyes signs off &mdash; you cannot approve your own.</span><span class="act"><span class="xsrc">checks &amp; balances &middot; 11/20</span></span></div>
+    <div id="apprScn"><div class="xempty">Loading&hellip;</div></div>
+    <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Pending reactivations</h2><span class="sub">Step 1 the DSM, step 2 the approver &mdash; never the same person (Sec 27).</span></div>
+    <div id="apprReact"><div class="xempty">Loading&hellip;</div></div>
+    <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Service reviews from the latest run</h2><span class="sub">Stores pushed 4+ cycles under the one-cart minimum &mdash; an effective service stop needing a decision.</span></div>
+    <div id="apprSvc"><div class="xempty">Loading&hellip;</div></div>
+    <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Independent scenario audit</h2><span class="sub">After the run: a separate AI pass verifies every applied scenario against store pace.</span>
+      <span class="act"><button class="xbtn xbtn-s xbtn-sm" id="scnAudBtn" onclick="xScnAudit()"><i class="bi bi-shield-check"></i>Audit the current run</button></span></div>
+    <div id="apprAud"><div class="xempty">Open a run on This Week, then audit its scenarios here.</div></div>
+  </div>
+</div>
+</div>
+
 <div id="screen-xpol" class="screen xs">
 <div class="xwrap">
   <div class="xpanel">
@@ -3892,6 +3922,8 @@ var X_KINDS=[
   ['capacity_cap','Cut to store capacity','warn','The order exceeded the store\'s cart capacity; lowest-value carts were cut (Sec 1).'],
   ['review_warning','Review warning','warn','The reviewer flagged the order but it ships.'],
   ['response_adjustment','Cadence adjusted from measured response','info','The store\'s 7-28 day shipment response moved its delivery cadence one week (Sec 29, feedback = apply).'],
+  ['scenario_applied','Scenario applied','info','An approved plain-English scenario changed this week, bounded by what stores sell; trims are listed.'],
+  ['scenario_exclusion','Excluded by scenario','warn','An approved scenario removed this store or product from the week.'],
   ['deferral','Deferred','n','Need is under one shelf; recalculated next week, never padded.'],
   ['validation','Data check','info','A data problem the engine found before planning.'],
   ['gap_fill','Gap fill','ok','A short SKU was filled with a same-family best seller that has its own need (Sec 21).'],
@@ -3937,6 +3969,7 @@ function xNextMonday(){var d=new Date();var add=((8-d.getDay())%7)||7;d.setDate(
 function xGo(n){go(n);
   if(n==='exc')xLoadExc();
   if(n==='cl')xLoadCl();
+  if(n==='xappr')xLoadAppr();
   window.scrollTo(0,0);}
 function xNavSync(n){
   var classic=X_V2.indexOf(n)<0;
@@ -4521,7 +4554,7 @@ async function xImportWb(inp){
 /* ===== IPR Engine v2 shell, round 3: mockup header + nav, pipeline, test-run controls,
    Stores / Builds / Reports / History / Policies. ASCII only. Wraps the round-2 functions
    above (same globals) so upload -> run -> release -> exports keep their wiring. */
-X_V2=['tw','exc','cl','xst','xbld','xrep','xhist','xpol'];
+X_V2=['tw','exc','cl','xst','xbld','xrep','xhist','xpol','xappr'];
 X.runs=null;X.st={rows:null,page:0,region:'all'};X.rep='r1';X.corr=null;
 var X_STAGES=['Input Received','Data Validated','Demand Calculated','Inventory Allocated','Cart Built','Independent AI Review','Final Validated','Sent to Pin Routes','Routing Response Received','Released'];
 var X_CANCELLED=['cancelled','canceled','failed','rejected','superseded','deleted'];
@@ -4783,6 +4816,123 @@ async function xPdCompute(){
   try{await api('/api/ipr/post-delivery/compute',{method:'POST'});toast('Shipment response recomputed','ok');}
   catch(e){toast('Recompute failed: '+e.message,'err');}
   if(el&&X.rep==='r3')xRenderPd(el);
+}
+
+/* ---------- Approvals (Mike's dashboard): scenarios + reactivations + service reviews ---------- */
+X.scnDraft=null;
+function xScnAdjRows(adjs){
+  return '<div class="xscroll"><table class="xdata"><thead><tr><th>Directive</th><th>What</th><th>Scope</th><th class="r">Value</th><th class="r">Stores</th></tr></thead><tbody>'+
+    (adjs||[]).map(function(a){
+      var scope=['scope_merchant','scope_region','scope_state','scope_velocity_tier','scope_family','scope_legacy_tier','scope_sku_id']
+        .map(function(k){return a[k]?String(a[k]):null;}).filter(Boolean).join(' &middot; ')||'all';
+      return '<tr><td>'+escH(xHuman(a.adjustment_type))+'</td><td>'+escH(a.label||'')+'</td><td>'+scope+'</td>'+
+        '<td class="r">'+(a.value_numeric!=null?a.value_numeric:'&mdash;')+'</td><td class="r">'+(a.stores_affected!=null?xN(a.stores_affected):'&mdash;')+'</td></tr>';}).join('')+
+    '</tbody></table></div>';
+}
+async function xScnParse(){
+  var t=(document.getElementById('scn2-text').value||'').trim();
+  var pv=document.getElementById('scn2-preview'),sb=document.getElementById('scn2-submit'),b=document.getElementById('scn2-parse');
+  if(!t){pv.innerHTML='<div class="xbanner warn"><i class="bi bi-exclamation-triangle"></i><span>Describe the change first.</span></div>';return;}
+  b.disabled=true;sb.style.display='none';X.scnDraft=null;
+  pv.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Interpreting&hellip;</div>';
+  try{
+    var r=await api('/api/scenarios/parse',{method:'POST',body:JSON.stringify({text:t,shipping_week:wk?String(wk):null})});
+    X.scnDraft={text:t,interpretation:r.interpretation,adjustments:r.adjustments};
+    pv.innerHTML='<div class="xbanner info" style="align-items:flex-start"><i class="bi bi-translate"></i><span><b>Understood as:</b> '+escH(r.interpretation||'')+'</span></div>'+
+      xScnAdjRows(r.adjustments)+
+      ((r.warnings||[]).length?'<div class="xnote">'+r.warnings.map(escH).join('<br>')+'</div>':'')+
+      '<div class="xnote">If this reads right, submit it — a second person must approve before the engine sees it.</div>';
+    sb.style.display=(r.adjustments||[]).length?'':'none';
+  }catch(e){pv.innerHTML='<div class="xbanner bad"><i class="bi bi-x-circle"></i><span>'+escH(e.message)+'</span></div>';}
+  b.disabled=false;
+}
+async function xScnSubmit(){
+  if(!X.scnDraft)return;var sb=document.getElementById('scn2-submit');sb.disabled=true;
+  try{
+    await api('/api/scenarios/',{method:'POST',body:JSON.stringify({
+      text:X.scnDraft.text,shipping_week:String(wk||''),interpretation:X.scnDraft.interpretation,
+      adjustments:X.scnDraft.adjustments})});
+    toast('Submitted for approval','ok');
+    document.getElementById('scn2-text').value='';document.getElementById('scn2-preview').innerHTML='';
+    sb.style.display='none';X.scnDraft=null;xLoadAppr();
+  }catch(e){toast('Submit failed: '+e.message,'err');sb.disabled=false;return;}
+  sb.disabled=false;
+}
+async function xLoadAppr(){
+  var el=document.getElementById('apprScn');if(!el)return;
+  try{
+    var myEmail=((tokGet()||{}).user||{}).email||'';
+    var r=await api('/api/scenarios/pending');
+    var mine=function(s){return myEmail&&String(s.created_by||'').toLowerCase()===myEmail.toLowerCase();};
+    el.innerHTML=(r.pending||[]).length?r.pending.map(function(s){
+      return '<div style="padding:10px 16px;border-bottom:1px solid var(--x-border-soft)">'+
+        '<div><b>'+escH(s.name)+'</b> <span class="xwhy">&middot; week '+escH(String(s.shipping_week).slice(0,10))+' &middot; by '+escH(s.created_by||'')+'</span></div>'+
+        (s.interpretation?'<div class="xsmall" style="margin:4px 0">Understood as: '+escH(s.interpretation)+'</div>':'')+
+        xScnAdjRows(s.adjustments)+
+        (r.can_approve?('<div style="display:flex;gap:8px;margin-top:6px">'+
+          (mine(s)?'<span class="xsmall xmuted">You submitted this — a second person approves it.</span>'
+          :'<button class="xbtn xbtn-p xbtn-sm" onclick="xScnApprove(\''+escH(s.id)+'\')"><i class="bi bi-check2"></i>Approve</button>'+
+           '<button class="xbtn xbtn-d xbtn-sm" onclick="xScnReject(\''+escH(s.id)+'\')">Reject</button>')+'</div>')
+        :'<div class="xsmall xmuted" style="margin-top:4px">Waiting on an approver (manager).</div>')+'</div>';
+    }).join(''):'<div class="xempty">Nothing waiting. Scenarios submitted above land here.</div>';
+    var badge=document.getElementById('xApprBadge');
+    var re=await api('/api/ipr/reactivations?status=pending_dsm').catch(function(){return[];});
+    var rd=await api('/api/ipr/reactivations?status=pending_director').catch(function(){return[];});
+    var reacts=(re||[]).concat(rd||[]);
+    var rl=document.getElementById('apprReact');
+    rl.innerHTML=reacts.length?reacts.map(function(x){
+      var step1=x.status==='pending_dsm';
+      return '<div style="padding:8px 16px;border-bottom:1px solid var(--x-border-soft);display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+
+        '<div style="flex:1;min-width:220px"><b>'+x.store_id+'</b> '+escH(x.store_name||'')+' &middot; '+escH(x.ipr_family)+
+        ' <span class="xtag '+(step1?'info':'warn')+'">'+(step1?'awaiting DSM (step 1)':'awaiting approver (step 2)')+'</span>'+
+        '<div class="xwhy">'+xN(x.test_units)+'u test &middot; requested '+escH(xWhen(x.requested_at))+'</div></div>'+
+        '<button class="xbtn xbtn-p xbtn-sm" onclick="xReactApprove(\''+escH(x.id)+'\')"><i class="bi bi-check2"></i>Approve step</button>'+
+        '<button class="xbtn xbtn-d xbtn-sm" onclick="xReactReject(\''+escH(x.id)+'\')">Reject</button></div>';
+    }).join(''):'<div class="xempty">No reactivation requests pending.</div>';
+    var sv=document.getElementById('apprSvc');
+    if(X.run){
+      var rows=await api('/api/ipr/runs/'+X.run+'/decisions?type=min_cart_service_review&limit=200').catch(function(){return[];});
+      sv.innerHTML=(rows||[]).length?('<div class="xscroll"><table class="xdata"><tbody>'+rows.map(function(d){
+        return '<tr><td><b>'+d.store_id+'</b> '+escH(d.store_name||'')+'</td><td>'+escH(d.reason)+'</td></tr>';}).join('')+'</tbody></table></div>')
+        :'<div class="xempty">No service reviews in the open run.</div>';
+    }else sv.innerHTML='<div class="xempty">Open a run on This Week to see its service reviews.</div>';
+    var n=(r.pending||[]).length+reacts.length;
+    if(badge){badge.textContent=n>99?'99+':n;badge.classList.toggle('zero',!n);}
+  }catch(e){el.innerHTML='<div class="xempty">Could not load approvals: '+escH(e.message)+'</div>';}
+}
+async function xScnApprove(id){
+  try{await api('/api/scenarios/'+id+'/approve',{method:'POST'});toast('Scenario approved — the engine will apply it this week','ok');xLoadAppr();}
+  catch(e){toast(e.message,'err');}
+}
+async function xScnReject(id){
+  var why=prompt('Reason for rejecting (the submitter sees this):');if(why===null)return;
+  if(!why.trim()){toast('A reason is required','warn');return;}
+  try{await api('/api/scenarios/'+id+'/reject',{method:'POST',body:JSON.stringify({reason:why.trim()})});toast('Scenario rejected','ok');xLoadAppr();}
+  catch(e){toast(e.message,'err');}
+}
+async function xReactApprove(id){
+  try{var r=await api('/api/ipr/reactivations/'+id+'/approve',{method:'POST'});toast('Now '+r.status.replace(/_/g,' '),'ok');xLoadAppr();}
+  catch(e){toast(e.message,'err');}
+}
+async function xReactReject(id){
+  var why=prompt('Reason for rejecting:');if(why===null)return;
+  if(!why.trim()){toast('A reason is required','warn');return;}
+  try{await api('/api/ipr/reactivations/'+id+'/reject',{method:'POST',body:JSON.stringify({reason:why.trim()})});toast('Rejected','ok');xLoadAppr();}
+  catch(e){toast(e.message,'err');}
+}
+async function xScnAudit(){
+  var el=document.getElementById('apprAud'),b=document.getElementById('scnAudBtn');
+  if(!X.run){el.innerHTML='<div class="xempty">Open a run on This Week first.</div>';return;}
+  b.disabled=true;el.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>The independent auditor is reading the run&hellip;</div>';
+  try{
+    var r=await api('/api/ipr/runs/'+X.run+'/scenario-audit',{method:'POST'});
+    var cls=r.verdict==='PASS'?'ok':(r.verdict==='BLOCK'?'bad':'warn');
+    el.innerHTML='<div class="xbanner '+cls+'" style="align-items:flex-start"><i class="bi bi-shield-check"></i><span><b>'+escH(r.verdict||'')+'</b> &mdash; '+escH(r.summary||'')+'</span></div>'+
+      ((r.per_scenario||[]).length?'<div class="xscroll"><table class="xdata"><tbody>'+r.per_scenario.map(function(x){
+        return '<tr><td><span class="xtag '+(x.verdict==='PASS'?'ok':x.verdict==='BLOCK'?'bad':'warn')+'">'+escH(x.verdict)+'</span></td>'+
+          '<td><b>'+escH(x.label||'')+'</b><div class="xsmall">'+escH(x.evidence||'')+'</div><div class="xsmall xmuted">'+escH(x.finding||'')+(x.recommendation?' &middot; '+escH(x.recommendation):'')+'</div></td></tr>';}).join('')+'</tbody></table></div>':'');
+  }catch(e){el.innerHTML='<div class="xbanner bad"><i class="bi bi-x-circle"></i><span>'+escH(e.message)+'</span></div>';}
+  b.disabled=false;
 }
 
 /* ---------- history ---------- */
