@@ -211,11 +211,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         total_supply = sum(supply.values())
         log("WHAT-IF: every mapped, packable SKU treated as available (preview only)")
 
+    excluded_fams = set(S.get("excluded_families") or [])   # e.g. Seasonal/Holiday: not routine replenishment
     plannable = set()
     for sku_id in supply:
         info, pk = sku_info.get(sku_id), pack.get(sku_id)
         if not info:
             decide("validation", "Availability SKU not in SKU master — excluded", sku_id=sku_id, severity="block")
+        elif (info["ipr_family"] or "Unmapped") in excluded_fams:
+            decide("validation", f"{info['ipr_family']} is excluded from routine replenishment (seasonal "
+                                 f"programs ship through Promotions)", sku_id=sku_id, severity="info")
         elif not pk or not pk["units_per_tray"] or not pk["trays_per_shelf"]:
             decide("validation", "No approved packing/shelf configuration — cannot be loaded", sku_id=sku_id,
                    severity="block", profile=(pk or {}).get("profile_id"))
