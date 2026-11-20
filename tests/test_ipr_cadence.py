@@ -52,3 +52,30 @@ def test_coverage_is_cadence_plus_buffer_capped_by_freshness():
 def test_shipping_efficiency():
     assert shipping_efficiency(67, 100) == 0.67
     assert shipping_efficiency(5, 0) is None
+
+
+# ── Josh option B: defer a light due order once, then ship regardless ────────
+from ipr_engine import economic_action, prior_economic_deferrals  # noqa: E402
+
+
+def test_prior_deferrals_skip_not_due_weeks_and_stop_at_a_shipped_cycle():
+    assert prior_economic_deferrals([]) == 0
+    assert prior_economic_deferrals([{"deferred_economics"}]) == 1
+    assert prior_economic_deferrals([{"not_due"}, {"deferred_economics"}, {"review"}]) == 1
+    assert prior_economic_deferrals([{"review"}, {"deferred_economics"}]) == 0
+    assert prior_economic_deferrals([set(), {"deferred_economics"}]) == 0
+
+
+def test_economic_action_passes_full_carts():
+    assert economic_action(1800, 1, 0, 240, 1700, False, 0, 1) == "pass"
+
+
+def test_economic_action_releases_on_lost_sales_or_critical():
+    assert economic_action(500, 1, 240, 240, 1700, False, 0, 1) == "release"
+    assert economic_action(500, 2, 300, 240, 1700, True, 0, 1) == "release"
+
+
+def test_light_due_order_is_deferred_once_then_ships():
+    assert economic_action(500, 1, 50, 240, 1700, False, 0, 1) == "defer"
+    assert economic_action(500, 1, 50, 240, 1700, False, 1, 1) == "release_after_deferral"
+    assert economic_action(500, 1, 50, 240, 1700, False, 0, 0) == "release_after_deferral"
