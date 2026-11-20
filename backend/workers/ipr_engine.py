@@ -68,6 +68,20 @@ SEASONAL_CADENCE_WEEKS = {
 }
 OFF_SEASON_MONTHS = {9, 10, 11, 12, 1, 2}
 DEFAULT_CADENCE_BUFFER_WEEKS = 1
+SETTINGS_OVERRIDE = {}           # preview-only what-if overrides of ipr_settings (scenario analysis)
+# Weekly DTS feeds repeat delivery rows from other weeks (25.5K duplicate units found 2026-11-20;
+# the loader now skips them, but the table has no unique key). Read deliveries through this
+# drop-in dedupe: first feed to report a (store, sku, delivery_date) wins. Rows up to 2026-10-01
+# are the single-feed ledger era and pass through untouched.
+DEDUP_DELIVERIES = """(
+    SELECT store_id, sku_id, delivery_date, units_delivered FROM deliveries
+    WHERE delivery_date <= DATE '2026-10-01'
+    UNION ALL
+    SELECT store_id, sku_id, delivery_date, units_delivered FROM (
+        SELECT store_id, sku_id, delivery_date, units_delivered, feed_source,
+               MIN(feed_source) OVER (PARTITION BY store_id, sku_id, delivery_date) AS _kf
+        FROM deliveries WHERE delivery_date > DATE '2026-10-01') z
+    WHERE feed_source = _kf)"""
 DUE_SLACK_DAYS = 3
 
 
@@ -189,6 +203,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # ── settings (every tunable is a DB row flagged with its spec status) ──
     cur.execute("SELECT key, value FROM ipr_settings")
     S = {r["key"]: r["value"] for r in cur.fetchall()}
+    if preview and SETTINGS_OVERRIDE:          # what-if scenarios (preview only, never written)
+        S.update(SETTINGS_OVERRIDE)
     cover_wk = float(S["coverage_weeks"])        # legacy flat coverage; cadence coverage below
     _season = "off" if (shipping_week or date.today()).month in OFF_SEASON_MONTHS else "in"
     _base_cad = (SEASONAL_CADENCE_WEEKS[_season] if int(S.get("min_order_full_carts", 1) or 0) > 0
@@ -445,10 +461,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                SUM(units_delivered) FILTER (WHERE delivery_date > %s) AS d26,
                COUNT(DISTINCT delivery_date) FILTER (WHERE delivery_date > %s) AS n_del,
                SUM(units_delivered) FILTER (WHERE delivery_date > %s AND delivery_date <= %s) AS d13
-        FROM deliveries dl LEFT JOIN fw ON fw.sku_id = dl.sku_id
+        FROM {dd} dl LEFT JOIN fw ON fw.sku_id = dl.sku_id
         WHERE delivery_date > %s
         GROUP BY dl.store_id, dl.sku_id
-    """, (*fresh_arr, d(182), d(91 + lag_days), d(lag_days), anchor, fresh_days, d(182), d(182),
+    """.format(dd=DEDUP_DELIVERIES), (*fresh_arr, d(182), d(91 + lag_days), d(lag_days), anchor, fresh_days, d(182), d(182),
           d(91), anchor, d(max(182, fresh_max))))
     dels = {(r["store_id"], r["sku_id"]): dict(r) for r in cur.fetchall()}
     # Lot-age sellable credit (calibration 2026-11-20, 4,474 clean delivery cohorts, Apr-Jul 2026
@@ -464,8 +480,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if age <= a1:
                 return v0 + (v1 - v0) * (age - a0) / (a1 - a0)
         return 0.0
-    cur.execute("""SELECT store_id, sku_id, delivery_date, SUM(units_delivered) AS u FROM deliveries
-                   WHERE delivery_date > %s AND delivery_date <= %s GROUP BY 1, 2, 3""",
+    cur.execute("""SELECT store_id, sku_id, delivery_date, SUM(units_delivered) AS u FROM {dd} dl
+                   WHERE delivery_date > %s AND delivery_date <= %s GROUP BY 1, 2, 3""".format(dd=DEDUP_DELIVERIES),
                 (d(lot_curve[-1][0]), anchor))
     lot_credit = defaultdict(float)
     for r in cur.fetchall():
@@ -516,13 +532,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     w0 = anchor - timedelta(weeks=shrink_wk)
     cur.execute("""
         SELECT COALESCE(fm.ipr_family, 'Unmapped') AS fam,
-               (SELECT SUM(units_delivered) FROM deliveries dl WHERE dl.sku_id = ANY(array_agg(k.sku_id))
+               (SELECT SUM(units_delivered) FROM {dd} dl WHERE dl.sku_id = ANY(array_agg(k.sku_id))
                   AND dl.delivery_date > %s AND dl.delivery_date <= %s) AS delivered,
                (SELECT SUM(units_sold) FROM sales sa WHERE sa.sku_id = ANY(array_agg(k.sku_id))
                   AND sa.sale_date > %s AND sa.sale_date <= %s) AS sold
         FROM skus k LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
         GROUP BY 1
-    """, (w0, anchor, w0, anchor))
+    """.format(dd=DEDUP_DELIVERIES), (w0, anchor, w0, anchor))
     shrink_in = {r["fam"]: (float(r["delivered"] or 0), float(r["sold"] or 0)) for r in cur.fetchall()}
     cur.execute("""SELECT MIN(period_end) FILTER (WHERE period_end BETWEEN %s AND %s) AS p0,
                           MAX(period_end) FILTER (WHERE period_end BETWEEN %s AND %s) AS p1
@@ -674,6 +690,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     lines = {}               # (store, sku) -> evaluation record
     # Every store x SKU with velocity is evaluated (the §2 objective covers the whole HD
     # program); only plannable SKUs (in this availability + packable + mapped) get trays.
+    # Peak-floor seeding: a store x SKU that sold in Apr-Jul but NOT in the last 13 weeks has no
+    # sales row, so the §9 loop would never see it — the "self-fulfilling prophecy" (Frank Paul,
+    # 2026-11-20): starved lines vanish from the forecast. Seed them at zero recent sales and let
+    # the peak floor set fc; every §11/§24 gate still applies. ($84K/wk of Apr-Jul sales had no
+    # engine line on the 11/20 audit.)
+    if peak_rate and peak_mult > 0:
+        _seeded = 0
+        for _k, _pk in peak_rate.items():
+            if _k not in sales and _pk * peak_mult >= min_rate:
+                sales[_k] = {"w2": 0.0, "w4": 0.0, "w8": 0.0, "w10": 0.0, "w13": 0.0,
+                             "d13": 0.0, "w13d": 0.0}
+                _seeded += 1
+        log(f"Peak-floor seeding: {_seeded:,} store x SKU lines with Apr-Jul sales but none in 13 wks")
     for (store_id, sku_id), sv in sales.items():
         if sku_id not in sku_info:
             continue
