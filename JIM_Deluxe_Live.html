@@ -280,6 +280,7 @@ body{background:var(--x-bg);}
     <button type="button" class="xtab" data-x="xhist" onclick="xGo('xhist')">History</button>
     <span class="sep"></span>
     <button type="button" class="xtab alt" data-x="xpol" onclick="xGo('xpol')">Policies</button>
+    <button type="button" class="xtab alt" onclick="window.open('/dsm','_blank')" title="Store lookup, visits and alerts for District Sales Managers (Sec 26)">DSM Portal <i class="bi bi-box-arrow-up-right"></i></button>
     <div class="xclassic">
       <button type="button" class="xtab alt" id="xClassicBtn" aria-haspopup="true" aria-expanded="false" aria-controls="xCMenu" onclick="xToggleClassic(event)">Classic <i class="bi bi-chevron-down"></i></button>
       <div class="xcmenu" id="xCMenu" role="menu" hidden onclick="if(event.target.closest('.nl'))xCloseClassic()">
@@ -4162,7 +4163,7 @@ function xRenderResults(){
   h+='<div class="xgrid2"><div class="xpanel"><div class="xph"><h2>Allocation</h2><span class="sub">No clearance target. Leftover supply is fine (Sec 15).</span></div>'+
     '<table class="xdata"><tbody>'+rows.filter(function(r){return r[1]!=null;}).map(function(r){return '<tr'+(r[2]?' class="tot"':'')+'><td>'+escH(r[0])+'</td><td class="r">'+xN(r[1])+'</td></tr>';}).join('')+'</tbody></table></div>';
   var lost=[['lost_unavailable_inventory','No inventory','store need with no supply this week'],['lost_blocks_and_holds','Blocks and holds','lines not shipped after review'],
-    ['lost_stopped_13wk','Stopped at 13 weeks','below the 13-week bar'],['lost_deferrals','Deferrals','need under one shelf, retried next week'],['lost_deferrals_one_week','Light carts waiting a week','one week of sales at deferred stores'],['lost_low_value','Low-value carts','held back for cart economics']];
+    ['lost_stopped_13wk','Stopped at 13 weeks','below the 13-week bar'],['lost_deferrals','Deferrals','need under one shelf, retried next week'],['lost_deferrals_one_week','Light carts waiting a week','one week of sales at deferred stores'],['lost_minimum_cart_pushes_one_week','Pushed under one cart','one week of sales at stores pushed by the cart minimum'],['lost_low_value','Low-value carts','held back for cart economics']];
   h+='<div class="xpanel"><div class="xph"><h2>Sales we are leaving behind</h2><span class="sub">Per week, at wholesale.</span></div><div class="xlost">'+
     lost.filter(function(l){return o[l[0]]!=null;}).map(function(l){return '<div class="xlc"><b>'+xUsd(o[l[0]])+'</b>'+escH(l[1])+' <span class="xwhy">&middot; '+escH(l[2])+'</span></div>';}).join('')+
     (o.edi_uncertainty_at_risk!=null?'<div class="xlc n"><b>'+xUsd(o.edi_uncertainty_at_risk)+' at risk</b>Missing EDI at '+xN(c.stores_edi_gap)+' stores <span class="xwhy">&middot; demand held at baseline, not zeroed</span></div>':'')+
@@ -4191,6 +4192,13 @@ function xRenderResults(){
     '<span class="sub">Store by SKU: weekly forecast, method, on hand, inbound and need, for every line that ships.</span></summary>'+
     '<div class="xtools"><input class="xinput" id="fcQ" type="search" placeholder="Search store #, name or SKU" aria-label="Search forecast" oninput="X.fc.page=0;xRenderFc()" onkeydown="if(event.key===\'Enter\')xFcStore()"></div>'+
     '<div id="fcBody"><div class="xempty">Loading&hellip;</div></div></details></div>';
+  /* AI checks (Sec 25 reviewer + Sec 20 config consolidation) */
+  h+='<div class="xpanel" id="twAi"><div class="xph"><h2>AI checks</h2><span class="sub">An independent AI read of the whole run (Sec 25), and a cart-config consolidation that only ever applies demand-neutral merges &mdash; anything that would change what a store receives comes back as a proposal (Sec 20).</span><span class="act"><span class="xsrc">Sec 20, 25</span></span></div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">'+
+    '<button class="xbtn xbtn-s" id="twAiRev" onclick="xAiReview()"><i class="bi bi-shield-check"></i>Independent AI review</button>'+
+    '<button class="xbtn xbtn-s" id="twAiCon" onclick="xConsolidate(false)"><i class="bi bi-collection"></i>Preview config consolidation</button>'+
+    '<button class="xbtn xbtn-s" id="twAiConA" onclick="xConsolidate(true)"><i class="bi bi-collection-fill"></i>Apply neutral merges</button></div>'+
+    '<div id="twAiOut"></div></div>';
   /* files */
   h+='<div class="xpanel" id="twFiles"><div class="xph"><h2>Files</h2><span class="sub">Built from this run. Files marked Coming are still being built.</span><span class="act"><span class="xsrc">Sec 22, 28 &middot; exports</span></span></div><div class="xfiles" id="twFilesBody"></div></div>';
   el.innerHTML=h;
@@ -4214,6 +4222,39 @@ async function xRelease(){
     xRefreshRelease();xRenderSteps();var t=document.getElementById('twRunTag');if(t){t.className='xtag ok';t.textContent='Released';}
     toast('Plan released','ok');
   }catch(e){X.releasing=false;xRefreshRelease();toast('Release failed: '+e.message,'err');}
+}
+
+/* ---------- AI checks (Sec 25 / Sec 20) ---------- */
+function xAiBusy(msg){var o=document.getElementById('twAiOut');if(o)o.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>'+escH(msg)+'</div>';}
+async function xAiReview(){
+  if(!X.run)return;var b=document.getElementById('twAiRev');if(b)b.disabled=true;
+  xAiBusy('The AI reviewer is reading the run evidence…');
+  try{
+    var r=await api('/api/ipr/runs/'+X.run+'/ai-review',{method:'POST'});
+    var cls=r.verdict==='PASS'?'ok':(r.verdict==='BLOCK'?'bad':'warn');
+    var f=(r.findings||[]).map(function(x){return '<tr><td><span class="xtag '+(x.severity==='BLOCK'?'bad':x.severity==='WARNING'?'warn':'')+'">'+escH(x.severity)+'</span></td><td><b>'+escH(x.area)+'</b><div class="xsmall">'+escH(x.evidence||'')+'</div><div class="xsmall xmuted">'+escH(x.recommendation||'')+(x.required_approval?' &middot; needs '+escH(x.required_approval):'')+'</div></td></tr>';}).join('');
+    document.getElementById('twAiOut').innerHTML='<div class="xbanner '+cls+'" style="align-items:flex-start"><i class="bi bi-shield-check"></i><span><b>'+escH(r.verdict)+'</b> ('+escH(r.confidence||'')+' confidence) &mdash; '+escH(r.summary||'')+'</span></div>'+
+      (f?'<table class="xdata"><tbody>'+f+'</tbody></table>':'')+
+      (r.objective_assessment?'<div class="xnote">'+escH(r.objective_assessment)+'</div>':'');
+  }catch(e){document.getElementById('twAiOut').innerHTML='<div class="xbanner bad"><i class="bi bi-x-circle"></i><span>'+escH(e.message)+'</span></div>';}
+  if(b)b.disabled=false;
+}
+async function xConsolidate(apply){
+  if(!X.run)return;
+  if(apply&&!confirm('Apply the demand-neutral merges? Same SKUs, trays and units per store — only kit alignment and shelf order change. Proposals that would change product are never applied.'))return;
+  var b=document.getElementById(apply?'twAiConA':'twAiCon');if(b)b.disabled=true;
+  xAiBusy(apply?'Applying demand-neutral merges…':'Analyzing cart configurations…');
+  try{
+    var r=await api('/api/ipr/runs/'+X.run+'/consolidate-configs?apply='+(apply?'true':'false'),{method:'POST'});
+    var a=r.analysis||{},nm=(a.neutral_merges||[]),pr=(a.proposals||[]);
+    var h='<div class="xbanner '+(nm.length||pr.length?'info':'ok')+'"><i class="bi bi-collection"></i><span><b>'+escH(r.verdict||'')+'</b> &middot; '+xN(a.configs)+' configs over '+xN(a.carts)+' carts</span></div>';
+    if(nm.length)h+='<table class="xdata"><tbody>'+nm.map(function(m){return '<tr><td><span class="xtag '+(r.applied?'ok':'')+'">'+(r.applied?'applied':'neutral')+'</span></td><td>'+escH(m.absorbed)+' &rarr; '+escH(m.survivor)+' ('+escH(m.type)+', '+xN(m.carts_moved)+' carts)</td></tr>';}).join('')+'</tbody></table>';
+    if(pr.length)h+='<div class="xnote"><b>'+pr.length+' proposal(s) need a human call</b> (they change what a store receives):<br>'+pr.map(function(p){return escH(p.config_a)+' vs '+escH(p.config_b)+' &mdash; '+escH(p.differs.sku_a)+' vs '+escH(p.differs.sku_b)+' ('+escH(p.differs.family||'')+', '+xN(p.carts_a)+'/'+xN(p.carts_b)+' carts)';}).join('<br>')+'</div>';
+    if(r.ai_assessment)h+='<div class="xnote" style="white-space:pre-wrap">'+escH(r.ai_assessment)+'</div>';
+    document.getElementById('twAiOut').innerHTML=h;
+    if(apply&&r.applied){toast('Neutral merges applied','ok');}
+  }catch(e){document.getElementById('twAiOut').innerHTML='<div class="xbanner bad"><i class="bi bi-x-circle"></i><span>'+escH(e.message)+'</span></div>';}
+  if(b)b.disabled=false;
 }
 
 /* ---------- files ---------- */

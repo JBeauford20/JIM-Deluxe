@@ -13,7 +13,8 @@ router = APIRouter()
 
 DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", "review", "line",
                   "duplicate_run", "stopped_13wk", "reduced_13wk", "gap_fill", "low_value_cart", "deferred_economics", "not_due",
-                  "deferral", "reactivation")
+                  "deferral", "reactivation", "pushed_min_cart", "min_cart_service_review",
+                  "assortment_block", "capacity_cap")
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
 # role (Josh), but one person can never sign both steps.
@@ -274,6 +275,51 @@ def reject_reactivation(rid: str, body: Rejection, user=Depends(get_current_user
         if not cur.fetchone():
             raise HTTPException(400, "Request not found or no longer pending")
         return {"status": "rejected"}
+
+
+# ── §25 independent AI review + §20 cart-config consolidation ────────────────
+
+@router.post("/runs/{run_id}/ai-review")
+def ai_review(run_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Run the §25 LLM reviewer on this run's evidence and store the structured verdict."""
+    from routers.ai_explanations import _check_ai_budget
+    from services.ipr_reviewer import run_ai_review
+    with get_db() as conn:
+        cur = cursor(conn)
+        _check_ai_budget(cur, user, "audit")
+        report = run_ai_review(cur, run_id, user.get("email"))
+        log_change(cur, run_id, "run", run_id,
+                   f"AI review: {report.get('verdict')}", user.get("email"))
+        return report
+
+
+@router.post("/runs/{run_id}/consolidate-configs")
+def consolidate_configs(run_id: str, apply: bool = False,
+                        user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Cart-config consolidation (§20). apply=false previews; apply=true applies ONLY the
+    demand-neutral merges (kit alignment / shelf order — same SKUs, trays and units per
+    store). Merges that would change what a store receives are returned as proposals for
+    human approval, never applied. The AI integrity check runs either way."""
+    from routers.ai_explanations import _check_ai_budget
+    from services.ipr_reviewer import run_consolidation
+    with get_db() as conn:
+        cur = cursor(conn)
+        _check_ai_budget(cur, user, "audit")
+        result = run_consolidation(cur, run_id, user.get("email"), apply)
+        if result.get("applied"):
+            log_change(cur, run_id, "run", run_id,
+                       f"config consolidation applied: {result['verdict']}", user.get("email"))
+        return result
+
+
+@router.get("/runs/{run_id}/ai-reviews")
+def list_ai_reviews(run_id: str, user=Depends(get_current_user)):
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""SELECT id, kind, model, verdict, report, created_by, created_at
+                       FROM ipr_ai_reviews WHERE run_id = %s
+                       ORDER BY created_at DESC LIMIT 20""", (run_id,))
+        return cur.fetchall()
 
 
 @router.get("/family-map")

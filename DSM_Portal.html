@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TPC — IPR Engine · DSM Portal</title>
+<!--
+## Screen contract: DSM Portal (spec §26)
+- Screen purpose: a DSM in a Home Depot store looks up any store and sees its facts, SKU
+  performance, engine decisions and alerts, asks the AI why, and records a store visit.
+- Primary user: District Sales Manager (nontechnical; on a phone in the aisle).
+- Primary action: search a store number → read the store profile → record a visit / ask AI.
+- Data shown: stores, ipr_store_family grades, 13-wk weekly sales, YTD, ranks, last delivery,
+  inbound, stockout risks, engine run_decisions, pending reactivations, visits (API /api/dsm/*).
+- Filters/actions: store search (number/name/city/state/merchant/region); alerts feed with
+  "my stores" filter; AI question box; visit form; manager-only: email digests, outbox.
+- Destructive operations: none (visit records are append-only).
+- Validation states: visit form requires at least one field; AI box requires a question;
+  inline error text under the control.
+- Empty states: every panel states "No X on file" rather than a blank panel.
+- Loading states: inline "Loading…" rows per panel.
+- Error states: red banner with the API error and a Retry link.
+- Success state: visit saved → green toast + appears in Recent visits; AI answer rendered inline.
+- Audit trail: visits record user/date/source (dsm_store_visits); AI usage budgeted per user.
+- Permissions: any signed-in user can read; recording visits needs dsm/sales_director/manager/
+  admin; digests/outbox need manager/admin. Backend enforces (routers/dsm.py).
+- Acceptance criteria: search "138" finds store 138; profile shows grades + last delivery +
+  data-as-of date; bottom-5 SKUs show a cause; visit saves and reappears; alerts list loads.
+-->
+<style>
+:root{--fern:#2F4A3E;--fd:#213631;--fl:#3d6150;--moss:#6B7D52;--mp:#DCE3CC;--paper:#F5F7F4;--ink:#232A20;--is:#5B6152;--line:#E2E6DF;--ora:#B5502D;--ok:#3F7A4F;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{background:var(--fern);color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;position:sticky;top:0;z-index:50}
+header h1{font-size:15px;margin:0;font-weight:600;flex:1}
+header button{background:var(--fl);border:0;color:#fff;border-radius:6px;padding:6px 10px;font-size:12px}
+main{max-width:760px;margin:0 auto;padding:12px 12px 60px}
+.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--is);margin:0 0 8px}
+.search{display:flex;gap:8px}
+.search input{flex:1;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:16px}
+.search button,.btn{background:var(--fern);color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px;cursor:pointer}
+.btn.sec{background:#fff;color:var(--fern);border:1px solid var(--fern)}
+.hit{padding:10px 4px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;cursor:pointer}
+.hit:last-child{border-bottom:0}
+.muted{color:var(--is);font-size:12.5px}
+.err{background:#F7E4DF;color:#7c2d1a;border:1px solid #e4b7a9;border-radius:8px;padding:10px 12px;margin:10px 0;display:none}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--ok);color:#fff;border-radius:8px;padding:10px 16px;display:none;z-index:99}
+.chip{display:inline-block;border-radius:999px;padding:1px 9px;font-size:11.5px;font-weight:600;margin:1px 3px 1px 0;white-space:nowrap}
+.chip.g{background:var(--mp);color:var(--fd)} .chip.r{background:#F7E4DF;color:#8a2f17}
+.chip.y{background:#F6ECD6;color:#7a5410} .chip.b{background:#E2EDF5;color:#1f5f8b}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+.tile{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.tile .v{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+.tile .l{font-size:11px;color:var(--is);text-transform:uppercase;letter-spacing:.05em}
+.bars{display:flex;align-items:flex-end;gap:3px;height:64px;margin-top:6px}
+.bars div{flex:1;background:var(--moss);border-radius:2px 2px 0 0;min-height:2px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--is);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:4px 6px;border-bottom:1px solid var(--line)}
+td{padding:6px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+details{border-top:1px solid var(--line);padding:6px 0}
+details summary{cursor:pointer;font-weight:600;font-size:13.5px;padding:4px 0}
+textarea,select,input[type=text],input[type=number],input[type=date]{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit;background:#fff}
+label{font-size:12px;color:var(--is);display:block;margin:8px 0 3px}
+.ai-a{background:var(--mp);border-radius:8px;padding:10px 12px;margin-top:8px;white-space:pre-wrap;font-size:14px}
+.urgent{border-left:4px solid var(--ora);padding-left:8px}
+.tabs{display:flex;gap:6px;margin:10px 0 2px}
+.tabs button{flex:1;padding:8px;border:1px solid var(--line);background:#fff;border-radius:8px;font-size:13px;cursor:pointer}
+.tabs button.on{background:var(--fern);color:#fff;border-color:var(--fern)}
+#loginOverlay{display:none;position:fixed;inset:0;z-index:300;background:var(--fd);align-items:center;justify-content:center}
+#loginOverlay .box{background:#fff;border-radius:12px;padding:22px;width:300px}
+#loginOverlay input{width:100%;margin-bottom:8px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:15px}
+@media(max-width:480px){main{padding:8px 8px 60px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🌿 TPC — IPR Engine · DSM Portal</h1>
+  <button onclick="logout()">Sign out</button>
+</header>
+<main>
+  <div class="tabs">
+    <button id="tab-store" class="on" onclick="showTab('store')">Store lookup</button>
+    <button id="tab-alerts" onclick="showTab('alerts')">Alerts</button>
+  </div>
+  <div class="err" id="err"></div>
+
+  <section id="pane-store">
+    <div class="card">
+      <div class="search">
+        <input id="q" inputmode="search" placeholder="Store # or name, city, state, merchant…"
+               onkeydown="if(event.key==='Enter')doSearch()">
+        <button onclick="doSearch()">Search</button>
+      </div>
+      <div id="hits"></div>
+    </div>
+    <div id="store"></div>
+  </section>
+
+  <section id="pane-alerts" style="display:none">
+    <div class="card">
+      <h2>Alerts from the latest run</h2>
+      <label style="display:flex;align-items:center;gap:8px;margin:0 0 6px">
+        <input type="checkbox" id="mine" style="width:auto" onchange="loadAlerts()"> Only my stores
+      </label>
+      <div id="alerts" class="muted">Loading…</div>
+    </div>
+  </section>
+</main>
+
+<div id="loginOverlay"><div class="box">
+  <strong>Sign in — TPC DSM Portal</strong>
+  <p class="muted">Use your TPC login.</p>
+  <input id="lg-em" type="email" placeholder="email" autocomplete="username">
+  <input id="lg-pw" type="password" placeholder="password" autocomplete="current-password"
+         onkeydown="if(event.key==='Enter')doLogin()">
+  <div class="muted" id="lg-err" style="color:#8a2f17"></div>
+  <button class="btn" style="width:100%" id="lg-btn" onclick="doLogin()">Sign in</button>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* AUTH — same Supabase email login as the main app (anon key is public/client-safe) */
+var SB_URL='https://ocfmqxtkhpjkkstylypk.supabase.co';
+var SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jZm1xeHRraHBqa2tzdHlseXBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4OTczNjgsImV4cCI6MjEwNjQ3MzM2OH0.vjCWPM9os4YFppHuHeFyGi8_Q4RW3-eSK4SO5pdnl1o';
+function tokGet(){try{return JSON.parse(localStorage.getItem('jim_tok')||'null')}catch(e){return null}}
+function tokSet(t){try{localStorage.setItem('jim_tok',JSON.stringify(t))}catch(e){}}
+function tokClear(){try{localStorage.removeItem('jim_tok')}catch(e){}}
+function authHdr(){var t=tokGet();return t&&t.access_token?{'Authorization':'Bearer '+t.access_token}:{}}
+function showLogin(){document.getElementById('loginOverlay').style.display='flex'}
+function logout(){tokClear();location.reload()}
+async function doLogin(){
+  var em=document.getElementById('lg-em').value.trim(),pw=document.getElementById('lg-pw').value;
+  var btn=document.getElementById('lg-btn'),err=document.getElementById('lg-err');
+  btn.disabled=true;btn.textContent='Signing in…';err.textContent='';
+  var r=await fetch(SB_URL+'/auth/v1/token?grant_type=password',{method:'POST',
+    headers:{apikey:SB_ANON,'Content-Type':'application/json'},
+    body:JSON.stringify({email:em,password:pw})});
+  if(!r.ok){var e=await r.json().catch(function(){return{}});
+    err.textContent=e.error_description||e.msg||'Invalid login';btn.disabled=false;btn.textContent='Sign in';return}
+  tokSet(await r.json());location.reload();
+}
+async function api(path,opts){
+  opts=opts||{};opts.headers=Object.assign({'Content-Type':'application/json'},authHdr(),opts.headers||{});
+  var r=await fetch('/api/dsm'+path,opts);
+  if(r.status===401){showLogin();throw new Error('Please sign in')}
+  if(!r.ok){var e=await r.json().catch(function(){return{}});throw new Error(e.detail||('Request failed ('+r.status+')'))}
+  return r.json();
+}
+function err(msg){var el=document.getElementById('err');el.textContent=msg;el.style.display=msg?'block':'none'}
+function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.style.display='block';
+  setTimeout(function(){t.style.display='none'},2500)}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function n(x){return x==null?'—':Number(x).toLocaleString()}
+function showTab(t){['store','alerts'].forEach(function(k){
+  document.getElementById('pane-'+k).style.display=k===t?'':'none';
+  document.getElementById('tab-'+k).className=k===t?'on':''});
+  if(t==='alerts')loadAlerts();}
+
+/* ── Search ── */
+async function doSearch(){
+  err('');var q=document.getElementById('q').value.trim();if(!q)return;
+  var box=document.getElementById('hits');box.innerHTML='<div class="muted">Searching…</div>';
+  try{
+    var hits=await api('/stores/search?q='+encodeURIComponent(q));
+    if(!hits.length){box.innerHTML='<div class="muted">No store matches "'+esc(q)+'". Try the store number or city.</div>';return}
+    if(hits.length===1){box.innerHTML='';openStore(hits[0].store_id);return}
+    box.innerHTML=hits.map(function(h){return '<div class="hit" onclick="openStore('+h.store_id+')">'+
+      '<div><strong>'+h.store_id+'</strong> '+esc(h.store_name)+'<div class="muted">'+esc(h.city||'')+', '+esc(h.state||'')+' · '+esc(h.merchant||'')+'</div></div>'+
+      '<div class="muted">'+esc(h.volume_code||'')+(h.dsm?(' · '+esc(h.dsm)):'')+'</div></div>'}).join('');
+  }catch(e){box.innerHTML='';err(e.message)}
+}
+
+/* ── Store profile ── */
+var CUR=null;
+async function openStore(id){
+  err('');CUR=id;var box=document.getElementById('store');
+  box.innerHTML='<div class="card muted">Loading store '+id+'…</div>';
+  try{
+    var p=await api('/stores/'+id+'/profile');
+    var s=p.store, mx=0;
+    (p.weekly_sales_13wk||[]).forEach(function(w){mx=Math.max(mx,w.units||0)});
+    var famChips=(p.families||[]).map(function(f){
+      var cls=f.service_status==='BLOCKED'?'r':(f.service_status==='REVIEW'?'y':'g');
+      return '<span class="chip '+cls+'" title="'+esc(f.service_status)+'">'+esc(f.ipr_family)+' '+esc(f.grade||'')+
+        (f.conversion_13wk!=null?(' · '+Math.round(f.conversion_13wk*100)+'%'):'')+'</span>'}).join('');
+    var risks=(p.stockout_risks||[]).map(function(r){
+      return '<tr><td>'+r.sku_id+'</td><td><span class="chip '+(r.risk==='Critical'?'r':'y')+'">'+r.risk+'</span></td>'+
+        '<td>'+n(r.projected)+'u at arrival</td><td>'+(r.forecast_wk!=null?r.forecast_wk+'/wk':'—')+'</td></tr>'}).join('');
+    var decs=(p.engine_decisions||[]).map(function(d){
+      return '<tr><td class="muted">'+esc(d.decision_type)+'</td><td>'+esc(d.reason)+'</td></tr>'}).join('');
+    var pend=(p.pending_approvals||[]).map(function(r){
+      return '<li>'+esc(r.ipr_family)+' — '+esc(r.status)+' ('+n(r.test_units)+'u test)</li>'}).join('');
+    var visits=(p.recent_visits||[]).map(function(v){
+      return '<tr><td>'+esc(v.visited_at)+'</td><td>'+esc(v.recorded_by)+'</td><td>'+esc(v.merchandising_status||'—')+'</td><td>'+esc(v.comments||'')+'</td></tr>'}).join('');
+    box.innerHTML=
+      '<div class="card"><h2>Store facts <span class="muted" style="float:right">data as of '+esc(p.data_as_of||'?')+'</span></h2>'+
+      '<div style="font-size:17px;font-weight:700">'+s.store_id+' — '+esc(s.store_name)+'</div>'+
+      '<div class="muted">'+esc(s.city||'')+', '+esc(s.state||'')+' · '+esc(s.merchant||'—')+' · '+esc(s.region||'—')+
+      (s.dsm?(' · DSM: '+esc(s.dsm)):' · DSM: not assigned')+'</div>'+
+      ((s.active===false||['do_not_ship','paused','inactive','hold'].indexOf(s.store_status)>=0)?'<div class="chip r" style="margin-top:6px">'+esc(s.store_status||'inactive')+'</div>':'')+
+      (p.edi&&p.edi.suspected_gap?'<div class="chip y" style="margin-top:6px">Suspected EDI gap — no scans since '+esc(p.edi.last_sale)+'</div>':'')+
+      '<div class="grid" style="margin-top:10px">'+
+        '<div class="tile"><div class="v">'+(p.ranks?('#'+n(p.ranks.national_rank)):'—')+'</div><div class="l">national of '+(p.ranks?n(p.ranks.national_of):'—')+'</div></div>'+
+        '<div class="tile"><div class="v">'+(p.ranks?('#'+n(p.ranks.region_rank)):'—')+'</div><div class="l">region of '+(p.ranks?n(p.ranks.region_of):'—')+'</div></div>'+
+        '<div class="tile"><div class="v">$'+n(p.ytd&&p.ytd.dollars)+'</div><div class="l">YTD sales</div></div>'+
+        '<div class="tile"><div class="v">'+n(p.ytd&&p.ytd.units)+'</div><div class="l">YTD units</div></div>'+
+        '<div class="tile"><div class="v">'+esc(p.last_delivery||'none')+'</div><div class="l">last delivery</div></div>'+
+        '<div class="tile"><div class="v">'+n(p.inbound&&p.inbound.loaded_units)+'u</div><div class="l">inbound loaded</div></div>'+
+      '</div>'+
+      '<div style="margin-top:10px"><div class="muted">Weekly units, last 13 weeks</div><div class="bars">'+
+        (p.weekly_sales_13wk||[]).map(function(w){return '<div title="'+w.week+': '+n(w.units)+'u" style="height:'+(mx?Math.max(3,Math.round(w.units/mx*100)):3)+'%"></div>'}).join('')+
+      '</div></div>'+
+      '<div style="margin-top:10px">'+(famChips||'<span class="muted">No family grades yet — run the engine first.</span>')+'</div>'+
+      (pend?'<div style="margin-top:8px"><strong style="font-size:13px">Pending approvals</strong><ul style="margin:4px 0">'+pend+'</ul></div>':'')+
+      '</div>'+
+
+      '<div class="card"><h2>Ask about this store</h2>'+
+      '<textarea id="ai-q" rows="2" placeholder="e.g. Why didn’t this store get an order this week? What should I verify on my visit?"></textarea>'+
+      '<div style="margin-top:8px;display:flex;gap:8px"><button class="btn" onclick="askAI()">Ask</button><span class="muted" id="ai-busy"></span></div>'+
+      '<div id="ai-a"></div></div>'+
+
+      '<div class="card"><h2>Stockout risks (latest run)</h2>'+
+      (risks?('<table><tr><th>SKU</th><th>Risk</th><th>Projected</th><th>Forecast</th></tr>'+risks+'</table>')
+            :'<div class="muted">No Critical/High stockout risks on file for this store.</div>')+'</div>'+
+
+      '<div class="card"><h2>SKU performance</h2><div id="skus" class="muted">Loading…</div></div>'+
+
+      '<div class="card"><h2>Engine decisions (latest run)</h2>'+
+      (decs?('<table>'+decs+'</table>'):'<div class="muted">No decisions recorded for this store in the latest run.</div>')+'</div>'+
+
+      '<div class="card"><h2>Record a store visit</h2>'+
+      '<label>Visit date</label><input type="date" id="v-date">'+
+      '<label>Merchandising status</label><select id="v-merch"><option value="">—</option><option>merchandised</option><option>partially merchandised</option><option>not merchandised</option><option>unknown</option></select>'+
+      '<label>Product condition</label><input type="text" id="v-cond" maxlength="500" placeholder="e.g. healthy, some dry 9cm on endcap">'+
+      '<label>Discarded units seen</label><input type="number" id="v-disc" min="0">'+
+      '<label>Display issues</label><input type="text" id="v-disp" maxlength="2000">'+
+      '<label>Comments</label><textarea id="v-com" rows="2" maxlength="4000"></textarea>'+
+      '<label>Recommended assortment changes</label><input type="text" id="v-rec" maxlength="2000">'+
+      '<label>Follow-up</label><input type="text" id="v-fu" maxlength="2000">'+
+      '<div class="muted" id="v-err" style="color:#8a2f17;margin-top:4px"></div>'+
+      '<div style="margin-top:10px"><button class="btn" onclick="saveVisit()">Save visit</button></div></div>'+
+
+      '<div class="card"><h2>Recent visits</h2>'+
+      (visits?('<table><tr><th>Date</th><th>By</th><th>Merch</th><th>Comments</th></tr>'+visits+'</table>')
+             :'<div class="muted">No visits recorded for this store yet.</div>')+'</div>';
+    loadSkus(id);
+    window.scrollTo({top:0});
+  }catch(e){box.innerHTML='';err(e.message)}
+}
+
+async function loadSkus(id){
+  var box=document.getElementById('skus');
+  try{
+    var k=await api('/stores/'+id+'/skus');
+    function tbl(rows,cols){
+      if(!rows||!rows.length)return '<div class="muted">None on file.</div>';
+      return '<div style="overflow-x:auto"><table><tr>'+cols.map(function(c){return '<th>'+c[1]+'</th>'}).join('')+'</tr>'+
+        rows.map(function(r){return '<tr>'+cols.map(function(c){
+          var v=r[c[0]];if(c[0]==='trend'&&v!=null)v=(v>=1?'+':'')+Math.round((v-1)*100)+'%';
+          return '<td>'+esc(v==null?'—':(typeof v==='number'?Number(v).toLocaleString():v))+'</td>'}).join('')+'</tr>'}).join('')+'</table></div>';
+    }
+    var C=[['sku_id','SKU'],['description','Product'],['u13','13wk u'],['u4','4wk u'],['trend','Trend']];
+    var CB=[['sku_id','SKU'],['description','Product'],['u13','13wk u'],['del13','Del 13wk'],['cause','Why']];
+    box.className='';
+    box.innerHTML=
+      '<details open><summary>Top 5 sellers</summary>'+tbl(k.top5,C)+'</details>'+
+      '<details><summary>Bottom 5 (with the reason)</summary>'+tbl(k.bottom5,CB)+'</details>'+
+      '<details><summary>Fastest growing</summary>'+tbl(k.fastest_growing,C)+'</details>'+
+      '<details><summary>Declining</summary>'+tbl(k.declining,C)+'</details>'+
+      '<details><summary>Selling but silent 14+ days</summary>'+tbl(k.no_recent_sales,C)+'</details>'+
+      '<details><summary>Probable stockouts</summary>'+tbl(k.probable_stockouts,[['sku_id','SKU'],['description','Product'],['risk','Risk'],['projected','Projected']])+'</details>'+
+      '<details><summary>Excess inventory</summary>'+tbl(k.excess_inventory,[['sku_id','SKU'],['description','Product'],['projected','Projected'],['u13','13wk u']])+'</details>'+
+      '<details><summary>Best / weakest families</summary>'+
+        tbl(k.best_families,[['family','Family'],['u13','13wk u'],['d13','13wk $']])+
+        tbl(k.weakest_families,[['family','Family'],['u13','13wk u'],['d13','13wk $']])+'</details>';
+  }catch(e){box.textContent='Could not load SKU performance: '+e.message}
+}
+
+async function askAI(){
+  var q=document.getElementById('ai-q').value.trim();
+  var busy=document.getElementById('ai-busy'),out=document.getElementById('ai-a');
+  if(!q){busy.textContent='Type a question first.';return}
+  busy.textContent='Thinking…';out.innerHTML='';
+  try{
+    var r=await api('/stores/'+CUR+'/ask',{method:'POST',body:JSON.stringify({question:q})});
+    out.innerHTML='<div class="ai-a">'+esc(r.answer)+'</div><div class="muted" style="margin-top:4px">Grounded in store data as of '+esc(r.data_as_of)+'. AI answers distinguish facts from inference — verify in-store.</div>';
+    busy.textContent='';
+  }catch(e){busy.textContent='';out.innerHTML='<div class="ai-a" style="background:#F7E4DF">'+esc(e.message)+'</div>'}
+}
+
+async function saveVisit(){
+  var verr=document.getElementById('v-err');verr.textContent='';
+  var b={visited_at:document.getElementById('v-date').value||null,
+    merchandising_status:document.getElementById('v-merch').value||null,
+    product_condition:document.getElementById('v-cond').value||null,
+    discarded_units:document.getElementById('v-disc').value?+document.getElementById('v-disc').value:null,
+    display_issues:document.getElementById('v-disp').value||null,
+    comments:document.getElementById('v-com').value||null,
+    recommended_changes:document.getElementById('v-rec').value||null,
+    follow_up:document.getElementById('v-fu').value||null};
+  if(!b.merchandising_status&&!b.comments&&!b.product_condition&&b.discarded_units==null&&!b.display_issues&&!b.recommended_changes&&!b.follow_up){
+    verr.textContent='Record at least one observation before saving.';return}
+  try{await api('/stores/'+CUR+'/visits',{method:'POST',body:JSON.stringify(b)});
+    toast('Visit saved');openStore(CUR);
+  }catch(e){verr.textContent=e.message}
+}
+
+/* ── Alerts ── */
+async function loadAlerts(){
+  var box=document.getElementById('alerts');box.className='muted';box.textContent='Loading…';
+  try{
+    var mine=document.getElementById('mine').checked;
+    var a=await api('/alerts?mine='+mine);
+    var rows=(a.alerts||[]).map(function(r){
+      return '<div class="hit'+(r.urgent?' urgent':'')+'" onclick="showTab(\'store\');openStore('+r.store_id+')">'+
+        '<div><strong>'+r.store_id+'</strong> '+esc(r.store_name)+', '+esc(r.state||'')+
+        (r.urgent?' <span class="chip r">URGENT</span>':'')+
+        ' <span class="chip b">'+esc(r.decision_type)+'</span>'+
+        '<div class="muted">'+esc(r.reason)+'</div></div></div>'}).join('');
+    var pend=(a.pending_reactivations||[]).map(function(r){
+      return '<div class="hit" onclick="showTab(\'store\');openStore('+r.store_id+')"><div><strong>'+r.store_id+'</strong> '+esc(r.store_name)+
+        ' — '+esc(r.ipr_family)+' <span class="chip y">'+esc(r.status)+'</span></div></div>'}).join('');
+    box.className='';
+    box.innerHTML=(a.run?('<div class="muted">Ship week '+esc(a.run.shipping_week)+'</div>'):'')+
+      (rows||'<div class="muted">No alerts in the latest run'+(mine?' for your stores':'')+'.</div>')+
+      (pend?('<h2 style="font-size:13px;color:var(--is);text-transform:uppercase;margin:12px 0 4px">Pending reactivations</h2>'+pend):'');
+  }catch(e){box.textContent=e.message}
+}
+
+/* boot */
+if(!tokGet()){showLogin()}
+</script>
+</body>
+</html>

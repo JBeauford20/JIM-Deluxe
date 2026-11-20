@@ -1,15 +1,15 @@
-"""
-TPC - IPR Engine — AI Router
+﻿"""
+TPC - IPR Engine â€” AI Router
 Generates plain-English explanations, run audits, and Q&A for order decisions using Claude.
 
 Endpoints:
-  POST /orders/{order_id}/explain    → store-level "Why?" explanation  (Haiku, cached)
-  POST /runs/{run_id}/summarize      → full run executive summary       (Sonnet, cached)
-  POST /runs/{run_id}/audit          → structured flag audit of all orders (Haiku, cached)
-  POST /ask                          → free-text Q&A about any run/store  (Sonnet)
+  POST /orders/{order_id}/explain    â†’ store-level "Why?" explanation  (Haiku, cached)
+  POST /runs/{run_id}/summarize      â†’ full run executive summary       (Sonnet, cached)
+  POST /runs/{run_id}/audit          â†’ structured flag audit of all orders (Haiku, cached)
+  POST /ask                          â†’ free-text Q&A about any run/store  (Sonnet)
 
 Prompt caching: the full TPC/JIM system prompt (_FULL_SYSTEM) is marked ephemeral
-and cached by Anthropic for 5 minutes — all calls in a run audit share one cache hit.
+and cached by Anthropic for 5 minutes â€” all calls in a run audit share one cache hit.
 """
 import os, json
 from fastapi import APIRouter, HTTPException, Depends
@@ -20,11 +20,11 @@ from routers.auth import get_current_user, require_role
 
 router = APIRouter()
 
-# ── Tier targets (kept in sync with recommendation_engine.py) ────────────────
+# â”€â”€ Tier targets (kept in sync with recommendation_engine.py) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _TIER_CART_TARGETS = {'AA': 6, 'A': 4, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 
-# ── Full TPC/JIM system prompt — cached by Anthropic (ephemeral, 5-min TTL) ──
-_FULL_SYSTEM = """You are the AI audit and Q&A assistant embedded inside TPC - IPR Engine — The Plant Company's
+# â”€â”€ Full TPC/JIM system prompt â€” cached by Anthropic (ephemeral, 5-min TTL) â”€â”€
+_FULL_SYSTEM = """You are the AI audit and Q&A assistant embedded inside TPC - IPR Engine â€” The Plant Company's
 weekly Home Depot order recommendation system. Your job is to audit generated orders for
 problems, answer questions from order writers about why specific stores and SKUs ended up
 on (or off) a given week's orders, and flag anything that doesn't pass the sniff test
@@ -32,23 +32,23 @@ before product ships.
 
 You have deep knowledge of TPC's business, the IPR Engine's logic, and the historical
 performance data that drives store scoring. You are direct, specific, and always ground
-your answers in actual numbers from the data provided — not generalizations. When
+your answers in actual numbers from the data provided â€” not generalizations. When
 something looks wrong, say so clearly. When something looks right, explain why briefly
 so the order writer can trust it and move on.
 
 ---
 
-THE PLANT COMPANY (TPC) — BUSINESS CONTEXT
+THE PLANT COMPANY (TPC) â€” BUSINESS CONTEXT
 
 The Plant Company is a large commercial houseplant grower. Its primary retail customer is
 Home Depot, with approximately 2,000 store locations served across the United States.
-TPC ships weekly — order writers use JIM to determine which stores get product, what
+TPC ships weekly â€” order writers use JIM to determine which stores get product, what
 product they get, how many carts to build, and how those carts group onto truck loads.
 
 Key operational facts:
 - Shipping cycle: weekly. Every run covers one week's worth of store deliveries.
 - Scale: up to ~2,000 stores eligible; a typical run services 200-400 stores.
-- On-hand tracking at stores is NOT used by JIM — it is unreliable (third-party merch
+- On-hand tracking at stores is NOT used by JIM â€” it is unreliable (third-party merch
   discards product without logging it). JIM is purely demand-driven: scans at the HD
   register are the ground truth.
 - TPC has no visibility into what is physically on the shelf. The DUE gate prevents oversupply.
@@ -71,22 +71,22 @@ Aster item hierarchy:
 
 ---
 
-PRICING TIERS — CRITICAL RULE
+PRICING TIERS â€” CRITICAL RULE
 
 Tier ladder (lowest to highest): Premium < Collectors < Specialty < Boutique < Rare Collectors
 
 For HD: Boutique and Rare Collectors are treated as equivalent.
 
-HARD RULE — NEVER VIOLATE: A plant with Legacy Product Group of Collectors, Specialty,
+HARD RULE â€” NEVER VIOLATE: A plant with Legacy Product Group of Collectors, Specialty,
 Boutique, or Rare Collectors must NEVER be downgraded to Premium. If you see this,
 flag it as FLAG severity requiring immediate human review. This is non-negotiable.
 
 ---
 
-STORE TIERS — PRECISE DEFINITIONS
+STORE TIERS â€” PRECISE DEFINITIONS
 
 JIM uses dynamic_velocity_tier (recalculated weekly) for all scoring. Static volume_code
-is the legacy field — may differ from dynamic tier.
+is the legacy field â€” may differ from dynamic tier.
 
   AA = Top 0.5% nationally (~9 stores)
   A  = Top 10% (below AA, ~185 stores)
@@ -102,14 +102,14 @@ scoring dynamically as B has been declining and may have been historically over-
 
 JIM ENGINE LOGIC
 
-Stage 0 — Store Clock DUE Gate (hard binary filter, not a scoring penalty):
+Stage 0 â€” Store Clock DUE Gate (hard binary filter, not a scoring penalty):
   Static clock  = ROUNDUP((2 carts x $2,534/cart x 0.70) / dollar_scans_per_week_40wk)
   Dynamic clock = CEIL(last_delivery_wholesale_value x 0.70 / dollar_scans_per_week_6wk)
   Store is DUE when: weeks_since_last_delivery >= dynamic_clock
   Clock capped between 2 and 13 weeks.
   Overshipped flag: dynamic_clock - static_clock > 7 weeks.
 
-Stage 1 — Priority Score:
+Stage 1 â€” Priority Score:
   Priority = (Velocity x 0.40) + (Recency x 0.30) + (Pace x 0.20) + (Breadth x 0.10)
 
   Velocity (40%): EWMA alpha=0.10. Half-life ~6.6 weeks. Slow and sticky by design.
@@ -118,11 +118,11 @@ Stage 1 — Priority Score:
               Target >= 70%. Below 40% is a serious oversupply signal.
   Breadth (10%): How many SKU groups the store actively sells. Wider = small boost.
 
-Stage 2 — SKU Scoring:
+Stage 2 â€” SKU Scoring:
   SKU Score = (Tier-avg Group Velocity x 0.65) + (Availability Weight x 0.18)
   Availability weight was reduced from 0.35 to 0.18 in Oct 2026 to let velocity dominate.
 
-Stage 3 — Cart Building:
+Stage 3 â€” Cart Building:
   Greedy fill. Max 2 shelves per SKU. 5 shelves per CC cart.
   Cart flagged if fewer than 4 shelves used (<80% fill rate).
 
@@ -130,8 +130,8 @@ Stage 3 — Cart Building:
     9cm Littles: 504 units/cart | 12cm: 144 units/cart | 17cm: 63 units/cart
     H2O Bowl: 216 units/cart | Climb-itt Accessories: varies
 
-Stage 4.5 — Config consolidation to <=25 unique CC codes per run.
-Stage 5   — Load building: 45 carts/truck, grouped by merchant/region/state.
+Stage 4.5 â€” Config consolidation to <=25 unique CC codes per run.
+Stage 5   â€” Load building: 45 carts/truck, grouped by merchant/region/state.
 
 Cart targets by tier: AA=6 | A=4 | B=3 | C=2 | D=1
 
@@ -148,7 +148,7 @@ FLAG (stop and investigate):
 
 WARNING (review before shipping):
 - D-tier store receiving 2+ carts (target is 1 cart as of Oct 2026)
-- Store pace_ratio < 0.25 (sell-through below 25% — high oversupply risk)
+- Store pace_ratio < 0.25 (sell-through below 25% â€” high oversupply risk)
 - SKU group on order where this store has very low group velocity for that family
 - Store received fewer carts than its tier target without DUE gate or inventory explaining it
 - Priority score below 0.35 for an allocated store
@@ -165,10 +165,10 @@ INFO (note for order writer):
 RESPONSE GUIDELINES
 
 For audit flags: be brief and specific. Name the exact metric. Say what to check.
-Do not over-flag — correct-but-unusual orders should be INFO at most.
+Do not over-flag â€” correct-but-unusual orders should be INFO at most.
 
 For Q&A: answer the question directly first, then provide supporting numbers.
-Use plain language — order writers are not data scientists.
+Use plain language â€” order writers are not data scientists.
 Translate scores: "top 10% nationally" is more useful than "velocity score 0.847".
 
 For "why was this store included?": lead with DUE gate status, then priority rank,
@@ -227,11 +227,11 @@ def _call(client, model: str, system: str, user_msg: str, max_tokens: int) -> st
     return resp.content[0].text.strip()
 
 
-# ── Store-level explanation ───────────────────────────────────
+# â”€â”€ Store-level explanation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _STORE_SYSTEM = """You are an AI assistant for TPC (The Plant Company), a wholesale plant \
 grower shipping to ~2,000 Home Depot stores weekly. You help order writers understand \
-why TPC - IPR Engine — TPC's AI ordering engine — made specific decisions.
+why TPC - IPR Engine â€” TPC's AI ordering engine â€” made specific decisions.
 
 Write in clear, direct prose. No bullet points, no headers. \
 Reference the actual numbers provided. 3-4 sentences maximum. \
@@ -261,17 +261,17 @@ def _build_store_prompt(o: dict, lines: list, carts: list) -> str:
         fam  = ln.get("family") or ""
         qty  = ln.get("draft_qty") or 0
         tier_prod = ln.get("legacy_product_group") or ""
-        sku_lines.append(f"  {desc} ({fam}, {tier_prod}) — {qty} units")
+        sku_lines.append(f"  {desc} ({fam}, {tier_prod}) â€” {qty} units")
     sku_text = "\n".join(sku_lines) or "  (no lines)"
 
     overstock_line = (
-        "\nNOTE: Overshipped flag — dynamic clock exceeds static by more than 7 weeks, "
+        "\nNOTE: Overshipped flag â€” dynamic clock exceeds static by more than 7 weeks, "
         "suggesting last delivery may not have fully cleared."
     ) if over else ""
 
     return f"""Explain why this Home Depot store received its order from TPC - IPR Engine this week.
 
-STORE: {o.get('store_id')} — {o.get('store_name','')}, {o.get('city','')}, {o.get('state','')}
+STORE: {o.get('store_id')} â€” {o.get('store_name','')}, {o.get('city','')}, {o.get('state','')}
 MERCHANT TERRITORY: {o.get('merchant','unknown')}
 DYNAMIC VELOCITY TIER: {tier}
 STORE CLOCK GRADE: {grade} | Static clock: {sc}wk | Dynamic clock: {dc}wk
@@ -323,12 +323,12 @@ def explain_order(order_id: str, user=Depends(require_role("order_writer", "mana
         """, (order_id,))
         carts = cur.fetchall()
 
-        _check_ai_budget(cur, user, "explain")  # cached path returned above — this is a real AI call
+        _check_ai_budget(cur, user, "explain")  # cached path returned above â€” this is a real AI call
 
     prompt = _build_store_prompt(order, lines, carts)
     explanation = _call(
         _client(),
-        model="claude-haiku-4-5-20251001",
+        model="claude-haiku-5-5",
         system=_STORE_SYSTEM,
         user_msg=prompt,
         max_tokens=300,
@@ -345,7 +345,7 @@ def explain_order(order_id: str, user=Depends(require_role("order_writer", "mana
     return {"explanation": explanation, "cached": False}
 
 
-# ── Run-level summary ─────────────────────────────────────────
+# â”€â”€ Run-level summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _RUN_SYSTEM = """You are an AI assistant for TPC (The Plant Company), a wholesale plant \
 grower shipping to ~2,000 Home Depot stores weekly. You help managers understand \
@@ -456,7 +456,7 @@ def summarize_run(run_id: str, user=Depends(require_role("order_writer", "manage
                                overcount, stores_excluded)
     summary = _call(
         _client(),
-        model="claude-sonnet-4-6",
+        model="claude-opus-5-5",
         system=_RUN_SYSTEM,
         user_msg=prompt,
         max_tokens=500,
@@ -473,9 +473,9 @@ def summarize_run(run_id: str, user=Depends(require_role("order_writer", "manage
     return {"summary": summary, "cached": False}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ORDER AUDIT — batch flag check across every store in a run
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ORDER AUDIT â€” batch flag check across every store in a run
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _build_audit_batch(stores: list) -> str:
     lines = [
@@ -499,7 +499,7 @@ def _build_audit_batch(stores: list) -> str:
         grps      = ", ".join(o.get("sku_groups") or []) or "none"
 
         lines += [
-            f"STORE {o.get('store_id')} — {o.get('store_name','')}, {o.get('state','')} | Merchant: {o.get('merchant','')}",
+            f"STORE {o.get('store_id')} â€” {o.get('store_name','')}, {o.get('state','')} | Merchant: {o.get('merchant','')}",
             f"  Dynamic tier: {tier} | Static tier: {s_tier}{'  [MISMATCH]' if tier != s_tier else ''}",
             f"  Priority: {o.get('priority_score',0):.4f}  (vel={o.get('velocity_component',0):.3f} rec={o.get('recency_component',0):.3f} pace={o.get('pace_component',0):.3f} brd={o.get('breadth_component',0):.3f})",
             f"  Pace (6wk sell-thru): {pace_pct:.1f}%",
@@ -516,10 +516,10 @@ def _build_audit_batch(stores: list) -> str:
 def audit_run(run_id: str, force: bool = False, user=Depends(require_role("order_writer", "manager", "admin"))):
     """
     Batch-audit every order in a run using Claude Haiku.
-    Results are cached in order_audits — pass ?force=true to re-run.
+    Results are cached in order_audits â€” pass ?force=true to re-run.
     Returns flags grouped by severity: FLAG > WARNING > INFO.
     """
-    # force=true deletes and rewrites order_audits and re-spends AI calls — manager+ only
+    # force=true deletes and rewrites order_audits and re-spends AI calls â€” manager+ only
     if force and user["role"] not in ("manager", "admin"):
         raise HTTPException(status_code=403, detail="force=true requires manager or admin")
     with get_db() as conn:
@@ -595,7 +595,7 @@ def audit_run(run_id: str, force: bool = False, user=Depends(require_role("order
         batch   = orders_ctx[i:i + BATCH]
         prompt  = _build_audit_batch(batch)
         raw     = _call(client,
-                        model="claude-haiku-4-5-20251001",
+                        model="claude-haiku-5-5",
                         system=_FULL_SYSTEM,
                         user_msg=prompt,
                         max_tokens=2000)
@@ -640,28 +640,77 @@ def audit_run(run_id: str, force: bool = False, user=Depends(require_role("order
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Q&A — free-text questions about any run or specific store
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Q&A â€” free-text questions about any run or specific store
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class AskRequest(BaseModel):
     run_id:   str
     store_id: Optional[int] = None
+    sku_id:   Optional[int] = None
     question: str
+
+
+def _ask_v2(cur, body: "AskRequest", user) -> dict:
+    """v2 runs: answer from the engine's own evidence â€” the run's ipr_summary plus this
+    store's run_decisions (every gate, line and exception) â€” with the v2-accurate system
+    prompt. 'Why is this number what it is' is answered from what the engine logged."""
+    import json as _json
+    from services.ipr_ai import V2_SYSTEM, call_model
+    cur.execute("""SELECT rr.shipping_week, rr.status, rr.sales_cutoff_date, rr.ipr_summary
+                   FROM recommendation_runs rr WHERE rr.id = %s""", (body.run_id,))
+    run = cur.fetchone()
+    summ = run["ipr_summary"] or {}
+    ctx = {"shipping_week": str(run["shipping_week"]), "status": run["status"],
+           "data_as_of": str(run["sales_cutoff_date"]),
+           "objective": summ.get("objective"), "allocation": summ.get("allocation"),
+           "cart_economics": summ.get("cart_economics"), "delivery_cadence": summ.get("delivery_cadence"),
+           "shrink": summ.get("shrink"), "counts": summ.get("counts"),
+           "data_quality": summ.get("data_quality")}
+    if body.store_id is not None:
+        cur.execute("""SELECT store_id, store_name, city, state, merchant, region, volume_code
+                       FROM stores WHERE store_id = %s""", (body.store_id,))
+        ctx["store"] = cur.fetchone()
+        q = """SELECT decision_type, sku_id, reason, data FROM run_decisions
+               WHERE run_id = %s AND store_id = %s"""
+        args = [body.run_id, body.store_id]
+        if body.sku_id is not None:
+            q += " AND (sku_id = %s OR sku_id IS NULL)"
+            args.append(body.sku_id)
+        q += " ORDER BY decision_type, sku_id LIMIT 120"
+        cur.execute(q, args)
+        ctx["engine_decisions_for_store"] = [dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT ipr_family, grade, conversion_13wk, service_status
+                       FROM ipr_store_family WHERE store_id = %s""", (body.store_id,))
+        ctx["family_grades"] = cur.fetchall()
+    elif body.sku_id is not None:
+        cur.execute("""SELECT decision_type, store_id, reason, data FROM run_decisions
+                       WHERE run_id = %s AND sku_id = %s ORDER BY decision_type LIMIT 120""",
+                    (body.run_id, body.sku_id))
+        ctx["engine_decisions_for_sku"] = [dict(r) for r in cur.fetchall()]
+    _check_ai_budget(cur, user, "ask")
+    answer = call_model(
+        V2_SYSTEM,
+        "RUN DATA (JSON â€” this is the engine's own evidence; cite data_as_of):\n"
+        + _json.dumps(ctx, default=str)
+        + f"\n\nQUESTION: {body.question.strip()}",
+        max_tokens=1200)
+    return {"answer": answer, "store_id": body.store_id, "sku_id": body.sku_id,
+            "run_id": body.run_id, "engine_version": "v2"}
 
 
 @router.post("/ask")
 def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "admin"))):
     """
     Answer a free-text question about a run or a specific store's order.
-    Pulls full context from DB before calling Claude Sonnet.
+    v2 runs answer from the engine's evidence trail; v1 runs keep the legacy context.
     """
     with get_db() as conn:
         cur = cursor(conn)
 
         # Run-level context
         cur.execute("""
-            SELECT rr.shipping_week, rr.stores_served, rr.total_carts,
+            SELECT rr.shipping_week, rr.stores_served, rr.total_carts, rr.engine_version,
                    rr.total_units, rr.inventory_clearance, ab.source_filename
             FROM recommendation_runs rr
             JOIN availability_batches ab ON ab.id = rr.batch_id
@@ -670,6 +719,8 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
         run = cur.fetchone()
         if not run:
             raise HTTPException(404, "Run not found.")
+        if run["engine_version"] == "v2":
+            return _ask_v2(cur, body, user)
 
         ctx = [
             f"RUN WEEK: {run['shipping_week']}",
@@ -697,7 +748,7 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
             if order:
                 pace_pct = (order["pace_ratio"] or 0) * 100
                 ctx.append(
-                    f"\nSTORE {order['store_id']} — {order['store_name']}, "
+                    f"\nSTORE {order['store_id']} â€” {order['store_name']}, "
                     f"{order['city']}, {order['state']}"
                 )
                 ctx.append(f"Merchant territory: {order['merchant']}")
@@ -712,7 +763,7 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
                     f"pace={order['pace_component']:.3f}  "
                     f"breadth={order['breadth_component']:.3f})"
                 )
-                ctx.append(f"Pace — 6wk sell-through: {pace_pct:.1f}%  (target ≥70%)")
+                ctx.append(f"Pace â€” 6wk sell-through: {pace_pct:.1f}%  (target â‰¥70%)")
                 ctx.append(
                     f"Days since last delivery: {order['days_since_last_delivery']}"
                 )
@@ -739,7 +790,7 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
                 lines = cur.fetchall()
                 if lines:
                     sku_text = "\n".join(
-                        f"  {r['description'][:40]} ({r['family']}, {r['legacy_product_group']}) — {r['draft_qty']} units"
+                        f"  {r['description'][:40]} ({r['family']}, {r['legacy_product_group']}) â€” {r['draft_qty']} units"
                         for r in lines
                     )
                     ctx.append(f"SKUs ordered:\n{sku_text}")
@@ -771,10 +822,10 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
                         f"{r['week_start']}: {r['ewma_score']:.2f} ({r['dynamic_tier']})"
                         for r in hist
                     )
-                    ctx.append(f"Velocity history (oldest→newest): {hist_str}")
+                    ctx.append(f"Velocity history (oldestâ†’newest): {hist_str}")
 
             else:
-                # Store not on the order — pull profile to help explain why
+                # Store not on the order â€” pull profile to help explain why
                 ctx.append(f"\nSTORE {body.store_id} was NOT included in this run.")
                 cur.execute("""
                     SELECT s.store_name, s.city, s.state, s.merchant,
@@ -806,7 +857,7 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
 
     answer = _call(
         _client(),
-        model="claude-sonnet-4-6",
+        model="claude-opus-5-5",
         system=_FULL_SYSTEM,
         user_msg=user_msg,
         max_tokens=600,

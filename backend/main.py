@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 
 from db import init_pool
-from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations, in_transit, store_status, routing, config_editor, promotions, scenarios, packing, manifest, permanent_carts, concurrency, ipr
+from routers import availability, orders, carts, engine, stores, exports, auth, ai_explanations, in_transit, store_status, routing, config_editor, promotions, scenarios, packing, manifest, permanent_carts, concurrency, ipr, dsm
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -56,6 +56,7 @@ app.include_router(manifest.router,         prefix="/api/manifest",     tags=["M
 app.include_router(permanent_carts.router,   prefix="/api/permanent-carts", tags=["PermanentCarts"])
 app.include_router(concurrency.router,        prefix="/api/concurrency",  tags=["Concurrency"])
 app.include_router(ipr.router,                prefix="/api/ipr",          tags=["IPR v2"])
+app.include_router(dsm.router,                prefix="/api/dsm",          tags=["DSM Portal"])
 
 @app.get("/api/health")
 def health():
@@ -73,6 +74,17 @@ def health():
             status_code=503,
             media_type="application/json"
         )
+
+@app.get("/dsm")
+def serve_dsm_portal():
+    """DSM web portal (spec §26) — mobile-friendly store lookup for District Sales Managers."""
+    html_path = Path(__file__).parent.parent / "DSM_Portal.html"
+    return FileResponse(
+        path=str(html_path),
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
+
 
 @app.get("/")
 def serve_frontend():
