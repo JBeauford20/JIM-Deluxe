@@ -1399,7 +1399,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 econ_second += 1
             if action == "release_overdue":
                 econ_overdue += 1
-            why = (("Critical-risk line(s) " + ", ".join(critical)) if critical else
+            why = (("Critical-risk line(s) " + ", ".join(str(x) for x in critical)) if critical else
                    "meets the one-full-CC-cart minimum (leadership decision 2026-11-20)"
                    if action == "release_min_cart" else
                    f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}" if lost >= C else
