@@ -4736,16 +4736,115 @@ function xRenderSt(){
         '<td>'+(o?'<span class="xtag info">'+xN(o.cart_count)+' carts &middot; '+xN(o.total_units)+' u</span>':'<span class="xwhy">'+(X.run?'Not shipping':'No run')+'</span>')+'</td></tr>';}).join('')+
     '</tbody></table></div>'+xPager(rows.length,X.st.page,'xStPage');
 }
-function xStOpen(i){var s=(X.st.view||[])[i];if(!s)return;var gr=s._g.grades||{},o=s._o;
-  var h='<dl class="xkv"><dt>Location</dt><dd>'+escH((s.city||'')+(s.state?', '+s.state:''))+'</dd><dt>Region / division</dt><dd>'+escH((s.region||'')+(s.division?' / '+s.division:''))+'</dd>'+
-    '<dt>Merchant</dt><dd>'+escH(s.merchant||'')+'</dd><dt>Volume code</dt><dd>'+escH(s.volume_code||'')+'</dd><dt>Status</dt><dd>'+escH(s.store_status||'Active')+'</dd>'+
-    '<dt>Demand (units / wk)</dt><dd>'+(s._g.weekly_units!=null?escH(s._g.weekly_units):'&mdash;')+'</dd><dt>Conversion (13 wk)</dt><dd>'+(s._g.conversion_13wk!=null?Math.round(s._g.conversion_13wk*100)+'%':'&mdash;')+'</dd>'+
-    '<dt>Families below 60%</dt><dd>'+xN(s._g.families_below_60||0)+'</dd><dt>This run</dt><dd>'+(o?xN(o.cart_count)+' carts, '+xN(o.total_units)+' units':(X.run?'Not shipping this run':'No run loaded'))+'</dd></dl>';
-  var fams=Object.keys(gr).sort(function(a,b){return (X_GR[gr[a]]!=null?X_GR[gr[a]]:9)-(X_GR[gr[b]]!=null?X_GR[gr[b]]:9);});
-  h+='<h4>Family grades (Sec 6)</h4>'+(fams.length?'<div>'+fams.map(function(f){return '<div class="xsmall" style="margin-bottom:3px"><span class="xgc '+xGcls(gr[f])+'">'+escH(gr[f])+'</span> '+escH(f)+'</div>';}).join('')+'</div>':'<p class="xmuted">Not graded yet.</p>');
+/* Full-screen store profile (replaces the old drawer "receipt", 2026-11-20).
+   ## Screen contract: Store profile (Stores tab)
+   - Purpose: one store, everything an order writer needs, full width.
+   - Primary action: judge the store at a glance; jump to this run's decisions.
+   - Data: /api/dsm/stores/{id}/profile|skus|response (same layer as the DSM portal)
+     + the Stores list row (grades, this-run order) already in memory.
+   - States: per-panel loading/empty/error; Back returns to the list with search,
+     filter and page preserved (list state lives in X.st).
+   - Permissions: any signed-in user reads; no actions beyond the evidence drawer. */
+function xStOpen(i){var s=(X.st.view||[])[i];if(!s)return;xStProfile(s);}
+function xStBack(){X.st.cur=null;xRenderSt();window.scrollTo(0,0);}
+var X_STATUS_LABEL={do_not_ship:'Do not ship',paused:'Paused',inactive:'Inactive',hold:'On hold',promotion:'Promotion'};
+function xStProfile(s){
+  X.st.cur=s;
+  var body=document.getElementById('stBody'),ch=document.getElementById('stChips');
+  if(!body)return;
+  if(ch)ch.innerHTML='<button class="xchip" onclick="xStBack()"><i class="bi bi-arrow-left"></i> All stores</button>';
+  var o=s._o,st=s.store_status&&!/^active$/i.test(s.store_status);
   X.st.curEv={store_id:s.store_id,store_name:s.store_name,reason:'Every decision the engine made for this store this run',data:{}};
-  if(X.run)h+='<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-s xbtn-sm" onclick="xOpenEvidence(X.st.curEv,\'review\')">This run\'s decisions for this store</button></div>';
-  xOpenDw('Store '+s.store_id+' '+sn(s.store_name||''),h);}
+  body.innerHTML=
+    '<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;padding:14px 16px 4px">'+
+      '<div style="font-size:22px;font-weight:700">'+escH(s.store_id)+' &middot; '+escH(sn(s.store_name||''))+'</div>'+
+      '<div class="xmuted">'+escH([s.city,s.state].filter(Boolean).join(', '))+' &middot; '+escH(s.merchant||'no merchant')+' &middot; '+escH([s.region,s.division].filter(Boolean).join(' / ')||'no region')+'</div>'+
+      (st?'<span class="xtag warn">'+escH(X_STATUS_LABEL[s.store_status]||s.store_status)+'</span>':'<span class="xtag ok">Active</span>')+
+      (o?'<span class="xtag info">This run: '+xN(o.cart_count)+' carts &middot; '+xN(o.total_units)+' u</span>'
+        :'<span class="xtag">'+(X.run?'Not shipping this run':'No run loaded')+'</span>')+
+      '<span style="margin-left:auto;display:flex;gap:8px">'+
+      (X.run?'<button class="xbtn xbtn-s xbtn-sm" onclick="xOpenEvidence(X.st.curEv,\'review\')">This run\'s decisions</button>':'')+
+      '</span></div>'+
+    '<div id="stpTiles" class="xobj" style="padding:8px 16px"><div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading store facts&hellip;</div></div>'+
+    '<div class="xgrid2" style="padding:0 16px 8px">'+
+      '<div class="xpanel"><div class="xph"><h2>Weekly sales, last 13 weeks</h2><span class="sub">Units sold at the register per week.</span></div><div id="stpSales" class="xempty">Loading&hellip;</div></div>'+
+      '<div class="xpanel"><div class="xph"><h2>Family grades</h2><span class="sub">Grade, weekly demand and 13-week conversion per family (Sec 6, Sec 11).</span></div><div id="stpFams" class="xempty">Loading&hellip;</div></div>'+
+    '</div>'+
+    '<div class="xgrid2" style="padding:0 16px 8px">'+
+      '<div class="xpanel"><div class="xph"><h2>Stockout risks</h2><span class="sub">From the latest run: lines projected short at arrival.</span></div><div id="stpRisk" class="xempty">Loading&hellip;</div></div>'+
+      '<div class="xpanel"><div class="xph"><h2>Shipment response</h2><span class="sub">How each delivery sold in its first 28 days (Sec 29). 60% is the target.</span></div><div id="stpResp" class="xempty">Loading&hellip;</div></div>'+
+    '</div>'+
+    '<div class="xpanel" style="margin:0 16px 8px"><div class="xph"><h2>SKU performance</h2><span class="sub">13-week units, 4-week trend, and the reason behind every weak SKU.</span></div><div id="stpSkus" class="xempty">Loading&hellip;</div></div>'+
+    '<div class="xpanel" style="margin:0 16px 16px"><div class="xph"><h2>What the engine decided here (latest run)</h2><span class="sub">Gates, pushes, exclusions and warnings for this store, in plain English.</span></div><div id="stpDec" class="xempty">Loading&hellip;</div></div>';
+  window.scrollTo(0,0);
+  xStFill(s.store_id);
+}
+async function xStFill(id){
+  if((X.st.cur||{}).store_id!==id)return;
+  var set=function(el,html){var e=document.getElementById(el);if(e&&(X.st.cur||{}).store_id===id)e.innerHTML=html;};
+  var fail=function(el,what,e){set(el,'<div class="xempty">'+escH(what)+' did not load: '+escH(e.message)+' <a href="#" onclick="xStFill('+id+');return false">Retry</a></div>');};
+  try{
+    var p=await api('/api/dsm/stores/'+id+'/profile');
+    var t='';
+    if(p.ranks)t+=xTile('National rank','#'+xN(p.ranks.national_rank),'of '+xN(p.ranks.national_of)+' stores')+
+                 xTile('Region rank','#'+xN(p.ranks.region_rank),'of '+xN(p.ranks.region_of)+' in '+escH(X.st.cur.region||'region'));
+    t+=xTile('YTD sales',(p.ytd&&p.ytd.dollars!=null)?xUsd(p.ytd.dollars):'&mdash;',(p.ytd&&p.ytd.units!=null)?xN(p.ytd.units)+' units':'')+
+       xTile('Demand / wk',(X.st.cur._g.weekly_units!=null?Number(X.st.cur._g.weekly_units).toFixed(1):'&mdash;'),'units, engine forecast')+
+       xTile('Last delivery',p.last_delivery?xDate(p.last_delivery):'none','')+
+       xTile('Inbound',xN((p.inbound||{}).loaded_units||0)+' u',(p.inbound&&p.inbound.manifest_delivery_after_sales)?'truck en route':'loaded in transit')+
+       xTile('DSM',escH(X.st.cur.dsm||p.store.dsm||'not assigned'),'');
+    if(p.edi&&p.edi.suspected_gap)t+=xTile('Register scans','Silent '+((p.edi.last_sale)?'since '+xDate(p.edi.last_sale):''),'possible data-feed gap','warn');
+    set('stpTiles',t);
+    var wk=p.weekly_sales_13wk||[],mx=1;wk.forEach(function(w){mx=Math.max(mx,w.units||0);});
+    set('stpSales',wk.length?'<div style="display:flex;align-items:flex-end;gap:4px;height:90px;padding:10px 16px 2px">'+
+      wk.map(function(w){return '<div title="'+escH(w.week)+': '+xN(w.units)+' u" style="flex:1;min-height:3px;border-radius:2px 2px 0 0;background:var(--x-chart-1);height:'+Math.max(3,Math.round((w.units||0)/mx*100))+'%"></div>';}).join('')+
+      '</div><div class="xsmall xmuted" style="padding:0 16px 10px">'+escH(String(wk[0].week))+' &rarr; '+escH(String(wk[wk.length-1].week))+' &middot; tallest = '+xN(mx)+' u &middot; data as of '+escH(p.data_as_of||'?')+'</div>'
+      :'<div class="xempty">No register sales in the last 13 weeks.</div>');
+    var fams=p.families||[];
+    set('stpFams',fams.length?'<div class="xscroll"><table class="xdata"><thead><tr><th>Family</th><th>Grade</th><th class="r">Demand / wk</th><th>Sold of delivered (13 wk)</th><th>Service</th></tr></thead><tbody>'+
+      fams.map(function(f){var cv=f.conversion_13wk!=null?Number(f.conversion_13wk):null;
+        return '<tr><td>'+escH(f.ipr_family)+'</td><td><span class="xgc '+xGcls(f.grade)+'">'+escH(f.grade||'?')+'</span></td>'+
+        '<td class="r">'+(f.weekly_velocity!=null?Number(f.weekly_velocity).toFixed(1):'&mdash;')+'</td>'+
+        '<td>'+(cv!=null?'<div style="display:flex;gap:6px;align-items:center"><div class="xhbar" style="flex:1"><i style="width:'+Math.min(100,cv*100).toFixed(0)+'%;background:'+(cv<0.6?'var(--x-bad-fg)':'var(--x-chart-1)')+'"></i></div><span class="xnum xsmall">'+Math.round(cv*100)+'%</span></div>':'<span class="xwhy">no mature delivery yet</span>')+'</td>'+
+        '<td>'+(f.service_status==='BLOCKED'?'<span class="xtag bad">Stopped</span>':f.service_status==='REVIEW'?'<span class="xtag warn">Reduced</span>':'<span class="xtag ok">Eligible</span>')+'</td></tr>';}).join('')+
+      '</tbody></table></div>':'<div class="xempty">No family grades yet &mdash; they appear after the next weekly run.</div>');
+    var rk=p.stockout_risks||[];
+    set('stpRisk',rk.length?'<div class="xscroll"><table class="xdata"><thead><tr><th>SKU</th><th>Risk</th><th class="r">Projected at arrival</th><th class="r">Forecast / wk</th></tr></thead><tbody>'+
+      rk.map(function(r){return '<tr><td>'+escH(r.sku_id)+'</td><td><span class="xtag '+(r.risk==='Critical'?'bad':'warn')+'">'+escH(r.risk)+'</span></td><td class="r">'+xN(r.projected)+' u</td><td class="r">'+(r.forecast_wk!=null?escH(r.forecast_wk):'&mdash;')+'</td></tr>';}).join('')+
+      '</tbody></table></div>':'<div class="xempty">No Critical or High stockout risks on file.</div>');
+  }catch(e){fail('stpTiles','Store facts',e);fail('stpSales','Weekly sales',e);fail('stpFams','Family grades',e);fail('stpRisk','Stockout risks',e);}
+  try{
+    var kk=await api('/api/dsm/stores/'+id+'/skus');
+    var tbl=function(rows,cols){if(!rows||!rows.length)return '<div class="xempty">None on file.</div>';
+      return '<div class="xscroll"><table class="xdata"><thead><tr>'+cols.map(function(c){return '<th'+(c[2]?' class="r"':'')+'>'+c[1]+'</th>';}).join('')+'</tr></thead><tbody>'+
+        rows.map(function(r){return '<tr>'+cols.map(function(c){var v=r[c[0]];
+          if(c[0]==='trend'&&v!=null)v=(v>=1?'+':'')+Math.round((v-1)*100)+'%';
+          return '<td'+(c[2]?' class="r"':'')+'>'+escH(v==null?'—':(typeof v==='number'?Number(v).toLocaleString():v))+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table></div>';};
+    var C=[['sku_id','SKU',1],['description','Product'],['u13','13wk u',1],['u4','4wk u',1],['trend','Trend',1]];
+    set('stpSkus','<div class="xgrid2">'+
+      '<div><h4 style="margin:8px 16px 4px">Top sellers</h4>'+tbl(kk.top5,C)+'</div>'+
+      '<div><h4 style="margin:8px 16px 4px">Weakest &mdash; and why</h4>'+tbl(kk.bottom5,[['sku_id','SKU',1],['description','Product'],['u13','13wk u',1],['cause','Why']])+'</div>'+
+      '<div><h4 style="margin:8px 16px 4px">Fastest growing</h4>'+tbl(kk.fastest_growing,C)+'</div>'+
+      '<div><h4 style="margin:8px 16px 4px">Selling but silent 14+ days</h4>'+tbl(kk.no_recent_sales,C)+'</div></div>');
+  }catch(e){fail('stpSkus','SKU performance',e);}
+  try{
+    var d=await api('/api/dsm/stores/'+id+'/response');
+    set('stpResp',(d.available&&(d.by_family||[]).length)?'<div class="xscroll"><table class="xdata"><thead><tr><th>Family</th><th class="r">Deliveries</th><th class="r">Sold in 28d</th><th>Read</th></tr></thead><tbody>'+
+      d.by_family.map(function(r){var L={strong:['Strong','ok'],expected:['As expected',''],weak:['Weak','bad']};var l=L[r.response_class]||[r.response_class,''];
+        return '<tr><td>'+escH(r.ipr_family)+'</td><td class="r">'+xN(r.cohorts)+'</td><td class="r">'+(r.avg_sell28!=null?Math.round(r.avg_sell28*100)+'%':'—')+'</td><td><span class="xtag '+l[1]+'">'+escH(l[0])+'</span></td></tr>';}).join('')+
+      '</tbody></table></div>':'<div class="xempty">No measured deliveries yet &mdash; the first read comes 4 weeks after a delivery.</div>');
+  }catch(e){fail('stpResp','Shipment response',e);}
+  try{
+    if(X.run){
+      var ev=await api('/api/ipr/runs/'+X.run+'/stores/'+id+'/evidence');
+      var ds=(ev.decisions||[]).filter(function(d2){return d2.decision_type!=='line';});
+      set('stpDec',ds.length?'<div class="xscroll"><table class="xdata"><tbody>'+
+        ds.slice(0,40).map(function(d2){var k=xKind(d2.decision_type);
+          return '<tr><td style="white-space:nowrap"><span class="xtag '+(k[2]==='bad'?'bad':k[2]==='warn'?'warn':'')+'">'+escH(k[1])+'</span></td><td>'+escH(xPlain(d2.reason||''))+'</td></tr>';}).join('')+
+        '</tbody></table></div>':'<div class="xempty">No gates or exceptions for this store in the open run &mdash; it shipped clean or was not in scope.</div>');
+    }else set('stpDec','<div class="xempty">Open a run on This Week (or from History) to see its decisions for this store.</div>');
+  }catch(e){fail('stpDec','Engine decisions',e);}
+}
 
 /* ---------- builds: promotions ---------- */
 function xSubB(k){document.querySelectorAll('#bTabs .xsubtab').forEach(function(x){var on=x.getAttribute('data-b')===k;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on);});
