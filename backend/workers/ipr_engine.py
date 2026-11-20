@@ -24,7 +24,7 @@ Exchange, pack plans, Aster export, Cart Configs and editor all work unchanged.
 import json
 import math
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, timedelta
 
 import psycopg2
@@ -831,6 +831,30 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "§25 LLM reviewer (deterministic reviewer runs now; the AI /audit endpoint can layer on)",
         ],
     }
+    # §28 autonomous order statuses — this run's progress through the pre-export stages.
+    # Hard-rule failures raise before this point (Incomplete Mandatory Data / duplicate run),
+    # so reaching here means each stage below completed.
+    n_val = Counter(dd.get("severity") for (k, _s, _k, _r, dd) in decisions if k == "validation")
+    n_warn = sum(1 for v in review.values() if v[0] == "WARNING")
+    stages = [
+        ("Input Received", f"batch {batch_id}: {len(avail_rows):,} availability lines, sales to {anchor}"),
+        ("Data Validated", f"{n_val.get('block', 0)} SKU exclusions, {n_val.get('warning', 0)} warnings"),
+        ("Demand Calculated", f"{len(lines):,} store x SKU lines with velocity; "
+                              f"{summary['allocation']['unconstrained_need_units']:,}u need"),
+        ("Inventory Allocated", f"{int(alloc_units_total):,}u allocated ({gap_fill_units:,}u gap fill); "
+                                f"{int(sum(unfilled.values())):,}u unfilled"),
+        ("Cart Built", f"{len(all_carts):,} carts for {len(orders):,} stores; "
+                       f"{summary['cart_economics']['low_value_carts']:,} low-value warnings"),
+        ("Independent AI Review", f"deterministic reviewer: {len(review) - n_warn:,} PASS, {n_warn:,} WARNING "
+                                  f"(LLM reviewer not yet implemented)"),
+        ("Final Validated", "routine final validation by the agent (§28); no manual approval"
+                            if orders else "nothing to ship this week"),
+    ]
+    summary["pipeline_status"] = {
+        "current": stages[-1][0],
+        "stages": [{"stage": n, "status": "complete", "detail": dt} for n, dt in stages],
+        "next": ["Aster Exported", "Released", "Shipped"],
+    }
     o = summary["objective"]
     log(f"\nObjective: baseline ${o['baseline_weekly_retail']:,} + incremental ${o['incremental_weekly_retail']:,} "
         f"= ${o['expected_weekly_retail']:,}  (min ${objective:,.0f}, gap ${o['gap_to_minimum']:,})")
@@ -854,11 +878,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             (batch_id, shipping_week, stores_scored, stores_served, total_carts, total_units,
              inventory_clearance, status, sales_cutoff_date, engine_version, pipeline_status,
              ipr_summary, notes)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,'Reviewed',%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s)
         RETURNING id
     """, (batch_id, shipping_week, summary["counts"]["stores_with_velocity"], len(orders), total_carts,
           int(alloc_units_total), round(alloc_units_total / total_supply * 100, 2) if total_supply else 0,
-          anchor, ENGINE_VERSION, json.dumps(summary, default=str),
+          anchor, ENGINE_VERSION, summary["pipeline_status"]["current"], json.dumps(summary, default=str),
           "IPR v2 demand-first run (spec 2026-11-17)"))
     run_id = str(cur.fetchone()["id"])
 

@@ -746,7 +746,7 @@ def ask(body: AskRequest, user=Depends(require_role("order_writer", "manager", "
 
                 # Engine run_decisions for this store
                 cur.execute("""
-                    SELECT decision_type, message
+                    SELECT decision_type, reason AS message
                     FROM run_decisions
                     WHERE run_id = %s AND store_id = %s
                     ORDER BY created_at
