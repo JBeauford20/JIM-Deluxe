@@ -12,6 +12,7 @@ from db import get_db, cursor
 from routers.auth import get_current_user, require_role
 from routers.concurrency import log_change, bump_activity
 from us_cities import lookup_coords
+from services.v2_exports import parse_routing_workbook, plan_routes
 
 router = APIRouter()
 
@@ -314,6 +315,18 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
     if not entries:
         raise HTTPException(400, "No parseable rows in the file")
 
+    result = _apply_route_plan(run_id, entries, file.filename, user, allow_split=False)
+    return {**result, "rows_bad": bad, "bad_route_names": sorted(bad_routes)}
+
+
+def _apply_route_plan(run_id: str, entries: list, filename: str | None, user,
+                      allow_split: bool, action: str = "routing_response_import") -> dict:
+    """Shared by the CSV response import and the routing Workbook import.
+
+    Replaces the engine's provisional loads for this run with the routed trucks, assigns
+    every cart to exactly one load (split stops divide a store's carts; the legacy CSV path
+    keeps 'first route wins'), and upserts this week's delivery_manifest rows so the DUE
+    gate sees the shipments as in-transit immediately."""
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("SELECT shipping_week FROM recommendation_runs WHERE id = %s FOR UPDATE",
@@ -324,33 +337,20 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
         shipping_week = run["shipping_week"]
         week_number = shipping_week.isocalendar()[1] if shipping_week else None
 
-        # Stores in this run and their carts
+        # Stores in this run and their carts (cart_number order: split stops take carts in order)
         cur.execute("""
             SELECT o.store_id, oc.id AS cart_id
             FROM orders o JOIN order_carts oc ON oc.order_id = o.id
             WHERE o.run_id = %s
+            ORDER BY o.store_id, oc.cart_number, oc.id
         """, (run_id,))
         carts_by_store = defaultdict(list)
         for r in cur.fetchall():
             carts_by_store[r["store_id"]].append(r["cart_id"])
         run_stores = set(carts_by_store)
 
-        file_stores = {e["store_id"] for e in entries}
-        unmatched = sorted(file_stores - run_stores)          # in file, not in run
-        unrouted = sorted(run_stores - file_stores)           # in run, not in file
-        # Dedupe: one row per store (first occurrence wins). A store listed twice —
-        # or on two routes — would otherwise get its carts assigned to BOTH trucks
-        # and pack plans would build them twice.
-        matched, _seen, multi_route = [], set(), set()
-        for e in entries:
-            if e["store_id"] not in run_stores:
-                continue
-            if e["store_id"] in _seen:
-                multi_route.add(e["store_id"])
-                continue
-            _seen.add(e["store_id"])
-            matched.append(e)
-        if not matched:
+        plan = plan_routes(entries, carts_by_store, allow_split=allow_split)
+        if not plan["loads"]:
             raise HTTPException(400, "No stores in the file belong to this run")
 
         # Replace provisional loads wholesale
@@ -358,27 +358,23 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
                     "(SELECT id FROM loads WHERE run_id = %s)", (run_id,))
         cur.execute("DELETE FROM loads WHERE run_id = %s", (run_id,))
 
-        # Group by route, keep file order for stop sequence fallback
-        routes = defaultdict(list)
-        for e in matched:
-            routes[e["route"]].append(e)
-
         # Store metadata for load region/merchant stamping
         cur.execute("SELECT store_id, region, merchant FROM stores WHERE store_id = ANY(%s)",
                     (list(run_stores),))
         smeta = {r["store_id"]: r for r in cur.fetchall()}
 
         load_count = 0
-        for i, (route, stops) in enumerate(sorted(routes.items()), start=1):
+        stops_all = []
+        for i, (route, L) in enumerate(sorted(plan["loads"].items()), start=1):
+            stops = L["stops"]
+            stops_all.extend((route, st) for st in stops)
             load_id = str(uuid.uuid4())
-            cart_ids = [c for e in stops for c in carts_by_store[e["store_id"]]]
-            regions = [smeta.get(e["store_id"], {}).get("region") for e in stops]
-            merchants = [smeta.get(e["store_id"], {}).get("merchant") for e in stops]
+            cart_ids = [c for st in stops for c in st["cart_ids"]]
+            regions = [smeta.get(st["store_id"], {}).get("region") for st in stops]
+            merchants = [smeta.get(st["store_id"], {}).get("merchant") for st in stops]
             # sorted() makes the majority tie-break deterministic across processes
             region = max(sorted(set(filter(None, regions))), key=regions.count) if any(regions) else None
             merchant = max(sorted(set(filter(None, merchants))), key=merchants.count) if any(merchants) else None
-            ship = next((e["ship"] for e in stops if e["ship"]), None)
-            deliv = next((e["deliv"] for e in stops if e["deliv"]), None)
             util = round(len(cart_ids) / 45 * 100, 1)
             cur.execute("""
                 INSERT INTO loads (id, run_id, load_number, load_name, merchant, region,
@@ -390,12 +386,9 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
                   smeta.get(stops[0]["store_id"], {}).get("region"),
                   len(cart_ids), len(stops), util,
                   util < 70, f"Under-utilized ({util:.0f}%)" if util < 70 else None,
-                  ship, deliv))
-            rows = []
-            for pos, e in enumerate(stops, start=1):
-                seq = e["drop"] if e["drop"] is not None else pos
-                for cid in carts_by_store[e["store_id"]]:
-                    rows.append((str(uuid.uuid4()), load_id, cid, e["store_id"], seq))
+                  L["ship"], L["deliv"]))
+            rows = [(str(uuid.uuid4()), load_id, cid, st["store_id"], st["drop"])
+                    for st in stops for cid in st["cart_ids"]]
             cur.executemany("""
                 INSERT INTO load_assignments (id, load_id, order_cart_id, store_id, stop_sequence)
                 VALUES (%s,%s,%s,%s,%s)
@@ -411,30 +404,31 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
             cur.execute("""DELETE FROM delivery_manifest
                            WHERE week_number = %s AND source = 'routing_import'
                              AND store_id = ANY(%s)""", (week_number, list(run_stores)))
-            manifest_cleared = cur.rowcount
             cur.execute("""SELECT store_id, load_code, ship_date, delivery_date
                            FROM delivery_manifest WHERE week_number = %s""", (week_number,))
             existing = {(r["store_id"], r["load_code"]): (r["ship_date"], r["delivery_date"])
                         for r in cur.fetchall()}
-            for e in matched:
-                if not (e["ship"] or e["deliv"]):
+            for route, st in stops_all:
+                ship, deliv = st["ship"], st["deliv"]
+                if not (ship or deliv):
                     continue  # no dates = nothing useful for the DUE gate
-                key = (e["store_id"], e["route"])
+                key = (st["store_id"], route)
                 if key not in existing:
                     cur.execute("""
                         INSERT INTO delivery_manifest (id, store_id, ship_date, delivery_date,
                                                        week_number, load_code, source, uploaded_at)
                         VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, 'routing_import', now())
-                    """, (e["store_id"], e["ship"], e["deliv"], week_number, e["route"]))
+                    """, (st["store_id"], ship, deliv, week_number, route))
+                    existing[key] = (ship, deliv)
                     manifest_new += 1
-                elif existing[key] != (e["ship"], e["deliv"]) and (e["ship"] or e["deliv"]):
+                elif existing[key] != (ship, deliv):
                     cur.execute("""
                         UPDATE delivery_manifest
                         SET ship_date = COALESCE(%s, ship_date),
                             delivery_date = COALESCE(%s, delivery_date),
                             source = 'routing_import', uploaded_at = now()
                         WHERE week_number = %s AND store_id = %s AND load_code = %s
-                    """, (e["ship"], e["deliv"], week_number, e["store_id"], e["route"]))
+                    """, (ship, deliv, week_number, st["store_id"], route))
                     manifest_upd += 1
 
         cur.execute("""
@@ -443,22 +437,52 @@ async def routing_response_import(run_id: str, file: UploadFile = File(...),
                 pipeline_status = CASE WHEN engine_version = 'v2'
                                        THEN 'Routing Response Received' ELSE pipeline_status END
             WHERE id = %s
-        """, (file.filename, run_id))
-        log_change(cur, run_id, "run", run_id, "routing_response_import",
+        """, ((filename or "")[:200], run_id))
+        log_change(cur, run_id, "run", run_id, action,
                    user.get("email") if isinstance(user, dict) else None)
         bump_activity(cur, run_id)
 
     return {
         "loads": load_count,
-        "stores_routed": len({e['store_id'] for e in matched}),
-        "rows_bad": bad,
-        "bad_route_names": sorted(bad_routes),
-        "stores_on_multiple_routes": sorted(multi_route),
-        "stores_in_file_not_in_run": unmatched,
-        "stores_in_run_not_routed": unrouted,
+        "stores_routed": len({st["store_id"] for _, st in stops_all}),
+        "carts_assigned": plan["carts_assigned"],
+        "stores_on_multiple_routes": plan["stores_on_multiple_routes"],
+        "split_stops": plan["split_stops"],
+        "split_stops_uneven": plan["split_stops_uneven"],
+        "stores_in_file_not_in_run": plan["stores_in_file_not_in_run"],
+        "stores_in_run_not_routed": plan["stores_in_run_not_routed"],
         "manifest_rows_added": manifest_new,
         "manifest_rows_updated": manifest_upd,
     }
+
+
+WORKBOOK_MAX_BYTES = 15 * 1024 * 1024
+
+
+@router.post("/runs/{run_id}/workbook")
+async def routing_workbook_import(run_id: str, file: UploadFile = File(...),
+                                  user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Import the routing team's 'Week NN-YYYY Workbook.xlsx' (the file routing returns today).
+
+    'Compiled' gives Store -> Load + Ship/Delivery Date; each per-load sheet adds the Drop
+    (stop sequence) and split-stop cart counts. Same replace-loads/manifest semantics as the
+    CSV response import, but split stops divide a store's carts across their trucks."""
+    raw = await file.read(WORKBOOK_MAX_BYTES + 1)
+    if len(raw) > WORKBOOK_MAX_BYTES:
+        raise HTTPException(400, "File too large (15MB max)")
+    if not raw.startswith(b"PK"):
+        raise HTTPException(400, "Not an .xlsx workbook (save the routing Workbook as .xlsx)")
+    try:
+        parsed = parse_routing_workbook(raw)
+    except Exception as ex:   # corrupt / non-workbook upload — a 400, never a 500
+        raise HTTPException(400, f"Could not read workbook: {type(ex).__name__}")
+    if not parsed["entries"]:
+        raise HTTPException(400, "No Store/Load rows found (expected a 'Compiled' sheet or per-load sheets)")
+    result = _apply_route_plan(run_id, parsed["entries"], file.filename, user, allow_split=True,
+                               action="routing_workbook_import")
+    return {**result, "loads_in_file": parsed["loads"], "load_sheets": parsed["load_sheets"],
+            "non_store_rows": parsed["non_store_rows"], "bad_route_names": parsed["bad_route_names"],
+            "rows_bad": parsed["rows_bad"], "warnings": parsed["warnings"][:50]}
 
 
 @router.get("/runs/{run_id}/pack-plan-export")

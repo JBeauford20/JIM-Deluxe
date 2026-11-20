@@ -459,3 +459,108 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'}
     )
+
+
+# ══ IPR v2 RUN EXPORTS (2026-11-19) ═══════════════════════════════════════════
+# The files routing and operations receive today, generated from a run:
+#   stores-and-carts.xlsx -> routing team ("Week NN Stores and Carts.xlsx")
+#   pack-plan.xlsx        -> operations   ("Week NN Pack Plan File.xlsx")
+#   aster.csv             -> Aster ERP import (3M kit codes for 12/17cm jute/ceramic)
+# Builders live in services/v2_exports.py; the routing Workbook import is
+# POST /api/routing/runs/{run_id}/workbook.
+from fastapi import Query
+from services import v2_exports as v2x
+from routers.concurrency import log_change, bump_activity
+
+
+def _v2_model(cur, run_id: str):
+    model = v2x.load_run(cur, run_id)
+    if not model:
+        raise HTTPException(404, "Run not found")
+    if not model["carts"]:
+        raise HTTPException(400, "Run has no carts")
+    ref = v2x.load_reference(cur, model["run"]["batch_id"])
+    return model, ref
+
+
+def _xlsx_response(wb, fname: str, extra_headers: dict | None = None):
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+    headers.update(extra_headers or {})
+    return StreamingResponse(io.BytesIO(v2x.workbook_bytes(wb)), media_type=v2x.XLSX_MIME,
+                             headers=headers)
+
+
+@router.get("/runs/{run_id}/stores-and-carts.xlsx")
+def export_stores_and_carts(run_id: str, mark_submitted: bool = Query(True),
+                            user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Routing request in the routing team's own layout (Week 46/47 'Stores and Carts').
+    Replaces the CSV request-export; by default marks the run 'submitted' the same way."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        model, ref = _v2_model(cur, run_id)
+        wb, rep = v2x.build_stores_and_carts(model, ref)
+        if mark_submitted:
+            cur.execute("""
+                UPDATE recommendation_runs
+                SET routing_status = 'submitted', routing_submitted_at = now(),
+                    pipeline_status = CASE WHEN engine_version = 'v2'
+                                           THEN 'Sent to Pin Routes' ELSE pipeline_status END
+                WHERE id = %s AND routing_status <> 'routed'
+            """, (run_id,))
+            log_change(cur, run_id, "run", run_id, "stores_and_carts_export",
+                       user.get("email") if isinstance(user, dict) else None)
+            bump_activity(cur, run_id)
+    wk = v2x.week_number(model["run"]["shipping_week"])
+    return _xlsx_response(wb, f"Week {wk} Stores and Carts.xlsx",
+                          {"X-Config-Columns": str(rep["config_columns"]),
+                           "X-Unmapped-Configs": str(rep["unmapped_configs"])})
+
+
+@router.get("/runs/{run_id}/pack-plan.xlsx")
+def export_ops_pack_plan(run_id: str,
+                         user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Operations pack plan (Week 47 'Pack Plan File' tabs). Carts not yet on a routed
+    load appear under Route 'UNROUTED' — import the routing Workbook first."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        model, ref = _v2_model(cur, run_id)
+    wb, rep = v2x.build_pack_plan(model, ref)
+    wk = v2x.week_number(model["run"]["shipping_week"])
+    return _xlsx_response(wb, f"Week {wk} Pack Plan File.xlsx",
+                          {"X-Unrouted-Rows": str(rep["unrouted_rows"]),
+                           "X-Rows-Without-Aster": str(rep["rows_without_aster_code"])})
+
+
+@router.get("/runs/{run_id}/aster.csv")
+def export_aster_v2(run_id: str, include_draft: bool = Query(False),
+                    user=Depends(require_role("manager", "admin"))):
+    """Aster ERP import from cart contents: one row per store x Aster code. 12/17cm 1M
+    varieties are swapped to their 3M jute/ceramic kit code per the engine's kit choice.
+    Approved/exported orders only unless include_draft=true."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        model, ref = _v2_model(cur, run_id)
+    text, rep = v2x.build_aster_csv(model, ref, include_draft=include_draft)
+    if not text:
+        raise HTTPException(404, "No approved order lines with quantity found"
+                                 + ("" if include_draft else " (pass include_draft=true for drafts)"))
+    wk = v2x.week_number(model["run"]["shipping_week"])
+    return StreamingResponse(
+        iter([text]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="IPRv2_AsterImport_WK{wk:02d}_{run_id[:8]}.csv"',
+                 "X-Aster-Gaps": str(len(rep["gaps"]))})
+
+
+@router.get("/runs/{run_id}/v2-export-report")
+def export_report_v2(run_id: str, user=Depends(get_current_user)):
+    """What the three exports would contain: unmapped cart configs, unrouted carts,
+    Aster gaps (no variety line / no 3M kit code) and the realized jute/ceramic split."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        model, ref = _v2_model(cur, run_id)
+    _, sc = v2x.build_stores_and_carts(model, ref)
+    _, pp = v2x.build_pack_plan(model, ref)
+    _, ast = v2x.build_aster_csv(model, ref, include_draft=True)
+    sc["unmapped_config_examples"] = sc["unmapped_config_examples"][:25]
+    ast["gaps"] = ast.get("gaps", [])[:100]
+    return {"stores_and_carts": sc, "pack_plan": pp, "aster": ast}
