@@ -1,5 +1,5 @@
 """
-JIM Deluxe — Scenarios (natural-language engine directives)
+TPC - IPR Engine — Scenarios (natural-language engine directives)
 ============================================================
 Users type an English scenario ("Arnie Sherman removed this week",
 "Black Friday Bowls going to the South"). Claude translates it into one or
@@ -67,7 +67,7 @@ def _catalog(cur) -> dict:
     }
 
 
-_PARSE_SYSTEM = """You translate an order writer's plain-English scenario into structured JIM Deluxe
+_PARSE_SYSTEM = """You translate an order writer's plain-English scenario into structured TPC - IPR Engine
 engine directives (weekly_adjustments). You are the review step's input — a human will confirm your
 output before it touches the engine, so be precise and conservative.
 

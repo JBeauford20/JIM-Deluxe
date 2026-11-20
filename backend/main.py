@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="JIM Deluxe API",
+    title="TPC - IPR Engine API",
     description="Josh Inventory Management Deluxe — TPC order recommendation system",
     version="1.0.0",
     lifespan=lifespan,
@@ -64,12 +64,12 @@ def health():
         with get_db() as conn:
             cur = cursor(conn)
             cur.execute("SELECT 1")
-        return {"status": "ok", "service": "JIM Deluxe API", "db": "connected"}
+        return {"status": "ok", "service": "TPC - IPR Engine API", "db": "connected"}
     except Exception as e:
         from fastapi import Response
         import json
         return Response(
-            content=json.dumps({"status": "degraded", "service": "JIM Deluxe API", "db": str(e)}),
+            content=json.dumps({"status": "degraded", "service": "TPC - IPR Engine API", "db": str(e)}),
             status_code=503,
             media_type="application/json"
         )

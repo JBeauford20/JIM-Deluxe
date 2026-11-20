@@ -453,7 +453,7 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
     wb.save(buf)
     buf.seek(0)
     wk  = str(shipping_week).replace("-", "")
-    fname = f"JIM_CartConfigs_WK{wk}_{run_id[:8]}.xlsx"
+    fname = f"TPC_IPR_CartConfigs_WK{wk}_{run_id[:8]}.xlsx"
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

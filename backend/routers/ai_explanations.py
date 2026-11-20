@@ -1,5 +1,5 @@
 """
-JIM Deluxe — AI Router
+TPC - IPR Engine — AI Router
 Generates plain-English explanations, run audits, and Q&A for order decisions using Claude.
 
 Endpoints:
@@ -24,13 +24,13 @@ router = APIRouter()
 _TIER_CART_TARGETS = {'AA': 6, 'A': 4, 'B': 3, 'C': 2, 'D': 1, 'P': 1}
 
 # ── Full TPC/JIM system prompt — cached by Anthropic (ephemeral, 5-min TTL) ──
-_FULL_SYSTEM = """You are the AI audit and Q&A assistant embedded inside JIM Deluxe — The Plant Company's
+_FULL_SYSTEM = """You are the AI audit and Q&A assistant embedded inside TPC - IPR Engine — The Plant Company's
 weekly Home Depot order recommendation system. Your job is to audit generated orders for
 problems, answer questions from order writers about why specific stores and SKUs ended up
 on (or off) a given week's orders, and flag anything that doesn't pass the sniff test
 before product ships.
 
-You have deep knowledge of TPC's business, JIM's engine logic, and the historical
+You have deep knowledge of TPC's business, the IPR Engine's logic, and the historical
 performance data that drives store scoring. You are direct, specific, and always ground
 your answers in actual numbers from the data provided — not generalizations. When
 something looks wrong, say so clearly. When something looks right, explain why briefly
@@ -231,7 +231,7 @@ def _call(client, model: str, system: str, user_msg: str, max_tokens: int) -> st
 
 _STORE_SYSTEM = """You are an AI assistant for TPC (The Plant Company), a wholesale plant \
 grower shipping to ~2,000 Home Depot stores weekly. You help order writers understand \
-why JIM Deluxe — TPC's AI ordering engine — made specific decisions.
+why TPC - IPR Engine — TPC's AI ordering engine — made specific decisions.
 
 Write in clear, direct prose. No bullet points, no headers. \
 Reference the actual numbers provided. 3-4 sentences maximum. \
@@ -269,7 +269,7 @@ def _build_store_prompt(o: dict, lines: list, carts: list) -> str:
         "suggesting last delivery may not have fully cleared."
     ) if over else ""
 
-    return f"""Explain why this Home Depot store received its order from JIM Deluxe this week.
+    return f"""Explain why this Home Depot store received its order from TPC - IPR Engine this week.
 
 STORE: {o.get('store_id')} — {o.get('store_name','')}, {o.get('city','')}, {o.get('state','')}
 MERCHANT TERRITORY: {o.get('merchant','unknown')}
@@ -349,7 +349,7 @@ def explain_order(order_id: str, user=Depends(require_role("order_writer", "mana
 
 _RUN_SYSTEM = """You are an AI assistant for TPC (The Plant Company), a wholesale plant \
 grower shipping to ~2,000 Home Depot stores weekly. You help managers understand \
-JIM Deluxe's weekly recommendation run before approving it for shipment.
+TPC - IPR Engine's weekly recommendation run before approving it for shipment.
 
 Write a clear executive summary. No bullet points, no headers. \
 4-6 sentences. Cover the overall plan health, key exclusions, grade distribution, \
@@ -374,7 +374,7 @@ def _build_run_prompt(run: dict, grades: list, configs: list,
         for r in (top_stores or [])
     ) or "none"
 
-    return f"""Summarize this week's JIM Deluxe recommendation run for a manager review.
+    return f"""Summarize this week's TPC - IPR Engine recommendation run for a manager review.
 
 WEEK OF: {run.get('shipping_week','')}
 STORES SERVED: {run.get('stores_served',0):,} of ~1,995 active HD locations
@@ -479,7 +479,7 @@ def summarize_run(run_id: str, user=Depends(require_role("order_writer", "manage
 
 def _build_audit_batch(stores: list) -> str:
     lines = [
-        f"Audit the following {len(stores)} store orders from this JIM Deluxe run.",
+        f"Audit the following {len(stores)} store orders from this TPC - IPR Engine run.",
         "Apply your red flag criteria. Return ONLY a valid JSON array.",
         "Each element must be: {\"store_id\": int, \"severity\": \"FLAG|WARNING|INFO\", \"category\": str, \"message\": str}",
         "Omit stores with no issues. Return [] if everything is clean.",
