@@ -33,7 +33,8 @@ def client():
 
 def call_model(system: str, user_msg: str, max_tokens: int = 1500, model: str = MODEL_MAIN) -> str:
     """One grounded call. System prompt is cached (ephemeral). Refusal fallbacks are on
-    for the main model so a safety-classifier decline retries server-side."""
+    for the main model so a safety-classifier decline retries server-side. SDK failures
+    surface as clean HTTP errors a person can act on, never a bare 500."""
     c = client()
     kwargs = dict(
         model=model,
@@ -41,10 +42,21 @@ def call_model(system: str, user_msg: str, max_tokens: int = 1500, model: str = 
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_msg}],
     )
-    if model == MODEL_MAIN:
-        resp = c.beta.messages.create(betas=[_FALLBACK_BETA], fallbacks="default", **kwargs)
-    else:
-        resp = c.messages.create(**kwargs)
+    try:
+        if model == MODEL_MAIN:
+            resp = c.beta.messages.create(betas=[_FALLBACK_BETA], fallbacks="default", **kwargs)
+        else:
+            resp = c.messages.create(**kwargs)
+    except _anthropic.AuthenticationError:
+        raise HTTPException(503, "The AI key on this server is invalid or expired — "
+                                 "update ANTHROPIC_API_KEY in Railway (console.anthropic.com → API Keys).")
+    except _anthropic.RateLimitError:
+        raise HTTPException(503, "The AI service is rate-limited right now — try again in a minute.")
+    except _anthropic.APIStatusError as e:
+        raise HTTPException(502, f"The AI service returned an error ({e.status_code}) — try again; "
+                                 "if it persists, check the Anthropic status page.")
+    except _anthropic.APIConnectionError:
+        raise HTTPException(502, "Could not reach the AI service from the server — network issue; try again.")
     if resp.stop_reason == "refusal":
         detail = getattr(getattr(resp, "stop_details", None), "explanation", None) or "model declined"
         raise HTTPException(502, f"AI declined to answer: {detail}")
