@@ -377,11 +377,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # Stores. §1/§4.1 hard-block fields (store capacity, approved assortment, receiving
     # restrictions, DSM assignment) ship in the dsm_portal_2026_11_20 migration; read them
     # when present so the engine works against a database that predates it.
-    cur.execute("""SELECT array_agg(column_name) AS cols FROM information_schema.columns
+    cur.execute("""SELECT column_name::text AS c FROM information_schema.columns
                    WHERE table_name = 'stores' AND column_name IN
                          ('capacity_carts', 'approved_assortment', 'receiving_restrictions',
                           'dsm', 'dsm_email')""")
-    _hb_cols = sorted(set(cur.fetchone()["cols"] or []))
+    _hb_cols = sorted({r["c"] for r in cur.fetchall()})
     cur.execute(f"""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
                            region, merchant, state, volume_code{''.join(', ' + c for c in _hb_cols)}
                     FROM stores ORDER BY store_id""")
