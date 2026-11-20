@@ -333,9 +333,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         return l["price"] if l["price"] is not None else 0.0
 
     def price(sku_id, realized=None):
+        # Leadership goal ($900K/wk, 2026-11-20 meeting) is WHOLESALE at SKU wholesale price:
+        # every $ figure prices at skus.wholesale_price_whl first; realized DTS $/unit (also
+        # wholesale) next; pricebook retail only as a last resort (flagged by price_src).
+        info = sku_info.get(sku_id) or {}
+        if info.get("wholesale_price_whl"):
+            return float(info["wholesale_price_whl"]), "wholesale"
         if realized:
             return realized, "realized"
-        info = sku_info.get(sku_id) or {}
         if info.get("retail_price"):
             return float(info["retail_price"]), "pricebook"
         # No retail price: never guessed (wholesale x2 removed). The line still plans on units;
@@ -420,6 +425,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     """, (*fresh_arr, d(182), d(91 + lag_days), d(lag_days), anchor, fresh_days, d(182), d(182),
           d(91), anchor, d(max(182, fresh_max))))
     dels = {(r["store_id"], r["sku_id"]): dict(r) for r in cur.fetchall()}
+    # store-level delivery count (26 wk) for the manifest fallback: a store's average truck carries
+    # d26 / store deliveries of a SKU — NOT the SKU's own average drop (which assumed every SKU the
+    # store ever received is on every truck and overstated inbound ~5x on the week-48 test).
+    cur.execute("""SELECT store_id, COUNT(DISTINCT delivery_date) AS n FROM deliveries
+                   WHERE delivery_date > %s GROUP BY store_id""", (d(182),))
+    store_ndel = {r["store_id"]: int(r["n"] or 0) for r in cur.fetchall()}
 
     # Shipping efficiency (Josh's KPI): 13-wk units sold / 13-wk units delivered, same window,
     # no lag, per store x family and network. Reported only; the §11 conversion gate is unchanged.
@@ -544,6 +555,39 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"at {len(it_stores)} stores (weeks {', '.join(str(w) for w in sorted(it_weeks)) or 'none'}) · "
         f"manifest stores without loaded lines: {len(in_transit_stores - it_stores)}")
 
+    # Consecutive minimum-cart pushes per store (latest earlier v2 run per ship week, newest
+    # first; a week where the store shipped or was not due ends/skips the streak).
+    min_full_carts = int(S.get("min_order_full_carts", 1) or 0)
+    min_cart_fill = float(S.get("min_cart_fill_pct", 0.9) or 0.9)
+    # Sell-through cover limit: TPC target is 60% sold within 28 days of delivery (Frank Paul,
+    # 2026-11-20), so stock after a delivery should not exceed 4 wks / 0.6 = 6.7 wks of forecast.
+    max_cover_wk = float(S.get("max_cover_weeks_after_delivery", 4 / 0.6) or 4 / 0.6)
+    cur.execute("""
+        SELECT DISTINCT ON (shipping_week) id, shipping_week FROM recommendation_runs
+        WHERE engine_version = %s AND shipping_week < %s AND COALESCE(status, '') NOT IN %s
+        ORDER BY shipping_week DESC, run_at DESC
+    """, (ENGINE_VERSION, shipping_week, CANCELLED_RUN_STATUSES))
+    _pr = [str(r["id"]) for r in sorted(cur.fetchall(), key=lambda r: r["shipping_week"], reverse=True)[:8]]
+    push_streak = {}
+    if _pr:
+        cur.execute("""SELECT run_id::text AS run_id, store_id, decision_type FROM run_decisions
+                       WHERE run_id = ANY(%s::uuid[]) AND store_id IS NOT NULL
+                         AND decision_type IN ('pushed_min_cart', 'not_due')""", (_pr,))
+        _ph = defaultdict(lambda: [set() for _ in _pr])
+        for r in cur.fetchall():
+            _ph[r["store_id"]][_pr.index(r["run_id"])].add(r["decision_type"])
+        for st_id, weeks in _ph.items():
+            n = 0
+            for kinds in weeks:
+                if "pushed_min_cart" in kinds:
+                    n += 1
+                elif "not_due" in kinds:
+                    continue
+                else:
+                    break
+            if n:
+                push_streak[st_id] = n
+
     # ══ 3+4. PROJECTED INVENTORY AT ARRIVAL + UNCONSTRAINED NEED (§8–10) ════
     def store_cadence(store_id):
         g = cadence_grade((stores.get(store_id) or {}).get("volume_code"),
@@ -554,7 +598,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         """§10 need for one line: coverage = store cadence + buffer weeks (capped by the family
         freshness window), then the §17 H2O/Terrarium cap and the §5 unreliable-inventory cap."""
         cg, cw = store_cadence(l["store_id"])
-        cov = coverage_weeks(cw, cad_buffer, fresh_of.get(l["sku_id"], fresh_days))
+        # Minimum-order floor (meeting 2026-11-20): a store pushed for not filling one full CC
+        # cart waits longer, so its coverage grows one week per consecutive push (still capped
+        # by the freshness window) — need accumulates to a full cart from forecast, never padded.
+        cov = coverage_weeks(cw + push_streak.get(l["store_id"], 0), cad_buffer,
+                             fresh_of.get(l["sku_id"], fresh_days))
+        if l.get("cov_extra"):
+            # fill-to-cart extension: forecast demand over a longer window, capped by freshness
+            # and by the sell-through cover limit (stock after delivery <= max_cover_weeks of fc)
+            cov = min(cov + l["cov_extra"], max(cov, max_cover_wk),
+                      fresh_of.get(l["sku_id"], fresh_days) / 7.0)
         need = max(0.0, l["fc"] * cov - l["projected"])
         cap_note = None
         if not l["plannable"]:
@@ -631,8 +684,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         else:
             inbound, inbound_src = inbound_known.get((store_id, sku_id), 0), "prior exported run"
             if not inbound and store_id in in_transit_stores and dv.get("n_del"):
-                inbound = round(float(dv.get("d26") or 0) / max(1, int(dv["n_del"])))
-                inbound_src = "in transit (manifest) — qty estimated from avg delivery · LOW"
+                inbound = (float(dv.get("d26") or 0) / max(1, store_ndel.get(store_id, 0), int(dv["n_del"]))
+                           * it_low)
+                inbound_src = (f"in transit (manifest) — SKU share of the store's avg truck, counted at "
+                               f"{it_low:.0%} · LOW")
                 if store_id not in manifest_est_stores:
                     manifest_est_stores.add(store_id)
                     decide("validation", "Manifest shows a delivery after the sales anchor but no "
@@ -715,6 +770,57 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         cg, cw = store_cadence(st_id)
         due, nxt = due_status(store_last_del.get(st_id), arrival, cw, st_id in crit_stores)
         store_due[st_id] = (due, cg, cw, nxt)
+
+    # FILL TO ONE FULL CC CART (leadership minimum, 2026-11-20). A due store whose cadence-sized
+    # order is below one full cart gets its coverage extended a week at a time — forecast demand
+    # over a longer window, so its next delivery simply comes later — until the order fills a cart
+    # or every line hits its cap (freshness window / sell-through cover limit). Never adds trays
+    # beyond forecast. Stores that still cannot fill a cart are pushed by the floor below.
+    def shelf_equiv(ls):
+        by = defaultdict(float)
+        for x in ls:
+            if x["trays"] > 0 and x["plannable"]:
+                pk = pack[x["sku_id"]]
+                by[pk["profile_id"]] += x["trays"] / max(1, int(pk["trays_per_shelf"]))
+        return sum(by.values())
+    fill_target = min_cart_fill * CART_SHELVES * max(1, min_full_carts)
+    by_store = defaultdict(list)
+    for l in lines.values():
+        if l["plannable"]:
+            by_store[l["store_id"]].append(l)
+    extended = {}
+    for st_id, ls in by_store.items():
+        if min_full_carts <= 0:
+            continue
+        if st_id in store_due:
+            is_due = store_due[st_id][0]
+        else:                                    # no cadence-sized trays: due by cadence alone?
+            is_due = due_status(store_last_del.get(st_id), arrival, store_cadence(st_id)[1],
+                                st_id in crit_stores)[0]
+        if not is_due:
+            continue
+        if shelf_equiv(ls) >= fill_target:
+            continue
+        for extra in range(1, 13):
+            for x in ls:
+                x["cov_extra"] = extra
+                size_line(x)
+            if shelf_equiv(ls) >= fill_target or all(
+                    x["cover_wk"] < 1 or x["cover_wk"] >= min(max_cover_wk, fresh_of.get(x["sku_id"], fresh_days) / 7.0) - 1e-9
+                    for x in ls):
+                break
+        if shelf_equiv(ls) >= fill_target:
+            extended[st_id] = extra
+        else:                                   # cannot fill a cart inside the caps: revert
+            for x in ls:
+                x["cov_extra"] = 0
+                size_line(x)
+    for st_id in {l["store_id"] for l in lines.values() if l["trays"] > 0} - set(store_due):
+        cg, cw = store_cadence(st_id)            # stores that only gained trays via extension
+        due, nxt = due_status(store_last_del.get(st_id), arrival, cw, st_id in crit_stores)
+        store_due[st_id] = (due, cg, cw, nxt)
+    log(f"Fill-to-cart: {len(extended):,} due stores extended to fill one CC cart "
+        f"(avg +{(sum(extended.values()) / len(extended)) if extended else 0:.1f} wk coverage)")
 
     service = {}            # (store, family) -> (status, conversion, confidence)
     for k in fam_vel:
@@ -995,7 +1101,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             wh_value = sum(x[3] * float(sku_info[x[1]].get("wholesale_price_whl") or 0) for x in contents)
             freight_pct = (cart_cost / wh_value) if wh_value else None
             low_value = wh_value < low_value_wh
+            # FULL CC cart = filled shelf space, not shelf count: shelf-equivalents of trays
+            # (each shelf's trays / its trays_per_shelf) >= min_cart_fill_pct of the slots this
+            # cart can hold (5, or fewer when tall shelves hit the ceiling). Four shelves holding
+            # one tray each is NOT a full cart.
+            shelf_eq = sum(min(1.0, sum(it[1] for it in items) / max(1, int(pack[items[0][0]]["trays_per_shelf"])))
+                           for _, items in ordered)
+            ceiling_hit = c["height"] + MIN_SHELF_CLEAR_IN > CART_CEILING_IN
+            slots = len(ordered) if (ceiling_hit and len(ordered) < CART_SHELVES) else CART_SHELVES
+            tray_fill = shelf_eq / slots
+            phys_full = tray_fill >= min_cart_fill
             out.append({"cart_number": ci, "cart_type_id": "cc", "shelves_used": len(ordered),
+                        "phys_full": phys_full, "tray_fill": round(tray_fill, 3),
                         "total_units": sum(x[3] for x in contents), "contents": contents,
                         "is_full": len(ordered) >= CART_SHELVES, "is_flagged": False,
                         "wholesale_value": round(wh_value, 2), "wholesale_incomplete": wh_missing,
@@ -1009,6 +1126,48 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                              f"for best family grade {top_grade}) — demand-driven, shipped (cart caps off)",
                    store_id=store_id, severity="info", carts=len(out))
         orders[store_id] = {"lines": olines, "carts": out}
+
+    # MINIMUM ORDER = ONE FULL CC CART (leadership decision, 2026-11-20 meeting; supersedes the
+    # "warning only" treatment of light orders in §19.1). HARD STOP: a store whose order does not
+    # fill at least `min_order_full_carts` physically full cart(s) is pushed to next week — no
+    # Critical/overdue/lost-sales override, and trays are never added to fill a cart. Its need
+    # is recalculated next week with coverage extended one week per consecutive push. Orders
+    # that pass ship whole (a trailing partial cart rides on the same stop).
+    pushed = {"stores": 0, "carts": 0, "units": 0, "wholesale": 0.0, "lost_one_week": 0.0,
+              "repeat_stores": 0}
+    for store_id in sorted(orders):
+        if min_full_carts <= 0:
+            break
+        o = orders[store_id]
+        n_full = sum(1 for c in o["carts"] if c["phys_full"])
+        if n_full >= min_full_carts:
+            continue
+        W = sum(c["wholesale_value"] for c in o["carts"])
+        units = sum(l["alloc_units"] for l in o["lines"])
+        lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
+        shelves = sum(c["shelves_used"] for c in o["carts"])
+        streak = push_streak.get(store_id, 0)
+        decide("pushed_min_cart",
+               f"Order PUSHED to next week: {shelves} shelf(s) on {len(o['carts'])} cart(s), "
+               f"{n_full} full — below the one-full-CC-cart minimum (${W:,.0f} wholesale, {units:,}u; "
+               f"one-week sales at risk ${lost:,.0f}). Need recalculated next week with "
+               f"{streak + 1} extra coverage week(s); never padded (leadership decision 2026-11-20)",
+               store_id=store_id, severity="warning" if streak >= 2 else "info", action="push",
+               order_wholesale=round(W, 2), carts=len(o["carts"]), shelves=shelves, full_carts=n_full,
+               units=units, lost_sales_one_week=round(lost, 2), consecutive_pushes=streak + 1)
+        pushed["stores"] += 1
+        pushed["carts"] += len(o["carts"])
+        pushed["units"] += units
+        pushed["wholesale"] += W
+        pushed["lost_one_week"] += lost
+        pushed["repeat_stores"] += 1 if streak else 0
+        alloc_units_total -= units
+        for l in o["lines"]:
+            l["deferred_units"] = l["alloc_units"]
+            l["alloc_units"], l["alloc_trays"] = 0, 0
+        del orders[store_id]
+    log(f"Minimum order (1 full CC cart): {pushed['stores']:,} stores pushed · {pushed['carts']:,} carts · "
+        f"{pushed['units']:,}u · ${pushed['wholesale']:,.0f} wholesale")
 
     # §19.1 low-value order decision (economic, not a size floor; §23 deferral), judged on each
     # store's WHOLE order: W = order wholesale, n = carts, C = n x cart_delivered_cost. RELEASE
@@ -1049,6 +1208,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         overdue = is_overdue(store_last_del.get(store_id), arrival, store_due[store_id][2])
         action = economic_action(W, n, lost, cart_cost, low_value_wh, bool(critical), prior_def, max_econ_def,
                                  overdue=overdue)
+        if min_full_carts > 0 and action == "defer":
+            action = "release_min_cart"     # floor met: one full CC cart is the agreed minimum
         if action == "pass":
             continue
         fp = (C / W) if W else None
@@ -1061,12 +1222,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     units=sum(l["alloc_units"] for l in o["lines"]),
                     wholesale_missing_skus=sorted({x for c in o["carts"] for x in c["wholesale_incomplete"]}))
         data["prior_economic_deferrals"] = prior_def
-        if action in ("release", "release_after_deferral", "release_overdue"):
+        if action in ("release", "release_after_deferral", "release_overdue", "release_min_cart"):
             if action == "release_after_deferral":
                 econ_second += 1
             if action == "release_overdue":
                 econ_overdue += 1
             why = (("Critical-risk line(s) " + ", ".join(critical)) if critical else
+                   "meets the one-full-CC-cart minimum (leadership decision 2026-11-20)"
+                   if action == "release_min_cart" else
                    f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}" if lost >= C else
                    (f"overdue — released (last delivery {store_last_del.get(store_id)}, beyond "
                     f"{store_due[store_id][2] + 1} wks)") if action == "release_overdue" else
@@ -1236,8 +1399,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "edi_uncertainty_at_risk": round(edi_risk),
             "price_basis_units": dict(price_srcs),
             "method_note": ("Arrival-week retail across every store x SKU with velocity: "
-                            "min(weekly forecast, projected stock) x price. Prices are realized "
-                            "(DTS dollars) where loaded, else pricebook retail. SKUs with no "
+                            "min(weekly forecast, projected stock) x price. Prices are SKU wholesale "
+                            "(skus.wholesale_price_whl), else realized DTS wholesale $/unit, else "
+                            "pricebook retail (flagged). SKUs with no "
                             "price are never guessed: they ship on units and are excluded from $."),
         },
         "incomplete_price_units": int(price_srcs.get("missing", 0)),
@@ -1262,6 +1426,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "deferred_wholesale": round(econ["deferred_wholesale"], 2),
             "deferred_retail_one_week_at_risk": round(econ["deferred_retail_one_week_at_risk"], 2),
             "stores_deferred": len(deferred_stores),
+            "min_order_full_carts": min_full_carts, "min_cart_fill_pct": min_cart_fill,
+            "avg_tray_fill_shipping": (round(sum(c["tray_fill"] for c in all_carts) / len(all_carts), 3)
+                                       if all_carts else None),
+            "pushed_min_cart": {"stores": pushed["stores"], "carts": pushed["carts"], "units": pushed["units"],
+                                "wholesale": round(pushed["wholesale"], 2),
+                                "lost_one_week": round(pushed["lost_one_week"], 2),
+                                "repeat_stores": pushed["repeat_stores"]},
+            "kpi_scope": "carts, wholesale, $/cart and freight cover carts SHIPPING this week only; "
+                         "pushed and deferred carts are reported separately",
             "avg_freight_pct_released": (round(sum(c["freight_pct"] for c in all_carts if c["freight_pct"])
                                                / max(1, sum(1 for c in all_carts if c["freight_pct"])), 4)
                                          if all_carts else None),
