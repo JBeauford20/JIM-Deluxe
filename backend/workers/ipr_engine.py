@@ -102,8 +102,27 @@ def prior_economic_deferrals(history):
     return n
 
 
+def shrink_rate(delivered, sold, onhand_change=None, efficiency=None, cap=0.6):
+    """§8 expected shrink for a family (network): 1 − (sold + Δ on-hand) ÷ delivered over the
+    shrink window, clamped 0..cap. Without on-hand history: 1 − shipping efficiency.
+    Returns (rate, source) or (None, 'no data')."""
+    if delivered and onhand_change is not None:
+        raw, src = 1.0 - (sold + onhand_change) / delivered, "sold + Δ DTS on-hand vs delivered"
+    elif efficiency is not None:
+        raw, src = 1.0 - efficiency, "fallback 1 − shipping efficiency (no on-hand history)"
+    else:
+        return None, "no data"
+    return round(min(cap, max(0.0, raw)), 4), src
+
+
+def is_overdue(last_delivery, arrival, cadence_weeks):
+    """Week-1 deferral seed: a store not served within cadence + 1 weeks (or never served) has
+    already waited — it is never economically deferred."""
+    return last_delivery is None or (arrival - last_delivery).days > (cadence_weeks + 1) * 7
+
+
 def economic_action(wholesale, carts, lost_one_week, cart_cost, wholesale_low, any_critical,
-                    prior_deferrals, max_deferrals):
+                    prior_deferrals, max_deferrals, overdue=False):
     """§19.1 economic test on a due store's whole order (Josh option B, 2026-11-19).
     Returns 'pass' (not low value), 'release' (passes on lost sales / Critical), 'defer'
     (first time), or 'release_after_deferral' (already deferred max_deferrals due cycles)."""
@@ -111,6 +130,8 @@ def economic_action(wholesale, carts, lost_one_week, cart_cost, wholesale_low, a
         return "pass"
     if lost_one_week >= carts * cart_cost or any_critical:
         return "release"
+    if overdue:
+        return "release_overdue"
     if prior_deferrals >= max_deferrals:
         return "release_after_deferral"
     return "defer"
@@ -430,6 +451,61 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 store_last_del[r["store_id"]] = r["mx"]
     store_best_grade = {}                       # filled after family grades (fallback cadence grade)
 
+    # §8 expected shrink and adjustments, per family at network level over shrink_window_weeks:
+    # 1 − (units sold + change in DTS on-hand) ÷ units delivered, clamped 0–0.6. Needs DTS
+    # snapshots within 14 days of both window ends; otherwise 1 − shipping efficiency (13 wk).
+    # shrink_rate_override {family: rate} wins. Applied to the freshness-window on-hand estimate.
+    shrink_wk = int(S.get("shrink_window_weeks") or 26)
+    shrink_over = {k: float(v) for k, v in (S.get("shrink_rate_override") or {}).items()}
+    w0 = anchor - timedelta(weeks=shrink_wk)
+    cur.execute("""
+        SELECT COALESCE(fm.ipr_family, 'Unmapped') AS fam,
+               (SELECT SUM(units_delivered) FROM deliveries dl WHERE dl.sku_id = ANY(array_agg(k.sku_id))
+                  AND dl.delivery_date > %s AND dl.delivery_date <= %s) AS delivered,
+               (SELECT SUM(units_sold) FROM sales sa WHERE sa.sku_id = ANY(array_agg(k.sku_id))
+                  AND sa.sale_date > %s AND sa.sale_date <= %s) AS sold
+        FROM skus k LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
+        GROUP BY 1
+    """, (w0, anchor, w0, anchor))
+    shrink_in = {r["fam"]: (float(r["delivered"] or 0), float(r["sold"] or 0)) for r in cur.fetchall()}
+    cur.execute("""SELECT MIN(period_end) FILTER (WHERE period_end BETWEEN %s AND %s) AS p0,
+                          MAX(period_end) FILTER (WHERE period_end BETWEEN %s AND %s) AS p1
+                   FROM dts_weekly_snapshot""",
+                (w0 - timedelta(days=14), w0 + timedelta(days=14), anchor - timedelta(days=14), anchor))
+    p = cur.fetchone()
+    oh_change = {}
+    if p["p0"] and p["p1"] and p["p0"] < p["p1"]:
+        cur.execute("""SELECT COALESCE(fm.ipr_family, 'Unmapped') AS fam,
+                              SUM(ds.onhand_qty) FILTER (WHERE ds.period_end = %s) AS oh0,
+                              SUM(ds.onhand_qty) FILTER (WHERE ds.period_end = %s) AS oh1
+                       FROM dts_weekly_snapshot ds LEFT JOIN ipr_family_map fm ON fm.sku_id = ds.sku_id
+                       WHERE ds.period_end IN (%s, %s) GROUP BY 1""", (p["p0"], p["p1"], p["p0"], p["p1"]))
+        oh_change = {r["fam"]: float(r["oh1"] or 0) - float(r["oh0"] or 0) for r in cur.fetchall()}
+    fam_eff_s, fam_eff_d = defaultdict(float), defaultdict(float)
+    for (_st, f), v in eff_sold.items():
+        fam_eff_s[f] += v
+    for (_st, f), v in eff_del.items():
+        fam_eff_d[f] += v
+    shrink, shrink_src = {}, {}
+    for f in set(shrink_in) | set(fam_eff_d):
+        if f in shrink_over:
+            shrink[f], shrink_src[f] = shrink_over[f], "shrink_rate_override"
+            continue
+        dlv, sold = shrink_in.get(f, (0.0, 0.0))
+        rate, src = shrink_rate(dlv, sold, oh_change.get(f) if f in oh_change else None,
+                                shipping_efficiency(fam_eff_s.get(f, 0), fam_eff_d.get(f, 0)))
+        shrink[f], shrink_src[f] = (rate or 0.0), src
+    shrink_summary = {
+        "window_weeks": shrink_wk,
+        "onhand_snapshots": [str(p["p0"]), str(p["p1"])] if oh_change else None,
+        "by_family": {f: {"rate": shrink[f], "source": shrink_src[f],
+                          "delivered": round(shrink_in.get(f, (0, 0))[0]),
+                          "sold": round(shrink_in.get(f, (0, 0))[1])}
+                      for f in sorted(shrink)},
+    }
+    log(f"Shrink ({shrink_wk} wk, by family): " + ", ".join(f"{f} {shrink[f]:.0%}" for f in sorted(shrink)
+                                                         if shrink_in.get(f, (0, 0))[0]))
+
     # On-hand: DTS snapshot (MEDIUM) when fresh, else deliveries−sales estimate (LOW)
     cur.execute("""
         SELECT DISTINCT ON (store_id, sku_id) store_id, sku_id, onhand_qty, period_end
@@ -525,7 +601,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # weeks, then 357K in one week; network on-hand = 16 weeks of supply). Sellable is
         # bounded by freshness (§4.5): only units delivered within the freshness window,
         # less units sold since, can still be on the floor. Take the smaller of the two.
-        fresh_est = max(0.0, float(dv.get("recent8") or 0) - sv["w8"])
+        fam_s = sku_info[sku_id]["ipr_family"] or "Unmapped"
+        shr = shrink.get(fam_s, 0.0)
+        fresh_est = max(0.0, float(dv.get("recent8") or 0) * (1.0 - shr) - sv["w8"])
+        shr_txt = f"; shrink {shr:.0%} ({fam_s})"
         sn = snap.get((store_id, sku_id))
         if sn is not None and sn["onhand_qty"] is not None and float(sn["onhand_qty"]) < 0:
             oh, conf, oh_src = 0.0, "UNUSABLE", f"DTS snapshot {sn['period_end']} negative — implausible"
@@ -533,10 +612,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             rep = float(sn["onhand_qty"])
             oh = min(rep, fresh_est)
             conf, oh_src = "LOW", (f"min(DTS {rep:.0f}u, fresh {fresh_est:.0f}u) — "
-                                   f"DTS dumps batch-recorded, freshness-capped")
+                                   f"DTS dumps batch-recorded, freshness-capped{shr_txt}")
         else:
             oh, conf, oh_src = fresh_est, "LOW", (f"estimate: {fresh_of.get(sku_id, fresh_days)}-day "
-                                                  f"deliveries − sales")
+                                                  f"deliveries × (1 − shrink) − sales{shr_txt}")
         # the freshness cap is already the conservative bound — no second haircut on top
         oh_adj = 0.0 if conf == "UNUSABLE" else max(0.0, oh) * (
             1.0 if sn is not None else float(conf_factor[conf]))
@@ -954,7 +1033,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     (list(idx),))
         for r in cur.fetchall():
             hist[r["store_id"]][idx[str(r["run_id"])]].add(r["decision_type"])
-    econ_second = 0
+    econ_second = econ_overdue = 0
     econ = {"released_low_value": 0, "stores_released_low_value": 0, "deferred_carts": 0,
             "deferred_units": 0, "deferred_wholesale": 0.0, "deferred_retail_one_week_at_risk": 0.0,
             "deferred_single_cart": 0, "deferred_multi_cart": 0}
@@ -967,7 +1046,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
         critical = sorted(l["sku_id"] for l in o["lines"] if l["risk"] == "Critical")
         prior_def = prior_economic_deferrals(hist.get(store_id, []))
-        action = economic_action(W, n, lost, cart_cost, low_value_wh, bool(critical), prior_def, max_econ_def)
+        overdue = is_overdue(store_last_del.get(store_id), arrival, store_due[store_id][2])
+        action = economic_action(W, n, lost, cart_cost, low_value_wh, bool(critical), prior_def, max_econ_def,
+                                 overdue=overdue)
         if action == "pass":
             continue
         fp = (C / W) if W else None
@@ -980,11 +1061,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     units=sum(l["alloc_units"] for l in o["lines"]),
                     wholesale_missing_skus=sorted({x for c in o["carts"] for x in c["wholesale_incomplete"]}))
         data["prior_economic_deferrals"] = prior_def
-        if action in ("release", "release_after_deferral"):
+        if action in ("release", "release_after_deferral", "release_overdue"):
             if action == "release_after_deferral":
                 econ_second += 1
+            if action == "release_overdue":
+                econ_overdue += 1
             why = (("Critical-risk line(s) " + ", ".join(critical)) if critical else
                    f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}" if lost >= C else
+                   (f"overdue — released (last delivery {store_last_del.get(store_id)}, beyond "
+                    f"{store_due[store_id][2] + 1} wks)") if action == "release_overdue" else
                    f"second due week, released per policy (deferred {prior_def} prior due "
                    f"cycle(s); max_economic_deferrals {max_econ_def})")
             decide("low_value_cart", f"Order RELEASED: {nums} — {why} (§19.1)", store_id=store_id,
@@ -1105,6 +1190,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                      "max_economic_deferrals": max_econ_def},
         "stores_deferred_first_time": len(deferred_stores),
         "stores_released_after_deferral": econ_second,
+        "stores_released_overdue": econ_overdue,
         "deferral_history_runs": [str(r["shipping_week"]) for r in hist_runs],
         "stores_due": sum(1 for v in store_due.values() if v[0]),
         "stores_not_due": sum(1 for v in store_due.values() if not v[0]),
@@ -1157,6 +1243,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "incomplete_price_units": int(price_srcs.get("missing", 0)),
         "delivery_cadence": cadence_summary,
         "shipping_efficiency": eff_summary,
+        "shrink": shrink_summary,
         "gap_fill": {"fills": gap_fills, "trays": gap_fill_trays, "units": gap_fill_units,
                      "short_store_families": len(gaps)},
         "cart_economics": {
