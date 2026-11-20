@@ -24,7 +24,7 @@ Exchange, pack plans, Aster export, Cart Configs and editor all work unchanged.
 import json
 import math
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, timedelta
 
 import psycopg2
@@ -33,7 +33,7 @@ import psycopg2.extras
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
 from recommendation_engine import (CART_SHELVES, CART_CEILING_IN, MIN_SHELF_CLEAR_IN,
-                                   PROFILE_HEIGHT_RANK, determine_kit_type,
+                                   PROFILE_HEIGHT_RANK,
                                    _distribute_units_across_lines)
 
 ENGINE_VERSION = "v2"
@@ -43,8 +43,17 @@ STALE_SALES_WARN_DAYS = 9
 H2O_TERR_FAMILIES = {"H2O", "Terrarium"}
 GRADE_ORDER = ["AA", "A", "B", "C+", "C", "C-", "D"]
 GRADE_SCORE = {"AA": 1.0, "A": .85, "B": .7, "C+": .55, "C": .4, "C-": .25, "D": .1}
+# §11.3 reduce-quantity band (conversion between the 60% floor and the grade threshold):
+# share of need trays shipped, by store-family grade. Round down, minimum 1 tray.
+REVIEW_BAND_SHIP_PCT = {"AA": 1.0, "A": 1.0, "B": .75, "C+": .75, "C": .5, "C-": .5, "D": .5}
 RISK_SCORE = {"Critical": 1.0, "High": .75, "Moderate": .4, "Low": .1, "Unknown": .3}
 BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
+# Duplicate-run control (§1, §24, §28): run statuses that no longer represent live orders,
+# and statuses/pipeline stages meaning the week's orders have already left the building.
+CANCELLED_RUN_STATUSES = ("cancelled", "canceled", "failed", "rejected", "superseded", "deleted")
+RELEASED_RUN_STATUSES = ("exported", "released", "shipped")
+RELEASED_PIPELINE = ("Aster Exported", "Released", "Shipped", "Received or Estimated Received",
+                     "Performance Matured", "Sent to Pin Routes", "Routing Response Received")
 
 
 def run(batch_id, shipping_week=None, preview=False, verbose=True, what_if_unlimited=False):
@@ -117,6 +126,44 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     days_to_arrival = max(0, (arrival - anchor).days)
     log(f"Sales anchor {anchor} ({stale}d old) · arrival {arrival} · {days_to_arrival}d of sales before arrival")
 
+    # Duplicate-run control (§1 "may not override duplicate-order controls", §24 "block when the
+    # order duplicates covered inbound supply"). A released/exported run for this ship week
+    # refuses outright; earlier live runs for the same week are counted as inbound below so a
+    # rerun ships only the residual need, never the same order twice.
+    # Live = v2 runs (any non-cancelled status) plus exported/released runs of any engine;
+    # leftover v1 drafts are not live orders and are ignored.
+    cur.execute("""SELECT id, status, pipeline_status, engine_version FROM recommendation_runs
+                   WHERE shipping_week = %s
+                     AND COALESCE(status, '') NOT IN %s""",
+                (shipping_week, CANCELLED_RUN_STATUSES))
+    prior_runs = [r for r in cur.fetchall()
+                  if r["engine_version"] == ENGINE_VERSION or r["status"] in RELEASED_RUN_STATUSES
+                  or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
+    released = [r for r in prior_runs
+                if r["status"] in RELEASED_RUN_STATUSES or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
+    if released:
+        raise ValueError(
+            f"Duplicate run refused: ship week {shipping_week} already has a released/exported run "
+            f"({', '.join(str(r['id']) + ' ' + str(r['status']) for r in released)}). Cancel that run "
+            f"before planning this week again, or plan the next ship week.")
+    same_week_prior = {}
+    if prior_runs:
+        cur.execute("""
+            SELECT o.store_id, ol.sku_id,
+                   SUM(COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty)) AS qty
+            FROM orders o JOIN order_lines ol ON ol.order_id = o.id
+            WHERE o.run_id = ANY(%s::uuid[])
+            GROUP BY o.store_id, ol.sku_id
+        """, ([str(r["id"]) for r in prior_runs],))
+        same_week_prior = {(r["store_id"], r["sku_id"]): int(r["qty"] or 0) for r in cur.fetchall()}
+        decide("duplicate_run", f"{len(prior_runs)} earlier run(s) exist for ship week {shipping_week} — "
+                                f"their {sum(same_week_prior.values()):,} units are counted as inbound; "
+                                f"this run plans only the residual need", severity="warning",
+               prior_runs=[{"id": str(r["id"]), "status": r["status"]} for r in prior_runs],
+               prior_units=sum(same_week_prior.values()))
+        log(f"Duplicate-run control: {len(prior_runs)} earlier run(s) for {shipping_week} — "
+            f"{sum(same_week_prior.values()):,}u counted as inbound")
+
     cur.execute("""SELECT al.id, al.sku_id, al.units_available, al.code_level, al.hard_good_type
                    FROM availability_lines al WHERE al.batch_id = %s ORDER BY al.sku_id, al.id""",
                 (batch_id,))
@@ -182,15 +229,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                        severity="warning", family=info["ipr_family"])
     unapproved_map = sum(1 for s in plannable if not sku_info[s]["approved"])
 
+    def usd(l):
+        """Price for $ totals: a missing price contributes nothing (never guessed)."""
+        return l["price"] if l["price"] is not None else 0.0
+
     def price(sku_id, realized=None):
         if realized:
             return realized, "realized"
         info = sku_info.get(sku_id) or {}
         if info.get("retail_price"):
             return float(info["retail_price"]), "pricebook"
-        if info.get("wholesale_price_whl"):
-            return float(info["wholesale_price_whl"]) * 2.0, "wholesale x2 (fallback)"
-        return 0.0, "missing"
+        # No retail price: never guessed (wholesale x2 removed). The line still plans on units;
+        # it is excluded from every $ total and counted in summary.incomplete_price_units.
+        return None, "missing"
 
     # Stores
     cur.execute("""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
@@ -373,7 +424,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                          "delivery size (LOW)", store_id=store_id, severity="warning")
 
         before_arrival = fc / 7.0 * days_to_arrival
-        projected = max(0.0, oh_adj + inbound - before_arrival)
+        dup = same_week_prior.get((store_id, sku_id), 0)        # duplicate-run control (§24)
+        if dup:
+            inbound_src = (f"{inbound_src} + {dup}u earlier run, same ship week" if inbound
+                           else f"{dup}u earlier run, same ship week (duplicate-run control)")
+            inbound += dup
+        projected =max(0.0, oh_adj + inbound - before_arrival)
         cover_days = projected / (fc / 7.0) if fc else 999
 
         if conf == "UNUSABLE" or store_id in edi_gap:
@@ -460,16 +516,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             status = "ELIGIBLE"
         service[k] = (status, round(conv, 3), confd)
 
-    # Approved, unexpired reactivations (§11.5, §27): DSM + Sales Director signed off; the
-    # family ships as a controlled test quantity instead of being blocked/held.
+    # Approved, unexpired reactivations (§11.3, §27): a manager-approved override that sits
+    # outside the normal autonomous flow; the family ships as a controlled test quantity.
     cur.execute("""SELECT id, store_id, ipr_family, test_units FROM ipr_reactivations
                    WHERE status = 'approved' AND expires_at >= %s""", (today,))
     react = {(r["store_id"], r["ipr_family"]): {"id": str(r["id"]), "left": int(r["test_units"])}
              for r in cur.fetchall()}
 
-    # Gate every line (§24): store status, family service status
-    ship, held = {}, {}
-    blocked_units = held_units = 0.0
+    # Gate every line (§24): store status, family 13-week result (§11.3). Autonomous — no
+    # routine approvals. Below the 60% floor the family is stopped this week; between 60% and
+    # the grade threshold it ships a grade-reduced quantity (never an identical shipment).
+    ship, held, held_kind = {}, {}, {}
+    blocked_units = stopped_units = reduced_units = 0.0
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
         if l["trays"] <= 0:
@@ -479,9 +537,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         fk = (l["store_id"], l["family"])
         g = grade[fk]
         svc, conv, confd = service[fk]
-        l.update(grade=g, service=svc, conversion=conv, conv_conf=confd, reactivation=None)
+        l.update(grade=g, service=svc, conversion=conv, conv_conf=confd, reactivation=None,
+                 trays_unreduced=l["trays"])
         if not st.get("active") or status_s in BLOCK_STATUSES:
-            held[key] = "store inactive / do-not-ship"
+            held[key], held_kind[key] = "store inactive / do-not-ship", "block"
             blocked_units += l["trays"] * l["upt"]
             continue
         if svc in ("BLOCKED", "REVIEW") and fk in react:
@@ -490,62 +549,48 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if allowed > 0:
                 r["left"] -= allowed * l["upt"]
                 l["trays"], l["reactivation"] = allowed, r["id"]
-                decide("reactivation", f"{l['family']} reactivated (approved test) — {allowed} trays "
-                                       f"within the approved test quantity", store_id=l["store_id"],
+                decide("reactivation", f"{l['family']} reactivated (approved override test) — {allowed} "
+                                       f"trays within the approved test quantity", store_id=l["store_id"],
                        sku_id=l["sku_id"], reactivation_id=r["id"], conversion=conv, grade=g)
                 ship[key] = l
                 continue
         if svc == "BLOCKED":
-            held[key] = f"{l['family']} conversion {conv:.0%} < {hard_block:.0%} after 13 wks — hard block"
-            blocked_units += l["trays"] * l["upt"]
+            held[key] = (f"{l['family']} conversion {conv:.0%} < {hard_block:.0%} after 13 wks — "
+                         f"service stopped this week (§11.3); need recalculated next week")
+            held_kind[key] = "stopped_13wk"
+            stopped_units += l["trays"] * l["upt"]
             continue
         if svc == "REVIEW":
-            band = ("AA/A operational alert — DSM must investigate" if g in ("AA", "A")
-                    else "DSM review + valid demand required" if g in ("B", "C+")
-                    else "default no service for this family")
-            held[key] = f"{l['family']} conversion {conv:.0%} below {g} threshold — {band}"
-            held_units += l["trays"] * l["upt"]
-            continue
+            pct = REVIEW_BAND_SHIP_PCT[g]
+            new_trays = max(1, int(math.floor(l["trays"] * pct)))
+            removed = l["trays"] - new_trays
+            reduced_units += removed * l["upt"]
+            decide("reduced_13wk", f"{l['family']} conversion {conv:.0%} below {g} threshold "
+                                   f"{float(conv_thr[g]):.0%} (>= {hard_block:.0%}) — ships {pct:.0%} of "
+                                   f"need: {new_trays} of {l['trays']} trays (§11.3 reduce quantity)",
+                   store_id=l["store_id"], sku_id=l["sku_id"], family=l["family"], grade=g,
+                   conversion=conv, threshold=float(conv_thr[g]), ship_pct=pct,
+                   need_trays=l["trays"], ship_trays=new_trays, upt=l["upt"])
+            l["trays"], l["reduced_13wk"] = new_trays, pct
         ship[key] = l
 
     for key, why in held.items():
         l = lines[key]
-        kind = "block" if ("hard block" in why or "inactive" in why) else "review_hold"
-        decide(kind, why, store_id=l["store_id"], sku_id=l["sku_id"],
+        decide(held_kind[key], why, store_id=l["store_id"], sku_id=l["sku_id"],
                family=l["family"], grade=l.get("grade"), conversion=l.get("conversion"),
-               proposed_trays=l["trays"], proposed_units=l["trays"] * l["upt"],
-               required_approval=("DSM + HD Sales Director" if kind == "block" and "conversion" in why
-                                  else "DSM" if kind == "review_hold" else None))
-    log(f"Gates: {len(ship):,} lines eligible · {sum(1 for w in held.values() if 'hard block' in w or 'inactive' in w):,} "
-        f"blocked · {sum(1 for w in held.values() if 'hard block' not in w and 'inactive' not in w):,} held for review")
+               proposed_trays=l["trays"], proposed_units=l["trays"] * l["upt"])
+    n_block = sum(1 for k in held_kind.values() if k == "block")
+    n_stop = sum(1 for k in held_kind.values() if k == "stopped_13wk")
+    n_reduced = sum(1 for l in ship.values() if l.get("reduced_13wk") is not None)
+    log(f"Gates: {len(ship):,} lines eligible ({n_reduced:,} reduced, 13-wk band) · {n_block:,} blocked "
+        f"(store status) · {n_stop:,} stopped (13-wk < {hard_block:.0%})")
 
-    # Deferral (§23, Josh decision 1A): a store whose eligible need is below one full shelf
-    # does not ship this week — its need is recalculated next week. Carts are never padded.
-    # Approved reactivation tests are exempt: a controlled test quantity must actually ship.
-    min_drop = float(S.get("min_drop_shelves", 0) or 0)
-    deferred = {}
-    if min_drop > 0:
-        store_shelves = defaultdict(float)
-        has_react = set()
-        for k, l in ship.items():
-            store_shelves[l["store_id"]] += l["trays"] / float(pack[l["sku_id"]]["trays_per_shelf"])
-            if l.get("reactivation"):
-                has_react.add(l["store_id"])
-        for store_id, shelves_eq in store_shelves.items():
-            if shelves_eq < min_drop and store_id not in has_react:
-                ks = [k for k in ship if k[0] == store_id]
-                units = sum(ship[k]["trays"] * ship[k]["upt"] for k in ks)
-                for k in ks:
-                    deferred[k] = ship.pop(k)
-                decide("deferral", f"Need is {shelves_eq:.2f} shelves (< {min_drop:g}) — deferred; "
-                                   f"recalculated next week, never padded (§23)",
-                       store_id=store_id, need_units=units, shelves_equivalent=round(shelves_eq, 2))
-        log(f"Deferral: {len({k[0] for k in deferred}):,} stores below {min_drop:g} shelf "
-            f"({sum(l['trays'] * l['upt'] for l in deferred.values()):,} units) — recalculated next week")
+    # No fixed minimum-drop deferral (removed for the v2 live run): every store with justified
+    # need ships its need; small orders surface as low-value carts (§19.1), never padded.
 
     # ══ 6. ALLOCATE AVAILABILITY (§12, §13, §15) — only after need exists ═══
     if ship:
-        inc = _norm({k: l["trays"] * l["upt"] * l["price"] for k, l in ship.items()})
+        inc = _norm({k: l["trays"] * l["upt"] * usd(l) for k, l in ship.items()})
         fv = _norm({k: fam_vel[(l["store_id"], l["family"])] for k, l in ship.items()})
         rec = {k: min(1.0, ((anchor - fam_lastdel[(l["store_id"], l["family"])]).days / 84.0)
                       if fam_lastdel[(l["store_id"], l["family"])] else 1.0) for k, l in ship.items()}
@@ -566,6 +611,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     for k, l in ship.items():
         by_sku[l["sku_id"]].append(l)
     unfilled = defaultdict(float)        # sku -> units of need not covered by supply
+    sku_left = {}                        # sku -> supply left after priority allocation
     alloc_units_total = 0
     for sku_id, lst in by_sku.items():
         remaining = supply.get(sku_id, 0)
@@ -586,10 +632,70 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    f"Need {want:,}u vs supply {supply.get(sku_id, 0):,}u — {int(unfilled[sku_id]):,}u unfilled; "
                    f"allocated by store priority (§12)", sku_id=sku_id,
                    need_units=want, supply_units=supply.get(sku_id, 0), unfilled_units=int(unfilled[sku_id]))
+        sku_left[sku_id] = remaining
+
+    # ══ 6b. ORDER-GAP FILLING (§21, simple form) — after allocation, priority order unchanged ══
+    # Where a store x family has unfilled need, give extra trays to OTHER SKUs in the same
+    # store x family that have positive own need (passed every gate) and supply left, ranked by
+    # that store's forecast. Guards: the store x family total never exceeds the family's eligible
+    # need; a substitute gets at most its own need again (selling-window guard); H2O/Terrarium
+    # (§17 tray caps), approved test quantities and unreliable-inventory lines are not used.
+    fam_lines = defaultdict(list)
+    for l in ship.values():
+        fam_lines[(l["store_id"], l["family"])].append(l)
+    gaps = []
+    for fk, fl in fam_lines.items():
+        short = [l for l in fl if l.get("short_units")]
+        if short and fk[1] not in H2O_TERR_FAMILIES:
+            gaps.append((-max(l["priority"] for l in short), fk))
+    gap_fill_units = gap_fill_trays = 0
+    gap_fills = 0
+    for _p, fk in sorted(gaps):
+        fl = fam_lines[fk]
+        fam_need = sum(l["trays"] * l["upt"] for l in fl)
+        fam_alloc = sum(l["alloc_units"] for l in fl)
+        short = sorted((l for l in fl if l.get("short_units")), key=lambda x: (-x["short_units"], x["sku_id"]))
+        cands = sorted((l for l in fl if not l.get("short_units") and not l.get("reactivation")
+                        and l["conf"] != "UNUSABLE" and l["need"] > 0 and sku_left.get(l["sku_id"], 0) > 0),
+                       key=lambda x: (-x["fc"], x["sku_id"]))
+        for c in cands:
+            if fam_need - fam_alloc < c["upt"]:
+                continue
+            add = min(c["trays"] - c.get("gap_fill_trays", 0),           # selling-window guard
+                      sku_left[c["sku_id"]] // c["upt"],
+                      (fam_need - fam_alloc) // c["upt"])
+            if add <= 0:
+                continue
+            u = add * c["upt"]
+            c["alloc_trays"] += add
+            c["alloc_units"] += u
+            c["gap_fill_trays"] = c.get("gap_fill_trays", 0) + add
+            sku_left[c["sku_id"]] -= u
+            fam_alloc += u
+            gap_fill_units += u
+            gap_fill_trays += add
+            gap_fills += 1
+            orig = short[0]
+            decide("gap_fill", f"{fk[1]}: {orig['short_units']}u of {orig['sku_id']} unavailable — "
+                               f"+{add} trays ({u}u) of {c['sku_id']} (forecast {c['fc']:.1f}/wk, own need "
+                               f"{c['trays']} trays); family total stays within need (§21)",
+                   store_id=fk[0], sku_id=c["sku_id"], family=fk[1], original_sku=orig["sku_id"],
+                   original_skus=[l["sku_id"] for l in short], substitute_sku=c["sku_id"], trays=add,
+                   units=u, substitute_forecast_wk=round(c["fc"], 2), family_need_units=fam_need,
+                   family_alloc_units=fam_alloc,
+                   basis="proven SKU in the same store x family with positive own need and supply left")
+    alloc_units_total += gap_fill_units
+    if gaps:
+        log(f"Gap fill: {gap_fills:,} fills · {gap_fill_trays:,} trays · {gap_fill_units:,}u across "
+            f"{len(gaps):,} short store x families")
 
     # ══ 7. TRAYS -> CART-LOADING PLAN (§17–19): physical fit only ═══════════
+    # §19.1 cart economics — editable assumptions, not rules: delivered cart cost is roughly
+    # $180–$300 (default $240); normal wholesale value per cart is roughly $1,700–$3,000.
+    cart_cost = float(S.get("cart_delivered_cost", 240) or 240)
+    low_value_wh = float(S.get("cart_wholesale_low", 1700) or 1700)
+    consolidate = str(S.get("cart_consolidate", True)).lower() not in ("false", "0", "no")
     orders = {}
-    store_kit = defaultdict(lambda: defaultdict(int))
     for l in ship.values():
         if l.get("alloc_trays", 0) <= 0:
             continue
@@ -610,7 +716,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 while left > 0:
                     take = min(left, room)
                     units = take * l["upt"]
-                    kit = determine_kit_type(l["sku_id"], units, store_kit[store_id], avail_meta)
+                    kit = None                      # assigned network-wide after release/defer
                     cur_items.append((l["sku_id"], take, units, kit, pid))
                     left -= take
                     room -= take
@@ -622,19 +728,26 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # pack shelves into carts, tallest first; first-fit within 5 shelves / 95in / profile max
         shelves.sort(key=lambda s: (PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
         carts = []
+        if consolidate:
+            # §19.1 consolidate within the store: best-fit decreasing by shelf height — each shelf
+            # goes to the open cart it fills most tightly (least height left), same physical
+            # limits (5 shelves / ceiling / profile max). Shelves and trays are never dropped or
+            # added; same-profile partial trays are already merged onto one shelf above.
+            shelves.sort(key=lambda s: (-float(pack[s[1][0][0]]["clear_height_in"] or MIN_SHELF_CLEAR_IN),
+                                        PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
         for pid, items in shelves:
             h = float(pack[items[0][0]]["clear_height_in"] or MIN_SHELF_CLEAR_IN)
             pmax = int(pack[items[0][0]]["max_shelves"] or CART_SHELVES)
-            placed = False
-            for c in carts:
-                if (len(c["shelves"]) < CART_SHELVES and c["height"] + h <= CART_CEILING_IN
-                        and c["prof_ct"][pid] < pmax):
-                    c["shelves"].append((pid, items))
-                    c["height"] += h
-                    c["prof_ct"][pid] += 1
-                    placed = True
-                    break
-            if not placed:
+            fits = [c for c in carts
+                    if (len(c["shelves"]) < CART_SHELVES and c["height"] + h <= CART_CEILING_IN
+                        and c["prof_ct"][pid] < pmax)]
+            if fits:
+                c = (min(fits, key=lambda c: (CART_CEILING_IN - c["height"] - h, len(c["shelves"])))
+                     if consolidate else fits[0])
+                c["shelves"].append((pid, items))
+                c["height"] += h
+                c["prof_ct"][pid] += 1
+            else:
                 carts.append({"shelves": [(pid, items)], "height": h, "prof_ct": defaultdict(int, {pid: 1})})
         out = []
         for ci, c in enumerate(carts, 1):
@@ -643,9 +756,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             for pos, (pid, items) in enumerate(ordered, 1):
                 for (sku_id, trays, units, kit, p) in items:
                     contents.append((pos, sku_id, trays, units, kit, p))
+            # §19.1 cart economics: wholesale value = units x SKU wholesale price (skus.wholesale_price_whl)
+            wh_missing = sorted({x[1] for x in contents if not (sku_info[x[1]].get("wholesale_price_whl") or 0)})
+            wh_value = sum(x[3] * float(sku_info[x[1]].get("wholesale_price_whl") or 0) for x in contents)
+            freight_pct = (cart_cost / wh_value) if wh_value else None
+            low_value = wh_value < low_value_wh
             out.append({"cart_number": ci, "cart_type_id": "cc", "shelves_used": len(ordered),
                         "total_units": sum(x[3] for x in contents), "contents": contents,
-                        "is_full": len(ordered) >= CART_SHELVES, "is_flagged": False})
+                        "is_full": len(ordered) >= CART_SHELVES, "is_flagged": False,
+                        "wholesale_value": round(wh_value, 2), "wholesale_incomplete": wh_missing,
+                        "delivered_cost": cart_cost,
+                        "freight_pct": None if freight_pct is None else round(freight_pct, 4),
+                        "low_value": low_value})
         grade_framework = {"AA": 3, "A": 3, "B": 2, "C+": 2, "C": 1, "C-": 1, "D": 1}
         top_grade = min((l["grade"] for l in olines), key=GRADE_ORDER.index)
         if len(out) > grade_framework[top_grade]:
@@ -653,6 +775,102 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                              f"for best family grade {top_grade}) — demand-driven, shipped (cart caps off)",
                    store_id=store_id, severity="info", carts=len(out))
         orders[store_id] = {"lines": olines, "carts": out}
+
+    # §19.1 low-value order decision (economic, not a size floor; §23 deferral), judged on each
+    # store's WHOLE order: W = order wholesale, n = carts, C = n x cart_delivered_cost. RELEASE
+    # the order when W/n >= cart_wholesale_low, or one more week of waiting would lose at least
+    # C in retail sales — lost = Σ min(fc, max(0, fc − projected stock at arrival)) × price over
+    # its lines — or any line is Critical risk. Otherwise DEFER the whole order (no partial-store
+    # deferral): need is recalculated next week, never padded. No cross-store consolidation.
+    econ = {"released_low_value": 0, "stores_released_low_value": 0, "deferred_carts": 0,
+            "deferred_units": 0, "deferred_wholesale": 0.0, "deferred_retail_one_week_at_risk": 0.0,
+            "deferred_single_cart": 0, "deferred_multi_cart": 0}
+    deferred_stores = []
+    for store_id in sorted(orders):
+        o = orders[store_id]
+        n = len(o["carts"])
+        W = sum(c["wholesale_value"] for c in o["carts"])
+        C = n * cart_cost
+        if n and W / n >= low_value_wh:
+            continue
+        lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
+        critical = sorted(l["sku_id"] for l in o["lines"] if l["risk"] == "Critical")
+        fp = (C / W) if W else None
+        nums = (f"order wholesale ${W:,.0f} on {n} cart(s) (${W / n:,.0f}/cart < ${low_value_wh:,.0f}); "
+                f"delivered cost ${C:,.0f} (freight {'n/a' if fp is None else f'{fp:.0%}'}); "
+                f"one-week lost sales if it waits ${lost:,.0f}")
+        data = dict(order_wholesale=round(W, 2), carts=n, delivered_cost=C,
+                    freight_pct=None if fp is None else round(fp, 4), lost_sales_one_week=round(lost, 2),
+                    margin_proxy_wholesale=round(W, 2), critical_skus=critical,
+                    units=sum(l["alloc_units"] for l in o["lines"]),
+                    wholesale_missing_skus=sorted({x for c in o["carts"] for x in c["wholesale_incomplete"]}))
+        if lost >= C or critical:
+            why = ("Critical-risk line(s) " + ", ".join(critical)) if critical else                   f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}"
+            decide("low_value_cart", f"Order RELEASED: {nums} — {why} (§19.1)", store_id=store_id,
+                   severity="warning", action="release", **data)
+            for c in o["carts"]:
+                c["econ_action"] = "release"
+            econ["released_low_value"] += n
+            econ["stores_released_low_value"] += 1
+            continue
+        decide("deferred_economics", f"Order DEFERRED: {nums} < delivered cost — waiting a week costs "
+                                     f"less than delivering now; need recalculated next week, never "
+                                     f"padded (§19.1, §23)", store_id=store_id, action="defer", **data)
+        econ["deferred_carts"] += n
+        econ["deferred_units"] += data["units"]
+        econ["deferred_wholesale"] += W
+        econ["deferred_retail_one_week_at_risk"] += lost
+        econ["deferred_single_cart" if n == 1 else "deferred_multi_cart"] += 1
+        alloc_units_total -= data["units"]
+        for l in o["lines"]:
+            l["deferred_units"] = l["alloc_units"]
+            l["alloc_units"], l["alloc_trays"] = 0, 0
+        deferred_stores.append(store_id)
+        del orders[store_id]
+    log(f"Cart economics: {econ['released_low_value']:,} low-value carts released (whole orders) · {econ['deferred_carts']:,} "
+        f"deferred ({econ['deferred_units']:,}u, ${econ['deferred_wholesale']:,.0f} wholesale) · "
+        f"{len(deferred_stores):,} stores fully deferred")
+
+    # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
+    # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
+    # jute. Kit options per SKU come from every availability line: a grower-pot (1M) line can be
+    # kitted either way; finished 3M kits only as the kit types actually available. When both
+    # are possible each shelf item goes to the side behind the target share
+    # (kit_split_ceramic_share, default 0.5); exact ties alternate. Done after release/defer so
+    # deferred orders do not skew the split of what ships. Units and trays are unchanged.
+    _cs = S.get("kit_split_ceramic_share")
+    cer_share = 0.5 if _cs is None else float(_cs)
+    kit_opts = defaultdict(set)
+    for r in avail_rows:
+        if (r["code_level"] or "3M") != "3M":
+            kit_opts[r["sku_id"]] |= {"jute_kit", "ceramic_kit"}
+        elif r["hard_good_type"] in ("jute_kit", "ceramic_kit"):
+            kit_opts[r["sku_id"]].add(r["hard_good_type"])
+    kit_units = defaultdict(lambda: {"jute_kit": 0, "ceramic_kit": 0})
+    kit_tie = defaultdict(bool)
+    for store_id in sorted(orders):
+        for c in orders[store_id]["carts"]:
+            new = []
+            for (pos, sku_id, trays, units, _k, pid) in c["contents"]:
+                opts = kit_opts.get(sku_id, set())
+                if len(opts) == 2:
+                    t = kit_units[sku_id]
+                    after = t["jute_kit"] + t["ceramic_kit"] + units
+                    dev_c = abs(t["ceramic_kit"] + units - cer_share * after)
+                    dev_j = abs(t["ceramic_kit"] - cer_share * after)
+                    if dev_c == dev_j:
+                        kit = "ceramic_kit" if kit_tie[sku_id] else "jute_kit"
+                        kit_tie[sku_id] = not kit_tie[sku_id]
+                    else:
+                        kit = "ceramic_kit" if dev_c < dev_j else "jute_kit"
+                    t[kit] += units
+                elif len(opts) == 1:
+                    kit = next(iter(opts))
+                    kit_units[sku_id][kit] += units
+                else:
+                    kit = avail_meta.get(sku_id, {}).get("hard_good_type", "ceramic_kit")
+                new.append((pos, sku_id, trays, units, kit, pid))
+            c["contents"] = new
 
     # ══ 8. REVIEW (§24–25) + $900K OBJECTIVE (§2) + ALLOCATION OUTPUTS (§15) ══
     review = {}
@@ -677,16 +895,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     base_units_rev = with_rev = demand_rev = 0.0
     for l in lines.values():
         wk_dem = l["fc"]
-        demand_rev += wk_dem * l["price"]
+        demand_rev += wk_dem * usd(l)
         base = min(wk_dem, l["projected"])
         add = ship.get((l["store_id"], l["sku_id"]), {}).get("alloc_units", 0)
-        base_units_rev += base * l["price"]
-        with_rev += min(wk_dem, l["projected"] + add) * l["price"]
+        base_units_rev += base * usd(l)
+        with_rev += min(wk_dem, l["projected"] + add) * usd(l)
     incr_rev = with_rev - base_units_rev
-    lost_unavail = sum(l.get("short_units", 0) * l["price"] for l in ship.values()) / cover_wk
-    lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * lines[k]["price"] for k in held) / cover_wk
-    lost_deferred = sum(l["trays"] * l["upt"] * l["price"] for l in deferred.values()) / cover_wk
-    edi_risk = sum(l["fc"] * l["price"] for l in lines.values() if l["store_id"] in edi_gap)
+    lost_unavail = sum(l.get("short_units", 0) * usd(l) for l in ship.values()) / cover_wk
+    lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * usd(lines[k]) for k in held) / cover_wk
+    edi_risk = sum(l["fc"] * usd(l) for l in lines.values() if l["store_id"] in edi_gap)
+    all_carts = [c for o in orders.values() for c in o["carts"]]
+    tot_wh = sum(c["wholesale_value"] for c in all_carts)
     price_srcs = defaultdict(int)
     for l in ship.values():
         price_srcs[l["price_src"]] += l.get("alloc_units", 0)
@@ -703,32 +922,67 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "unconstrained_weekly_demand_retail": round(demand_rev),
             "lost_unavailable_inventory": round(lost_unavail),
             "lost_blocks_and_holds": round(lost_held),
-            "lost_deferrals": round(lost_deferred),
+            "lost_deferrals_one_week": round(econ["deferred_retail_one_week_at_risk"]),
             "edi_uncertainty_at_risk": round(edi_risk),
             "price_basis_units": dict(price_srcs),
             "method_note": ("Arrival-week retail across every store x SKU with velocity: "
                             "min(weekly forecast, projected stock) x price. Prices are realized "
-                            "(DTS dollars) where loaded, else pricebook retail."),
+                            "(DTS dollars) where loaded, else pricebook retail. SKUs with no "
+                            "price are never guessed: they ship on units and are excluded from $."),
+        },
+        "incomplete_price_units": int(price_srcs.get("missing", 0)),
+        "gap_fill": {"fills": gap_fills, "trays": gap_fill_trays, "units": gap_fill_units,
+                     "short_store_families": len(gaps)},
+        "cart_economics": {
+            "carts": len(all_carts),
+            "wholesale_value": round(tot_wh, 2),
+            "delivered_cost": round(cart_cost * len(all_carts), 2),
+            "freight_pct": round(cart_cost * len(all_carts) / tot_wh, 4) if tot_wh else None,
+            "avg_wholesale_per_cart": round(tot_wh / len(all_carts), 2) if all_carts else None,
+            "low_value_carts": sum(1 for c in all_carts if c["low_value"]),
+            "carts_released_low_value": econ["released_low_value"],
+            "carts_deferred": econ["deferred_carts"],
+            "stores_released_low_value": econ["stores_released_low_value"],
+            "stores_deferred_single_cart": econ["deferred_single_cart"],
+            "stores_deferred_multi_cart": econ["deferred_multi_cart"],
+            "deferred_units": econ["deferred_units"],
+            "deferred_wholesale": round(econ["deferred_wholesale"], 2),
+            "deferred_retail_one_week_at_risk": round(econ["deferred_retail_one_week_at_risk"], 2),
+            "stores_deferred": len(deferred_stores),
+            "avg_freight_pct_released": (round(sum(c["freight_pct"] for c in all_carts if c["freight_pct"])
+                                               / max(1, sum(1 for c in all_carts if c["freight_pct"])), 4)
+                                         if all_carts else None),
+            "carts_missing_wholesale_price": sum(1 for c in all_carts if c["wholesale_incomplete"]),
+            "assumptions": {"cart_delivered_cost": cart_cost, "delivered_cart_cost_range": [180, 300],
+                            "cart_wholesale_low": low_value_wh,
+                            "normal_wholesale_range": [1700, 3000],
+                            "note": "editable assumptions (§19.1); judged per store order: released when wholesale/cart "
+                                    ">= cart_wholesale_low, one week of lost sales >= carts x cart cost, or a "
+                                    "line is Critical; else the whole order is deferred; never padded"},
         },
         "allocation": {
             "available_units": total_supply,
-            "unconstrained_need_units": int(sum(l["trays"] * l["upt"] for l in lines.values())),
+            "unconstrained_need_units": int(sum(l.get("trays_unreduced", l["trays"]) * l["upt"]
+                                                for l in lines.values())),
             "eligible_need_units": int(sum(l["trays"] * l["upt"] for l in ship.values())),
             "allocated_units": int(alloc_units_total),
             "unfilled_demand_units": int(sum(unfilled.values())),
             "unallocated_supply_units": int(total_supply - alloc_units_total),
-            "blocked_units": int(blocked_units), "review_held_units": int(held_units),
-            "deferred_units": int(sum(l["trays"] * l["upt"] for l in deferred.values())),
+            "blocked_units": int(blocked_units), "stopped_13wk_units": int(stopped_units),
+            "reduced_13wk_units_removed": int(reduced_units), "review_held_units": 0,
         },
         "counts": {
+            "stores_deferred_economics": len(deferred_stores),
+            "carts_deferred_economics": econ["deferred_carts"],
             "stores_with_velocity": len({l["store_id"] for l in lines.values()}),
             "stores_shipped": len(orders),
             "carts": sum(len(o["carts"]) for o in orders.values()),
             "lines_shipped": sum(len(o["lines"]) for o in orders.values()),
-            "lines_blocked": sum(1 for w in held.values() if "hard block" in w or "inactive" in w),
-            "lines_review_held": sum(1 for w in held.values() if "hard block" not in w and "inactive" not in w),
+            "lines_blocked": n_block,
+            "lines_stopped_13wk": n_stop,
+            "lines_reduced_13wk": n_reduced,
+            "lines_review_held": 0,                 # no routine holds in v2 (§1, §24)
             "stores_edi_gap": len(edi_gap),
-            "stores_deferred": len({k[0] for k in deferred}),
             "lines_reactivated": sum(1 for l in ship.values() if l.get("reactivation")),
             "review_pass": sum(1 for v in review.values() if v[0] == "PASS"),
             "review_warning": sum(1 for v in review.values() if v[0] == "WARNING"),
@@ -743,10 +997,34 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         },
         "not_yet_implemented": [
             "§14 seasonal/ad 13-week protection (needs event records: target in-store date, eligible stores)",
-            "§26 DSM portal (two-step reactivation approvals ARE live via /api/ipr/reactivations)",
+            "§26 DSM information portal (manager-override reactivations are read via ipr_reactivations)",
             "§29 post-delivery measurement, §30 back-testing harness",
             "§25 LLM reviewer (deterministic reviewer runs now; the AI /audit endpoint can layer on)",
         ],
+    }
+    # §28 autonomous order statuses — this run's progress through the pre-export stages.
+    # Hard-rule failures raise before this point (Incomplete Mandatory Data / duplicate run),
+    # so reaching here means each stage below completed.
+    n_val = Counter(dd.get("severity") for (k, _s, _k, _r, dd) in decisions if k == "validation")
+    n_warn = sum(1 for v in review.values() if v[0] == "WARNING")
+    stages = [
+        ("Input Received", f"batch {batch_id}: {len(avail_rows):,} availability lines, sales to {anchor}"),
+        ("Data Validated", f"{n_val.get('block', 0)} SKU exclusions, {n_val.get('warning', 0)} warnings"),
+        ("Demand Calculated", f"{len(lines):,} store x SKU lines with velocity; "
+                              f"{summary['allocation']['unconstrained_need_units']:,}u need"),
+        ("Inventory Allocated", f"{int(alloc_units_total):,}u allocated ({gap_fill_units:,}u gap fill); "
+                                f"{int(sum(unfilled.values())):,}u unfilled"),
+        ("Cart Built", f"{len(all_carts):,} carts for {len(orders):,} stores; "
+                       f"{econ['released_low_value']:,} low-value released, {econ['deferred_carts']:,} deferred"),
+        ("Independent AI Review", f"deterministic reviewer: {len(review) - n_warn:,} PASS, {n_warn:,} WARNING "
+                                  f"(LLM reviewer not yet implemented)"),
+        ("Final Validated", "routine final validation by the agent (§28); no manual approval"
+                            if orders else "nothing to ship this week"),
+    ]
+    summary["pipeline_status"] = {
+        "current": stages[-1][0],
+        "stages": [{"stage": n, "status": "complete", "detail": dt} for n, dt in stages],
+        "next": ["Aster Exported", "Released", "Shipped"],
     }
     o = summary["objective"]
     log(f"\nObjective: baseline ${o['baseline_weekly_retail']:,} + incremental ${o['incremental_weekly_retail']:,} "
@@ -757,12 +1035,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"unallocated supply {a['unallocated_supply_units']:,}u (acceptable, §15)")
     c = summary["counts"]
     log(f"Plan: {c['stores_shipped']} stores · {c['carts']} carts · {c['lines_shipped']} lines · "
-        f"blocked {c['lines_blocked']} · held {c['lines_review_held']} · review PASS {c['review_pass']} / "
+        f"blocked {c['lines_blocked']} · stopped {c['lines_stopped_13wk']} · reduced {c['lines_reduced_13wk']} · review PASS {c['review_pass']} / "
         f"WARNING {c['review_warning']}")
 
     if preview:
         log("\nPREVIEW — nothing written.")
-        return {"summary": summary, "orders": orders, "lines": lines, "held": held}
+        return {"summary": summary, "orders": orders, "lines": lines, "held": held, "decisions": decisions}
 
     # ══ WRITE (same tables as legacy, so downstream tools work unchanged) ═══
     total_carts = summary["counts"]["carts"]
@@ -771,11 +1049,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             (batch_id, shipping_week, stores_scored, stores_served, total_carts, total_units,
              inventory_clearance, status, sales_cutoff_date, engine_version, pipeline_status,
              ipr_summary, notes)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,'Reviewed',%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s)
         RETURNING id
     """, (batch_id, shipping_week, summary["counts"]["stores_with_velocity"], len(orders), total_carts,
           int(alloc_units_total), round(alloc_units_total / total_supply * 100, 2) if total_supply else 0,
-          anchor, ENGINE_VERSION, json.dumps(summary, default=str),
+          anchor, ENGINE_VERSION, summary["pipeline_status"]["current"], json.dumps(summary, default=str),
           "IPR v2 demand-first run (spec 2026-11-17)"))
     run_id = str(cur.fetchone()["id"])
 
@@ -937,7 +1215,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                risk=l["risk"], need_units=round(l["need"], 1), need_trays=l["trays"],
                alloc_trays=l["alloc_trays"], upt=l["upt"], cap_note=l["cap_note"],
                conversion=l["conversion"], priority=round(l["priority"], 4), sku_fit=round(l["sku_fit"], 4),
-               price=round(l["price"], 2), price_src=l["price_src"])
+               price=None if l["price"] is None else round(l["price"], 2), price_src=l["price_src"])
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO run_decisions (id, run_id, decision_type, store_id, sku_id, reason, data, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,now())
