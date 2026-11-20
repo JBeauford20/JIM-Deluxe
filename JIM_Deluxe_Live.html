@@ -4163,7 +4163,7 @@ function xRenderResults(){
     '<table class="xdata"><tbody>'+rows.filter(function(r){return r[1]!=null;}).map(function(r){return '<tr'+(r[2]?' class="tot"':'')+'><td>'+escH(r[0])+'</td><td class="r">'+xN(r[1])+'</td></tr>';}).join('')+'</tbody></table></div>';
   var lost=[['lost_unavailable_inventory','No inventory','store need with no supply this week'],['lost_blocks_and_holds','Blocks and holds','lines not shipped after review'],
     ['lost_stopped_13wk','Stopped at 13 weeks','below the 13-week bar'],['lost_deferrals','Deferrals','need under one shelf, retried next week'],['lost_deferrals_one_week','Light carts waiting a week','one week of sales at deferred stores'],['lost_low_value','Low-value carts','held back for cart economics']];
-  h+='<div class="xpanel"><div class="xph"><h2>Sales we are leaving behind</h2><span class="sub">Per week, at retail (Sec 2).</span></div><div class="xlost">'+
+  h+='<div class="xpanel"><div class="xph"><h2>Sales we are leaving behind</h2><span class="sub">Per week, at wholesale.</span></div><div class="xlost">'+
     lost.filter(function(l){return o[l[0]]!=null;}).map(function(l){return '<div class="xlc"><b>'+xUsd(o[l[0]])+'</b>'+escH(l[1])+' <span class="xwhy">&middot; '+escH(l[2])+'</span></div>';}).join('')+
     (o.edi_uncertainty_at_risk!=null?'<div class="xlc n"><b>'+xUsd(o.edi_uncertainty_at_risk)+' at risk</b>Missing EDI at '+xN(c.stores_edi_gap)+' stores <span class="xwhy">&middot; demand held at baseline, not zeroed</span></div>':'')+
     '</div></div></div>';
