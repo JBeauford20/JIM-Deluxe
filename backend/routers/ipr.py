@@ -1,4 +1,4 @@
-"""IPR v2 read API — the run's §2 objective readout, §15 allocation outputs, and the
+﻿"""IPR v2 read API — the run's §2 objective readout, §15 allocation outputs, and the
 §25 evidence trail (run_decisions) behind every shipped line, block, and hold."""
 from datetime import date, timedelta
 
@@ -19,7 +19,7 @@ DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", 
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
 # role (Josh), but one person can never sign both steps. 'manager' joined the director step
-# 2026-11-20: all approvals run through the IPR Manager/Approver (Mike Underwood).
+# 2026-11-20: all approvals run through the IPR Manager/Approver (Mark Underwood).
 DSM_ROLES = ("dsm", "admin")
 DIRECTOR_ROLES = ("sales_director", "manager", "admin")
 
