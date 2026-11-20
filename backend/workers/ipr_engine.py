@@ -198,21 +198,47 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    FROM stores ORDER BY store_id""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
 
+    # Freshness window by family (§4.5, Josh's dump cycle 2026-11-19): ipr_settings
+    # freshness_days_by_family {family: days, "_default": 90} + freshness_days_by_sku overrides.
+    # A family missing from the map gets the default and a validation flag. Without the map
+    # the legacy single freshness_weeks applies to every SKU.
+    fmap = S.get("freshness_days_by_family") or {}
+    fsku = {int(k): int(v) for k, v in (S.get("freshness_days_by_sku") or {}).items()}
+    fdefault = int(fmap.get("_default", 90)) if fmap else fresh_days
+    fresh_of, fresh_unmapped = {}, defaultdict(int)
+    for sku_id, info in sku_info.items():
+        fam = info["ipr_family"] or "Unmapped"
+        if sku_id in fsku:
+            fresh_of[sku_id] = fsku[sku_id]
+        elif fam in fmap:
+            fresh_of[sku_id] = int(fmap[fam])
+        else:
+            fresh_of[sku_id] = fdefault
+            if fmap:
+                fresh_unmapped[fam] += 1
+    for fam, n in sorted(fresh_unmapped.items()):
+        decide("validation", f"No freshness window for family '{fam}' — using {fdefault} days",
+               severity="warning", family=fam, skus=n)
+    fresh_max = max([fresh_days, *fresh_of.values()])
+    fresh_arr = (list(fresh_of), [fresh_of[k] for k in fresh_of])
+
     # ══ 2. WHAT CAN THE STORE SELL? (§7) ═════════════════════════════════
     d = lambda n: anchor - timedelta(days=n)
     cur.execute("""
-        SELECT store_id, sku_id,
+        WITH fw AS (SELECT * FROM unnest(%s::bigint[], %s::int[]) AS t(sku_id, days))
+        SELECT s.store_id, s.sku_id,
                SUM(units_sold) FILTER (WHERE sale_date > %s)  AS w2,
                SUM(units_sold) FILTER (WHERE sale_date > %s)  AS w4,
-               SUM(units_sold) FILTER (WHERE sale_date > %s)  AS w8,
+               SUM(units_sold) FILTER (WHERE sale_date > %s::date - COALESCE(fw.days, %s)) AS w8,
                SUM(units_sold) FILTER (WHERE sale_date > %s)  AS w10,
                SUM(units_sold) FILTER (WHERE sale_date > %s)  AS w13,
                SUM(dollars)    FILTER (WHERE sale_date > %s)  AS d13,
                SUM(units_sold) FILTER (WHERE sale_date > %s AND dollars IS NOT NULL) AS w13d
-        FROM sales
+        FROM sales s LEFT JOIN fw ON fw.sku_id = s.sku_id
         WHERE sale_date > %s AND sale_date <= %s
-        GROUP BY store_id, sku_id
-    """, (d(14), d(28), d(fresh_days), d(70), d(91), d(91), d(91), d(max(91, fresh_days)), anchor))
+        GROUP BY s.store_id, s.sku_id
+    """, (*fresh_arr, d(14), d(28), anchor, fresh_days, d(70), d(91), d(91), d(91),
+          d(max(91, fresh_max)), anchor))
     sales = {}
     store_recent, store_older = defaultdict(int), defaultdict(int)
     for r in cur.fetchall():
@@ -230,15 +256,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     # Deliveries: last delivery, avg size, conversion cohort, on-hand estimate inputs
     cur.execute("""
-        SELECT store_id, sku_id,
-               MAX(delivery_date) AS last_del,
+        WITH fw AS (SELECT * FROM unnest(%s::bigint[], %s::int[]) AS t(sku_id, days))
+        SELECT dl.store_id, dl.sku_id,
+               MAX(delivery_date) FILTER (WHERE delivery_date > %s) AS last_del,
                SUM(units_delivered) FILTER (WHERE delivery_date > %s AND delivery_date <= %s) AS cohort,
-               SUM(units_delivered) FILTER (WHERE delivery_date > %s) AS recent8,
-               SUM(units_delivered) AS d26, COUNT(DISTINCT delivery_date) AS n_del
-        FROM deliveries
+               SUM(units_delivered) FILTER (WHERE delivery_date > %s::date - COALESCE(fw.days, %s)) AS recent8,
+               SUM(units_delivered) FILTER (WHERE delivery_date > %s) AS d26,
+               COUNT(DISTINCT delivery_date) FILTER (WHERE delivery_date > %s) AS n_del
+        FROM deliveries dl LEFT JOIN fw ON fw.sku_id = dl.sku_id
         WHERE delivery_date > %s
-        GROUP BY store_id, sku_id
-    """, (d(91 + lag_days), d(lag_days), d(fresh_days), d(182)))
+        GROUP BY dl.store_id, dl.sku_id
+    """, (*fresh_arr, d(182), d(91 + lag_days), d(lag_days), anchor, fresh_days, d(182), d(182),
+          d(max(182, fresh_max))))
     dels = {(r["store_id"], r["sku_id"]): dict(r) for r in cur.fetchall()}
 
     # On-hand: DTS snapshot (MEDIUM) when fresh, else deliveries−sales estimate (LOW)
@@ -250,10 +279,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     """, (d(14),))
     snap = {(r["store_id"], r["sku_id"]): r for r in cur.fetchall()}
 
-    # Inbound (§8: in-transit is supply, not a block): exported prior-run quantities for
-    # stores the manifest shows arriving after the sales anchor.
+    # Inbound (§8: in-transit is supply, not a block), in order of trust:
+    #   1. loaded in-transit lines (backend/ingest/load_in_transit_lines.py: what actually
+    #      shipped, store x SKU) arriving after the sales anchor;
+    #   2. exported prior-run quantities (only for ship weeks with no loaded lines);
+    #   3. manifest fallback — store has a manifest delivery after the anchor but no loaded
+    #      lines: avg delivery size, flagged LOW.
     cur.execute("SELECT DISTINCT store_id FROM delivery_manifest WHERE delivery_date > %s", (anchor,))
     in_transit_stores = {r["store_id"] for r in cur.fetchall()}
+    it_lines, it_weeks = IN_TRANSIT_SOURCE(cur, anchor)   # (store, sku) -> (medium u, low u, methods)
+    it_stores = {s for s, _ in it_lines}
+    it_low = float(S.get("in_transit_low_factor", 0.5))      # LOW lines (pooled guesses) count at 50%
     cur.execute("""
         SELECT o.store_id, ol.sku_id,
                SUM(COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty)) AS qty
@@ -262,9 +298,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         JOIN order_lines ol ON ol.order_id = o.id
         WHERE r.status IN ('exported','finalized','approved')
           AND r.shipping_week > %s AND r.shipping_week < %s
+          AND NOT (r.shipping_week = ANY(%s::date[]))
         GROUP BY o.store_id, ol.sku_id
-    """, (anchor - timedelta(days=7), shipping_week))
+    """, (anchor - timedelta(days=7), shipping_week, sorted(it_weeks)))
     inbound_known = {(r["store_id"], r["sku_id"]): int(r["qty"] or 0) for r in cur.fetchall()}
+    manifest_est_stores = set()
+    log(f"Inbound after {anchor}: loaded in-transit {sum(m + lo for m, lo, _ in it_lines.values()):,.0f}u "
+        f"({sum(lo for _, lo, _ in it_lines.values()):,.0f}u LOW at {it_low:.0%}) "
+        f"at {len(it_stores)} stores (weeks {', '.join(str(w) for w in sorted(it_weeks)) or 'none'}) · "
+        f"manifest stores without loaded lines: {len(in_transit_stores - it_stores)}")
 
     # ══ 3+4. PROJECTED INVENTORY AT ARRIVAL + UNCONSTRAINED NEED (§8–10) ════
     lines = {}               # (store, sku) -> evaluation record
@@ -305,15 +347,30 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             conf, oh_src = "LOW", (f"min(DTS {rep:.0f}u, fresh {fresh_est:.0f}u) — "
                                    f"DTS dumps batch-recorded, freshness-capped")
         else:
-            oh, conf, oh_src = fresh_est, "LOW", f"estimate: {fresh_wk}-wk deliveries − sales"
+            oh, conf, oh_src = fresh_est, "LOW", (f"estimate: {fresh_of.get(sku_id, fresh_days)}-day "
+                                                  f"deliveries − sales")
         # the freshness cap is already the conservative bound — no second haircut on top
         oh_adj = 0.0 if conf == "UNUSABLE" else max(0.0, oh) * (
             1.0 if sn is not None else float(conf_factor[conf]))
 
-        inbound, inbound_src = inbound_known.get((store_id, sku_id), 0), "prior exported run"
-        if not inbound and store_id in in_transit_stores and dv.get("n_del"):
-            inbound = round(float(dv.get("d26") or 0) / max(1, int(dv["n_del"])))
-            inbound_src = "in transit (manifest) — qty estimated from avg delivery"
+        if store_id in it_stores:
+            med, low, how = it_lines.get((store_id, sku_id), (0.0, 0.0, None))
+            inbound = med + low * it_low
+            inbound_src = (f"in transit (loaded, {how})" if how
+                           else "in transit (loaded) — SKU not on the truck")
+            if low:
+                inbound_src += (f" · LOW confidence {low:.0f}u counted at {it_low:.0%} "
+                                f"({low * it_low:.0f}u) — store assignment estimated")
+        else:
+            inbound, inbound_src = inbound_known.get((store_id, sku_id), 0), "prior exported run"
+            if not inbound and store_id in in_transit_stores and dv.get("n_del"):
+                inbound = round(float(dv.get("d26") or 0) / max(1, int(dv["n_del"])))
+                inbound_src = "in transit (manifest) — qty estimated from avg delivery · LOW"
+                if store_id not in manifest_est_stores:
+                    manifest_est_stores.add(store_id)
+                    decide("validation", "Manifest shows a delivery after the sales anchor but no "
+                                         "in-transit lines are loaded — inbound estimated from avg "
+                                         "delivery size (LOW)", store_id=store_id, severity="warning")
 
         before_arrival = fc / 7.0 * days_to_arrival
         projected = max(0.0, oh_adj + inbound - before_arrival)
@@ -903,6 +960,27 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     log(f"\nWrote run {run_id}: {len(order_rows)} orders · {len(cart_rows)} carts · {len(shelf_rows)} shelf rows · "
         f"{len(decisions):,} decisions · {len(template)} exact configs")
     return run_id
+
+
+def _in_transit_lines(cur, anchor):
+    """Loaded in-transit units arriving after the sales anchor.
+    Returns ({(store_id, sku_id): (medium_units, low_units, methods)}, {shipping_weeks loaded})."""
+    cur.execute("SELECT to_regclass('public.in_transit_lines') IS NOT NULL")
+    if not cur.fetchone()[0]:
+        return {}, set()
+    cur.execute("SELECT DISTINCT shipping_week FROM in_transit_lines")
+    weeks = {r[0] for r in cur.fetchall()}
+    cur.execute("""SELECT store_id, sku_id,
+                          COALESCE(SUM(units) FILTER (WHERE confidence <> 'LOW'), 0) AS med,
+                          COALESCE(SUM(units) FILTER (WHERE confidence = 'LOW'), 0) AS low,
+                          string_agg(DISTINCT method, '+') AS m
+                   FROM in_transit_lines WHERE delivery_date > %s
+                   GROUP BY store_id, sku_id""", (anchor,))
+    return {(r[0], r[1]): (float(r[2]), float(r[3]), r[4]) for r in cur.fetchall()}, weeks
+
+
+# Swappable for previews (feed loader output in memory without writing the table).
+IN_TRANSIT_SOURCE = _in_transit_lines
 
 
 if __name__ == "__main__":
