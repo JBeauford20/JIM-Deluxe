@@ -197,6 +197,8 @@ html,body{overflow-x:hidden;}
 .xshelf .pos{font-weight:700;color:var(--x-faint);}
 @media (prefers-reduced-motion:reduce){#xDw{transition:none;}}
 .x-show-sm{display:none;}
+.xraw{display:none;font-family:Consolas,monospace;font-size:10.5px;color:var(--x-faint);font-weight:400;}body.xtrace .xraw{display:inline;}body.xtrace p.xraw{display:block;}
+.xsrc{display:none!important;}body.xtrace .xsrc{display:inline-flex!important;}
 @media (max-width:640px){.xkv{grid-template-columns:1fr;}.x-hide-sm{display:none;}.x-show-sm{display:inline;}.xdata td.xreason{min-width:0!important;}.xwrap{padding:12px 12px 60px;}}
 </style>
 </head>
@@ -305,7 +307,7 @@ html,body{overflow-x:hidden;}
 <!-- shared evidence / cart drawer -->
 <div id="xOv" hidden onclick="xCloseDw()"></div>
 <aside id="xDw" role="dialog" aria-modal="true" aria-labelledby="xDwT" aria-hidden="true">
-  <div class="xdwh"><h3 id="xDwT">Details</h3><button class="xx" id="xDwX" aria-label="Close" onclick="xCloseDw()">&times;</button></div>
+  <div class="xdwh"><h3 id="xDwT">Details</h3><label class="xsmall xmuted" style="margin-left:auto;display:flex;gap:4px;align-items:center;white-space:nowrap"><input type="checkbox" class="xtrace-tgl" onchange="xTrace(this.checked)">Engine trace</label><button class="xx" style="margin-left:4px" id="xDwX" aria-label="Close" onclick="xCloseDw()">&times;</button></div>
   <div class="xdwb" id="xDwB"></div>
 </aside>
 
@@ -3743,18 +3745,32 @@ var X={run:null,ipr:null,meta:null,batch:null,lines:[],job:null,routes:null,miss
 var X_PAGE=50;
 var X_V2=['tw','exc','cl'];
 var X_KINDS=[
-  ['block','Hard blocks','bad','Not shipped. Nobody can override a hard block.'],
-  ['stopped_13wk','Stopped at 13-week review','bad','Below the 13-week sell-through bar, so the same shipment is not sent again (Sec 11).'],
-  ['reduced_13wk','Reduced at 13-week review','warn','Shipped smaller after the 13-week review (Sec 11).'],
+  ['block','Hard block','bad','Not shipped. Nobody can override a hard block.'],
+  ['stopped_13wk','Stopped at 13-week review','bad','Sold too little of its last delivery by 13 weeks, so the same shipment is not sent again (Sec 11).'],
+  ['reduced_13wk','Reduced at 13-week review','warn','Ships smaller after the 13-week review (Sec 11).'],
   ['review_hold','Held for review','warn','Not shipped this week; held for a DSM look.'],
-  ['allocation_shortfall','Supply shortfalls','warn','The store needed more than was available.'],
-  ['low_value_cart','Low-value carts','warn','Ships with a warning showing wholesale value and freight (Sec 19.1).'],
-  ['review_warning','Review warnings','warn','The reviewer flagged the order but it ships.'],
+  ['allocation_shortfall','Not enough supply','warn','The store needed more than the greenhouse has this week.'],
+  ['low_value_cart','Low-value cart','warn','Ships with a warning showing wholesale value and freight (Sec 19.1).'],
+  ['deferred_economics','Light cart, waiting a week','warn','Waiting one week costs less than delivering now. Ships next due week regardless.'],
+  ['not_due','Not due this week','n','The store is not due a delivery yet under its grade\'s delivery cadence.'],
+  ['review_warning','Review warning','warn','The reviewer flagged the order but it ships.'],
   ['deferral','Deferred','n','Need is under one shelf; recalculated next week, never padded.'],
-  ['validation','Data checks','info','A data problem the engine found before planning.'],
-  ['gap_fill','Gap fills','ok','A short SKU was filled with a same-family best seller (Sec 21).'],
-  ['reactivation','Controlled tests','vio','Approved reactivation test, capped.']
+  ['validation','Data check','info','A data problem the engine found before planning.'],
+  ['gap_fill','Gap fill','ok','A short SKU was filled with a same-family best seller that has its own need (Sec 21).'],
+  ['duplicate_run','Duplicate run','info','Another run already exists for this week.'],
+  ['reactivation','Controlled test','vio','Approved reactivation test, capped.']
 ];
+function xReason(r){var d=r.data||{},k=r._k||r.decision_type;
+  if(k==='not_due')return 'Not due this week \u2014 next due '+(d.next_due?xDateT(d.next_due):'next cycle')+(d.cadence_weeks?' (delivers every '+d.cadence_weeks+' weeks)':'')+'.';
+  if(k==='deferred_economics')return 'Light cart \u2014 waiting one week; ships next due week regardless.'+(d.wholesale!=null?' Wholesale '+xUsdT(d.wholesale)+'.':'');
+  return xPlain(r.reason);}
+function xDateT(s){var d=new Date(String(s).slice(0,10)+'T12:00:00');return isNaN(d)?String(s):d.toLocaleDateString('en-US',{weekday:'short',month:'numeric',day:'numeric'});}
+function xUsdT(n){return '$'+Math.round(Number(n)||0).toLocaleString();}
+function xMethod(m){m=String(m||'');if(!m)return 'Unknown';
+  if(/^blend/i.test(m))return 'Blend of 4/10/13 weeks';
+  if(/stock/i.test(m))return '13-week rate (likely stockout)';
+  if(/edi/i.test(m))return '13-week rate (missing EDI)';
+  return m.replace(/\bwk\b/g,'week');}
 var X_OTHER={review:['review','Order review','n',''],line:['line','Shipped line','ok','']};
 function xKind(k){for(var i=0;i<X_KINDS.length;i++)if(X_KINDS[i][0]===k)return X_KINDS[i];return X_OTHER[k]||[k,String(k).replace(/_/g,' '),'n',''];}
 
@@ -3803,6 +3819,7 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){xCloseClass
 
 /* ---------- boot ---------- */
 async function xBoot(){
+  try{xTrace(localStorage.getItem('x_trace')==='1');}catch(e){}
   document.querySelectorAll('#xCMenu .nl').forEach(function(n){n.setAttribute('tabindex','0');n.setAttribute('role','menuitem');});
   xRenderUpload();xRenderSteps();
   xLoadRoutes();
@@ -3948,12 +3965,11 @@ async function xLoadRun(id,quiet){
   if(!r[0]||r[0].engine_version!=='v2'||!r[0].ipr_summary){if(!quiet)toast('That run was not made by the v2 engine','warn');return;}
   X.run=id;X.ipr=r[0];X.meta=r[1]||{};
   X.exc={rows:[],kind:'all',page:0,loaded:null};X.fc={rows:[],page:0,loaded:null,more:false};X.cl={orders:[],page:0,loaded:null};X.ex=null;
-  xRenderResults();xRenderSteps();xExcBadge();xRenderHandoff();
+  xRenderResults();xRenderSteps();xExcBadge();xRenderHandoff();xLoadExc().then(xExcBadge,xExcBadge);
   if(!X.fresh||X.fresh.fromRun)xLoadFreshness();
 }
-function xExcCount(){var dc=(X.ipr&&X.ipr.decision_counts)||{},n=0;
-  X_KINDS.forEach(function(k){if(k[0]==='review_warning'){var c=((X.ipr.ipr_summary||{}).counts||{});n+=Number(c.review_warning||0);}else if(k[0]!=='gap_fill')n+=Number(dc[k[0]]||0);});return n;}
-function xExcBadge(){var b=document.getElementById('xExcBadge');if(!b)return;var n=X.run?xExcCount():0;b.textContent=n>999?'999+':n;b.classList.toggle('zero',!n);}
+function xExcCount(){return X.exc.loaded===X.run?X.exc.rows.length:null;}
+function xExcBadge(){var b=document.getElementById('xExcBadge');if(!b)return;var n=X.run?xExcCount():0;b.textContent=n==null?'\u2026':(n>999?'999+':n);b.classList.toggle('zero',!n);}
 function xRenderResults(){
   var el=document.getElementById('twResults');if(!el)return;
   if(!X.run){el.innerHTML='';return;}
@@ -3989,32 +4005,47 @@ function xRenderResults(){
        '<span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xGo(\'exc\')">Open exceptions</button></span></div>'+
     '<div class="xobj">'+xTile('Passed',xN(c.review_pass),'stores','ok')+xTile('Warnings',xN(c.review_warning),'ship with a note',c.review_warning?'warn':'')+
       xTile('Hard blocks',xN(c.lines_blocked),'lines not shipped',c.lines_blocked?'bad':'')+xTile('Held for review',xN(c.lines_review_held),'lines not shipped',c.lines_review_held?'warn':'')+
-      xTile('Deferred stores',xN(c.stores_deferred),'under one shelf of need')+xTile('Missing EDI',xN(c.stores_edi_gap),'stores held at baseline')+
+      (c.stores_deferred!=null?xTile('Deferred stores',xN(c.stores_deferred),'under one shelf of need'):'')+xTile('Missing EDI',xN(c.stores_edi_gap),'stores held at baseline')+
       corr.map(function(k){return xTile(k[1],xN(dc[k[0]]),'agent correction');}).join('')+'</div></div>';
   /* release */
   h+='<div class="xpanel" id="twRelease"><div class="xph"><h2>Release</h2><span class="sub">One click sends this plan on. No routine approvals.</span></div><div class="xpad">'+
     '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><span class="xtag info">'+xN(c.stores_shipped)+' stores</span><span class="xtag info">'+xN(c.carts)+' carts</span><span class="xtag info">'+xN(a.allocated_units)+' units</span></div>'+
     xReleaseBody()+'</div></div></div>';
+  /* cadence + shipping efficiency */
+  var cad=S.delivery_cadence,se=S.shipping_efficiency;
+  if(cad||se){
+    var bg=(cad&&cad.by_grade)||{},gl=Object.keys(bg).map(function(g){var x=bg[g]||{};return '<tr><td>'+escH(g)+'</td><td class="r">'+xN(x.cadence_weeks)+'</td><td class="r">'+xN(x.due)+'</td><td class="r">'+xN(x.not_due)+'</td><td class="r">'+xN(x.shipped)+'</td></tr>';}).join('');
+    var net=se&&se.network;
+    h+='<div class="xpanel"><div class="xph"><h2>Delivery cadence and shipping efficiency</h2><span class="sub">Stores get a delivery when their grade says they are due.</span>'+
+      '<span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="X.exc.kind=\'not_due\';xGo(\'exc\')">See stores not due</button></span></div>'+
+      '<div class="xobj">'+(cad?xTile('Stores due',xN(cad.stores_due),'need a delivery this week','ok')+xTile('Stores not due',xN(cad.stores_not_due),'next delivery later'):'')+
+      (se?xTile('Shipping efficiency',net!=null?Math.round(net*100)+'%':'&mdash;','units sold &divide; units delivered, last 13 weeks'+(se.network_sold_13wk!=null?' ('+xN(se.network_sold_13wk)+' of '+xN(se.network_delivered_13wk)+')':''),net!=null&&net<0.6?'warn':''):'')+'</div>'+
+      (gl?'<div class="xscroll"><table class="xdata"><thead><tr><th>Grade</th><th class="r">Every (wks)</th><th class="r">Due</th><th class="r">Not due</th><th class="r">Shipped</th></tr></thead><tbody>'+gl+'</tbody></table></div>':'')+'</div>';
+  }
   /* allocation + lost */
   var rows=[['Available units',a.available_units],['What stores need',a.unconstrained_need_units],['Not shipped: blocked',a.blocked_units!=null?-a.blocked_units:null],
-    ['Not shipped: held for review',a.review_held_units!=null?-a.review_held_units:null],['Eligible need',a.eligible_need_units,1],['Allocated',a.allocated_units,1],
+    ['Not shipped: held for review',a.review_held_units?-a.review_held_units:null],['Not shipped: stopped at 13 weeks',a.stopped_13wk_units?-a.stopped_13wk_units:null],['Removed: reduced at 13 weeks',a.reduced_13wk_units_removed?-a.reduced_13wk_units_removed:null],['Eligible need',a.eligible_need_units,1],['Allocated',a.allocated_units,1],
     ['Unfilled (no supply)',a.unfilled_demand_units],['Deferred (under one shelf)',a.deferred_units],['Left over supply (fine, Sec 15)',a.unallocated_supply_units]];
   if(a.gap_filled_units!=null)rows.splice(6,0,['Of which gap-filled',a.gap_filled_units]);
   h+='<div class="xgrid2"><div class="xpanel"><div class="xph"><h2>Allocation</h2><span class="sub">No clearance target. Leftover supply is fine (Sec 15).</span></div>'+
     '<table class="xdata"><tbody>'+rows.filter(function(r){return r[1]!=null;}).map(function(r){return '<tr'+(r[2]?' class="tot"':'')+'><td>'+escH(r[0])+'</td><td class="r">'+xN(r[1])+'</td></tr>';}).join('')+'</tbody></table></div>';
   var lost=[['lost_unavailable_inventory','No inventory','store need with no supply this week'],['lost_blocks_and_holds','Blocks and holds','lines not shipped after review'],
-    ['lost_stopped_13wk','Stopped at 13 weeks','below the 13-week bar'],['lost_deferrals','Deferrals','need under one shelf, retried next week'],['lost_low_value','Low-value carts','held back for cart economics']];
+    ['lost_stopped_13wk','Stopped at 13 weeks','below the 13-week bar'],['lost_deferrals','Deferrals','need under one shelf, retried next week'],['lost_deferrals_one_week','Light carts waiting a week','one week of sales at deferred stores'],['lost_low_value','Low-value carts','held back for cart economics']];
   h+='<div class="xpanel"><div class="xph"><h2>Sales we are leaving behind</h2><span class="sub">Per week, at retail (Sec 2).</span></div><div class="xlost">'+
     lost.filter(function(l){return o[l[0]]!=null;}).map(function(l){return '<div class="xlc"><b>'+xUsd(o[l[0]])+'</b>'+escH(l[1])+' <span class="xwhy">&middot; '+escH(l[2])+'</span></div>';}).join('')+
     (o.edi_uncertainty_at_risk!=null?'<div class="xlc n"><b>'+xUsd(o.edi_uncertainty_at_risk)+' at risk</b>Missing EDI at '+xN(c.stores_edi_gap)+' stores <span class="xwhy">&middot; demand held at baseline, not zeroed</span></div>':'')+
     '</div></div></div>';
   /* cart economics (engine stream; shown when present) */
-  var ce=S.cart_economics||S.cart_econ||null;
+  var ce=S.cart_economics||null;
   if(ce&&typeof ce==='object'){
-    var tiles=Object.keys(ce).filter(function(k){return typeof ce[k]==='number';}).map(function(k){var v=ce[k],lab=xHuman(k);
-      var val=/(^n_|_count$|count_|carts$|_n$)/i.test(k)?xN(v):/pct|percent|share|ratio/i.test(k)?(Math.abs(v)<=1?(v*100).toFixed(1):Number(v).toFixed(1))+'%':/usd|wholesale|cost|margin|freight|value|retail|revenue|dollar/i.test(k)?xUsd(v):xN(v);
-      return xTile(lab,val);}).join('');
-    if(tiles)h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Every cart is priced before release (Sec 19.1). Low-value carts ship with a warning.</span></div><div class="xobj">'+tiles+'</div></div>';
+    var fp=ce.freight_pct;
+    h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Every cart is priced before release (Sec 19.1). Light carts either ship with a warning or wait one week.</span></div><div class="xobj">'+
+      xTile('Avg wholesale per cart',ce.avg_wholesale_per_cart!=null?xUsdFull(ce.avg_wholesale_per_cart):'&mdash;',xN(ce.carts)+' carts')+
+      xTile('Freight % of wholesale',fp!=null?(fp*100).toFixed(1)+'%':'&mdash;','delivered cost &divide; wholesale')+
+      xTile('Low-value carts released',xN(ce.carts_released_low_value),'ship with a warning',ce.carts_released_low_value?'warn':'')+
+      xTile('Carts waiting a week',xN(ce.carts_deferred),'light orders deferred')+
+      xTile('Wholesale waiting',ce.deferred_wholesale!=null?xUsd(ce.deferred_wholesale):'&mdash;','in deferred carts')+'</div>'+
+      (ce.carts_missing_wholesale_price?'<div class="xnote">'+xN(ce.carts_missing_wholesale_price)+' carts have SKUs with no wholesale price, so their value is understated.</div>':'')+'</div>';
   }
   /* data notes */
   var dn=[];
@@ -4106,7 +4137,7 @@ function xRenderFc(){
   if(!rows.length){body.innerHTML='<div class="xempty">'+(X.fc.rows.length?'Nothing matches that search.':'No shipped lines in this run.')+'</div>'+more;return;}
   body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th>SKU</th><th class="x-hide-sm">Method</th><th class="r">Forecast / wk</th><th class="r x-hide-sm">On hand</th><th class="r x-hide-sm">Inbound</th><th class="r">Need</th><th class="r">Ships</th></tr></thead><tbody>'+
     pg.map(function(r,i){var d=r.data||{};return '<tr class="x-row" tabindex="0" onclick="xFcOpen('+(X.fc.page*X_PAGE+i)+')"><td>'+escH(r.store_id)+' <span class="xwhy">'+escH(r.store_name||'')+'</span></td><td>'+escH(sn(r.description||('SKU '+r.sku_id)))+'</td>'+
-      '<td class="x-hide-sm"><span class="xtag">'+escH(d.method||'?')+'</span></td><td class="r">'+(d.forecast_wk!=null?Number(d.forecast_wk).toFixed(1):'&mdash;')+'</td>'+
+      '<td class="x-hide-sm"><span class="xtag">'+escH(xMethod(d.method))+'</span></td><td class="r">'+(d.forecast_wk!=null?Number(d.forecast_wk).toFixed(1):'&mdash;')+'</td>'+
       '<td class="r x-hide-sm">'+xN(d.onhand!=null?Math.round(d.onhand):null)+(d.onhand_conf&&d.onhand_conf!=='HIGH'?' <span class="xwhy">'+escH(String(d.onhand_conf).toLowerCase())+'</span>':'')+'</td>'+
       '<td class="r x-hide-sm">'+xN(d.inbound)+'</td><td class="r">'+xN(d.need_units!=null?Math.round(d.need_units):null)+'</td>'+
       '<td class="r">'+(d.alloc_trays!=null?xN(d.alloc_trays)+' tr':'&mdash;')+'</td></tr>';}).join('')+'</tbody></table></div>'+xPager(rows.length,X.fc.page,'xFcPage')+more;
@@ -4126,7 +4157,7 @@ async function xLoadExc(){
       if(k==='review_warning')rows=(rows||[]).filter(function(r){return (r.data||{}).verdict&&r.data.verdict!=='PASS';});
       return (rows||[]).map(function(r){r._k=k;return r;});}).catch(function(){failed.push(xKind(k)[1]);return [];});}));
   X.exc.rows=[].concat.apply([],res);X.exc.failed=failed;X.exc.loaded=failed.length?null:X.run;X.exc.page=0;
-  xRenderExcChips();xRenderExc();
+  xRenderExcChips();xRenderExc();xExcBadge();
 }
 function xRenderExcChips(){
   var el=document.getElementById('excChips');if(!el)return;
@@ -4142,7 +4173,7 @@ function xExcPage(d){X.exc.page+=d;xRenderExc();}
 function xRenderExc(){
   var body=document.getElementById('excBody');if(!body||!X.run)return;
   var q=(document.getElementById('excQ')||{}).value||'';
-  var rows=X.exc.rows.filter(function(r){return (X.exc.kind==='all'||r._k===X.exc.kind)&&xMatch(q,[r.store_id||'',r.store_name||'',r.state||'',r.description||'',r.sku_id||'',r.reason||'']);});
+  var rows=X.exc.rows.filter(function(r){return (X.exc.kind==='all'||r._k===X.exc.kind)&&xMatch(q,[r.store_id||'',r.store_name||'',r.state||'',r.description||'',r.sku_id||'',xReason(r)]);});
   var fl=(X.exc.failed&&X.exc.failed.length)?'<div class="xbanner bad" style="margin:10px 16px"><i class="bi bi-exclamation-triangle-fill"></i><span>Could not load: '+escH(X.exc.failed.join(', '))+'.</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadExc()">Try again</button></span></div>':'';
   if(!X.exc.rows.length){body.innerHTML=fl||'<div class="xempty"><i class="bi bi-check-circle me-1" style="color:var(--x-ok-fg)"></i>No exceptions in this run.</div>';return;}
   if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches that filter.</div>';return;}
@@ -4152,7 +4183,7 @@ function xRenderExc(){
   body.innerHTML=fl+(kk?'<div class="xnote" style="border-top:none;border-bottom:1px solid var(--x-border-soft)">'+escH(kk[1])+': '+escH(kk[3])+'</div>':'')+
     '<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">SKU</th><th class="x-hide-sm">Kind</th><th>Reason</th></tr></thead><tbody>'+
     pg.map(function(r,i){var k=xKind(r._k);return '<tr class="x-row" tabindex="0" onclick="xExcOpen('+(X.exc.page*X_PAGE+i)+')"><td>'+(r.store_id!=null?escH(r.store_id)+' <span class="xwhy">'+escH(r.store_name||'')+(r.state?', '+escH(r.state):'')+'</span>':'<span class="xwhy">All stores</span>')+
-      '<span class="x-show-sm">'+(r.sku_id!=null?'<br>'+escH(sn(r.description||('SKU '+r.sku_id))):'')+'</span></td>'+'<td class="x-hide-sm">'+(r.sku_id!=null?escH(sn(r.description||('SKU '+r.sku_id))):'<span class="xwhy">&mdash;</span>')+'</td><td class="x-hide-sm"><span class="xtag '+k[2]+'">'+escH(k[1])+'</span></td>'+'<td class="xreason" style="min-width:220px"><span class="x-show-sm"><span class="xtag '+k[2]+'">'+escH(k[1])+'</span><br></span>'+escH(xPlain(r.reason))+'</td></tr>';}).join('')+
+      '<span class="x-show-sm">'+(r.sku_id!=null?'<br>'+escH(sn(r.description||('SKU '+r.sku_id))):'')+'</span></td>'+'<td class="x-hide-sm">'+(r.sku_id!=null?escH(sn(r.description||('SKU '+r.sku_id))):'<span class="xwhy">&mdash;</span>')+'</td><td class="x-hide-sm"><span class="xtag '+k[2]+'">'+escH(k[1])+'</span></td>'+'<td class="xreason" style="min-width:220px"><span class="x-show-sm"><span class="xtag '+k[2]+'">'+escH(k[1])+'</span><br></span>'+escH(xReason(r))+'</td></tr>';}).join('')+
     '</tbody></table></div>'+xPager(rows.length,X.exc.page,'xExcPage');
 }
 function xPlain(s){return String(s||'').replace(/\u00a7\s?/g,'Sec ');}
@@ -4164,15 +4195,34 @@ function xOpenDw(title,html){_xDwRet=document.activeElement;document.getElementB
   document.getElementById('xOv').hidden=false;var d=document.getElementById('xDw');d.classList.add('open');d.setAttribute('aria-hidden','false');document.getElementById('xDwX').focus();}
 function xCloseDw(){var d=document.getElementById('xDw');if(!d||!d.classList.contains('open'))return;d.classList.remove('open');d.setAttribute('aria-hidden','true');document.getElementById('xOv').hidden=true;
   if(_xDwRet&&_xDwRet.focus)try{_xDwRet.focus();}catch(e){}}
+var X_FIELDS={forecast_wk:['Forecast (units / week)','n1'],method:['How it was forecast','method'],onhand:['On hand now (units)','n0'],onhand_conf:['On-hand confidence','low'],
+  onhand_src:['On-hand source','t'],inbound:['On the way (units)','n0'],inbound_src:['On-the-way source','t'],projected:['Expected on hand at arrival','n0'],risk:['Stockout risk','t'],
+  need_units:['Need (units)','n0'],need_trays:['Need (trays)','n0'],alloc_trays:['Ships (trays)','n0'],upt:['Units per tray','n0'],cap_note:['Cap applied','t'],
+  conversion:['Sold of last delivery (13 weeks)','pct'],priority:['Priority score','n2'],sku_fit:['SKU fit score','n2'],price:['Retail price','usd2'],price_src:['Price source','t'],
+  family:['Product family','t'],grade:['Store grade','t'],cadence_grade:['Delivery grade','t'],cadence_weeks:['Delivers every (weeks)','n0'],last_delivery:['Last delivery','date'],
+  next_due:['Next due','date'],arrival:['Arrives','date'],lines:['Lines','n0'],shipping_efficiency:['Shipping efficiency (sold / delivered)','pct'],verdict:['Review result','t'],
+  severity:['Severity','t'],required_approval:['Needs approval from','t'],unfilled_units:['Short (units)','n0'],proposed_units:['Proposed (units)','n0'],action:['Action','t'],
+  units:['Units','n0'],carts:['Carts','n0'],wholesale:['Wholesale value','usd'],delivered_cost:['Delivered cost','usd'],freight_pct:['Freight % of wholesale','pct'],
+  lost_retail_one_week:['Sales lost by waiting a week','usd'],shelves_equivalent:['Shelves of need','n1'],test_units:['Test units','n0'],profile:['Shelf profile','t']};
+function xFv(k,v){var f=(X_FIELDS[k]||[])[1];
+  if(f==='pct'&&typeof v==='number')return (Math.abs(v)<=2?Math.round(v*100):Math.round(v))+'%';
+  if((f==='usd'||f==='usd2')&&typeof v==='number')return f==='usd2'?'$'+v.toFixed(2):xUsdT(v);
+  if(f&&f.charAt(0)==='n'&&typeof v==='number')return Number(v).toLocaleString(undefined,{maximumFractionDigits:+f.charAt(1)||0});
+  if(f==='date')return xDateT(v);if(f==='method')return xMethod(v);if(f==='low')return String(v).toLowerCase();
+  if(typeof v==='boolean')return v?'Yes':'No';
+  return xPlain(v);}
 function xKv(d){var skip={rates:1};var ks=Object.keys(d||{}).filter(function(k){return !skip[k]&&d[k]!==null&&d[k]!==''&&typeof d[k]!=='object';});
   if(!ks.length)return '<p class="xmuted">No extra numbers recorded.</p>';
-  var h='<dl class="xkv">'+ks.map(function(k){return '<dt>'+escH(xHuman(k))+'</dt><dd>'+escH(xPlain(d[k]))+'</dd>';}).join('')+'</dl>';
+  ks.sort(function(a,b){return (X_FIELDS[a]?0:1)-(X_FIELDS[b]?0:1);});
+  var h='<dl class="xkv">'+ks.map(function(k){return '<dt>'+escH(X_FIELDS[k]?X_FIELDS[k][0]:xHuman(k))+' <span class="xraw">'+escH(k)+'</span></dt><dd>'+escH(xFv(k,d[k]))+'</dd>';}).join('')+'</dl>';
   if(d.rates&&typeof d.rates==='object')h+='<h4>Sales rate by window (units / week)</h4><dl class="xkv">'+Object.keys(d.rates).map(function(k){return '<dt>Last '+escH(k.replace(/^r/,''))+' weeks</dt><dd>'+escH(d.rates[k])+'</dd>';}).join('')+'</dl>';
   return h;}
+function xTrace(on){try{localStorage.setItem('x_trace',on?'1':'');}catch(e){}document.body.classList.toggle('xtrace',!!on);
+  document.querySelectorAll('.xtrace-tgl').forEach(function(c){c.checked=!!on;});}
 async function xOpenEvidence(r,kind){
   var k=xKind(kind||r._k||r.decision_type||'');
   var title=(r.store_id!=null?'Store '+r.store_id+(r.store_name?' '+r.store_name:''):'Run-wide')+(r.sku_id!=null?' - '+sn(r.description||('SKU '+r.sku_id)):'');
-  var h='<h4>What happened</h4><p><span class="xtag '+k[2]+'">'+escH(k[1])+'</span> '+escH(xPlain(r.reason))+'</p>'+(k[3]?'<p class="xwhy">'+escH(k[3])+'</p>':'')+
+  var h='<h4>What happened</h4><p><span class="xtag '+k[2]+'">'+escH(k[1])+'</span> '+escH(xReason(r))+'</p>'+(r.reason&&xReason(r)!==xPlain(r.reason)?'<p class="xraw xsmall">Engine: '+escH(xPlain(r.reason))+'</p>':'')+(k[3]?'<p class="xwhy">'+escH(k[3])+'</p>':'')+
     '<h4>Numbers behind it</h4>'+xKv(r.data||{})+'<div id="xEvStore"></div>';
   xOpenDw(title,h);
   if(r.store_id==null||!X.run)return;
@@ -4197,26 +4247,29 @@ async function xLoadCl(force){
   if(body)body.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading stores&hellip;</div>';
   var clErr=null;
   var r=await Promise.all([api('/api/orders/runs/'+X.run).catch(function(e){clErr=e;return [];}),api('/api/orders/runs/'+X.run+'/loads').catch(function(){return [];}),
-    api('/api/routing/runs/'+X.run+'/exchange-status').catch(function(){return null;})]);
+    api('/api/routing/runs/'+X.run+'/exchange-status').catch(function(){return null;}),
+    api('/api/exports/runs/'+X.run+'/config-names').catch(function(){return null;})]);
+  X.cfg={byCart:{},byCode:{}};if(r[3]){X.cfg.byCart=r[3].carts||{};(r[3].configs||[]).forEach(function(c){(c.engine_codes||[]).forEach(function(e){if(!X.cfg.byCode[e])X.cfg.byCode[e]=c.name;});});}
   X.cl.orders=Array.isArray(r[0])?r[0]:[];X.cl.loads=Array.isArray(r[1])?r[1]:[];X.ex=r[2];X.cl.loaded=X.run;X.cl.page=0;
   if(clErr){X.cl.loaded=null;if(body)body.innerHTML='<div class="xbanner bad" style="margin:14px 16px"><i class="bi bi-exclamation-triangle-fill"></i><span>Could not load stores: '+escH(clErr.message)+'</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadCl(true)">Try again</button></span></div>';xRenderLoads();xRenderHandoff();return;}
   xRenderCl();xRenderLoads();xRenderHandoff();
 }
+function xCfgName(id,code){var m=X.cfg||{};return (id&&m.byCart&&m.byCart[id])||(code&&m.byCode&&m.byCode[code])||code||'';}
 function xClFilter(){X.cl.page=0;xRenderCl();}
 function xClPage(d){X.cl.page+=d;xRenderCl();}
 function xRenderCl(){
   var body=document.getElementById('clBody');if(!body)return;
   var q=(document.getElementById('clQ')||{}).value||'';
-  var rows=X.cl.orders.filter(function(o){return xMatch(q,[o.store_id,o.store_name||'',o.city||'',o.state||'',(o.cart_codes||[]).join(' '),o.load_name||'']);});
+  var rows=X.cl.orders.filter(function(o){return xMatch(q,[o.store_id,o.store_name||'',o.city||'',o.state||'',(o.cart_codes||[]).map(function(c){return c+' '+xCfgName(null,c);}).join(' '),o.load_name||'']);});
   if(!X.cl.orders.length){body.innerHTML='<div class="xempty">No store orders in this run.</div>';return;}
   if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches that search.</div>';return;}
   var pages=Math.max(1,Math.ceil(rows.length/X_PAGE));if(X.cl.page>=pages)X.cl.page=pages-1;if(X.cl.page<0)X.cl.page=0;
   var pg=rows.slice(X.cl.page*X_PAGE,(X.cl.page+1)*X_PAGE);X.cl.view=rows;
   var tc=0,tu=0;rows.forEach(function(o){tc+=Number(o.cart_count||0);tu+=Number(o.total_units||0);});
-  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">City</th><th class="r">Carts</th><th class="r">Units</th><th>Cart configs</th><th class="x-hide-sm">Load</th></tr></thead><tbody>'+
+  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">City</th><th class="r">Carts</th><th class="r">Units</th><th>Cart names</th><th class="x-hide-sm">Load</th></tr></thead><tbody>'+
     pg.map(function(o,i){return '<tr class="x-row" tabindex="0" onclick="xClOpen('+(X.cl.page*X_PAGE+i)+')"><td><b>'+escH(o.store_id)+'</b> <span class="xwhy">'+escH(sn(o.store_name||''))+'</span></td>'+
       '<td class="x-hide-sm">'+escH(o.city||'')+(o.state?', '+escH(o.state):'')+'</td><td class="r">'+xN(o.cart_count)+'</td><td class="r">'+xN(o.total_units)+'</td>'+
-      '<td>'+(o.cart_codes||[]).filter(Boolean).map(function(c){return '<span class="xtag" style="margin:1px">'+escH(c)+'</span>';}).join('')+'</td><td class="x-hide-sm">'+escH(o.load_name||'')+'</td></tr>';}).join('')+
+      '<td>'+(o.cart_codes||[]).filter(Boolean).map(function(c){return '<span class="xtag" style="margin:1px">'+escH(xCfgName(null,c))+'</span>';}).join('')+'</td><td class="x-hide-sm">'+escH(o.load_name||'')+'</td></tr>';}).join('')+
     '<tr class="tot"><td>'+xN(rows.length)+' stores</td><td class="x-hide-sm"></td><td class="r">'+xN(tc)+'</td><td class="r">'+xN(tu)+'</td><td></td><td class="x-hide-sm"></td></tr>'+
     '</tbody></table></div>'+xPager(rows.length,X.cl.page,'xClPage');
 }
@@ -4228,7 +4281,7 @@ async function xClOpen(i){
     var h='<dl class="xkv"><dt>Location</dt><dd>'+escH((o.city||'')+(o.state?', '+o.state:''))+'</dd><dt>Carts</dt><dd>'+xN(carts.length)+'</dd><dt>Units</dt><dd>'+xN(o.total_units)+'</dd>'+(o.load_name?'<dt>Load</dt><dd>'+escH(o.load_name)+'</dd>':'')+'</dl>';
     h+='<h4>Carts, top shelf first</h4>';
     h+=carts.map(function(c){var sh=c.shelves||[];
-      return '<div class="xcart"><h5><span>Cart '+escH(c.cart_number)+'</span>'+(c.config_code?'<span class="xtag">'+escH(c.config_code)+'</span>':'')+'<span>'+xN(c.shelves_used)+' shelves &middot; '+xN(c.total_units)+' units</span>'+(c.is_flagged?'<span class="xtag warn">'+escH(c.flag_reason||'flagged')+'</span>':'')+'</h5>'+
+      return '<div class="xcart"><h5><span>Cart '+escH(c.cart_number)+'</span>'+((c.id||c.config_code)?'<span class="xtag">'+escH(xCfgName(c.id,c.config_code))+'</span>':'')+'<span>'+xN(c.shelves_used)+' shelves &middot; '+xN(c.total_units)+' units</span>'+(c.is_flagged?'<span class="xtag warn">'+escH(c.flag_reason||'flagged')+'</span>':'')+'</h5>'+
         (sh.length?sh.map(function(s){return '<div class="xshelf"><span class="pos">'+escH(s.pos)+'</span><span>'+(s.varieties||[]).map(function(v){return escH(sn(v.variety_name||v.description||('SKU '+v.sku_id)))+' <span class="xwhy">'+xN(v.trays)+' tr</span>';}).join('<br>')+'</span><span class="xwhy">'+escH(s.profile_short||'')+'<br>'+xN(s.total_units)+' u</span></div>';}).join(''):'<p class="xwhy">No shelves.</p>')+'</div>';}).join('');
     X.cl.curEv={store_id:o.store_id,store_name:o.store_name,reason:'Every decision the engine made for this store',data:{}};
     h+='<div style="margin-top:10px"><button class="xbtn xbtn-s xbtn-sm" onclick="xOpenEvidence(X.cl.curEv,\'review\')">Why these carts</button></div>';
@@ -4254,7 +4307,7 @@ function xRenderHandoff(){
   var h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">'+
     (scHas===false?'<button class="xbtn xbtn-s" disabled>Stores and Carts (.xlsx)</button><span class="xtag">Coming</span>':'<button class="xbtn xbtn-s" id="xf-sc" onclick="xDownload(\'sc\')"><i class="bi bi-download"></i>Stores and Carts (.xlsx)</button>')+
     (wbHas===false?'<button class="xbtn xbtn-s" disabled>Import routing workbook</button><span class="xtag">Coming</span>':
-      '<label class="xbtn xbtn-p" style="margin:0'+(can?'':';opacity:.45;cursor:not-allowed')+'"><i class="bi bi-upload"></i>Import routing workbook<input type="file" accept=".xlsx,.xls,.csv" style="display:none" '+(can?'':'disabled ')+'onchange="xImportWb(this)"></label>')+
+      '<label class="xbtn xbtn-p" style="margin:0'+(can?'':';opacity:.45;cursor:not-allowed')+'"><i class="bi bi-upload"></i>Import routing workbook<input type="file" accept=".xlsx" style="display:none" '+(can?'':'disabled ')+'onchange="xImportWb(this)"></label>')+
     '</div><div class="xwhy" id="clWbMsg" role="status" style="margin-top:8px">';
   if(imported)h+='Imported '+escH(ex.routing_filename||'workbook')+(ex.routing_imported_at?' on '+xWhen(ex.routing_imported_at):'')+' &middot; '+xN(ex.load_count)+' loads.';
   else if(wbHas===false)h+='Workbook import is still being built. Until then, use Classic &gt; Routing to import routing\'s CSV.';
