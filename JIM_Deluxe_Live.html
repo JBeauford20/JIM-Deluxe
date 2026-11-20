@@ -63,6 +63,142 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 .lcard{cursor:pointer;transition:box-shadow .15s;}.lcard:hover{box-shadow:0 4px 14px rgba(47,74,62,.18)!important;}
 .pitem:not(.dep):hover{background:#f9eaea;}
 </style>
+<style>
+/* ===== IPR Engine v2 screens (This Week / Exceptions / Carts & Loads) =====
+   Plant App tokens from the approved v2 mockup. Every class is x- prefixed so it
+   never collides with Bootstrap or the Classic screens. Light-only, like the app. */
+:root{
+  --x-accent:#2d6a4f;--x-accent-hover:#1b4332;--x-accent-tint:#e3f0e9;--x-on-accent:#fff;
+  --x-border:#cbd5e1;--x-border-soft:#dbe4ef;--x-bg:#f5f7fb;--x-surface:#fff;--x-surface-2:#f8fafc;
+  --x-hover:#f1f5f9;--x-tag-bg:#eef2f7;--x-rule:#eef2f7;
+  --x-text:#1f2937;--x-text-2:#334155;--x-text-3:#475569;--x-muted:#64748b;--x-faint:#94a3b8;--x-focus:#2f6fdf;
+  --x-ok-fg:#166534;--x-ok-bg:#e9f5ee;--x-ok-border:#b7d7c4;
+  --x-warn-fg:#8a4b00;--x-warn-bg:#fff7e6;--x-warn-border:#f0c36d;
+  --x-bad-fg:#b42318;--x-bad-bg:#fdeceb;--x-bad-border:#f3b7b2;
+  --x-info-fg:#1e40af;--x-info-bg:#dbeafe;--x-info-border:#a9c3f5;
+  --x-violet-fg:#5b21b6;--x-violet-bg:#ede9fe;
+  --x-chart-1:#2d6a4f;--x-chart-2:#6fae8b;
+  --x-scrim:rgba(15,23,42,.38);--x-shadow:0 20px 50px rgba(15,23,42,.25);
+}
+html,body{overflow-x:hidden;}
+.jnav{height:auto;min-height:56px;flex-wrap:wrap;gap:6px 0;}
+.xnav{display:flex;gap:4px;align-items:center;flex-wrap:wrap;padding:8px 0;}
+.xtab{border:1px solid rgba(255,255,255,.18);background:transparent;color:#d6e2d3;border-radius:999px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;}
+.xtab:hover{background:rgba(255,255,255,.08);color:#fff;}
+.xtab.on{background:var(--x-on-accent);color:var(--x-accent-hover);border-color:var(--x-on-accent);}
+.xtab:focus-visible,.xbtn:focus-visible,.xchip:focus-visible,.x-row:focus-visible,.xx:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px;}
+.xbadge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--x-bad-fg);color:#fff;font-size:10.5px;font-weight:700;}
+.xbadge.zero{background:rgba(255,255,255,.2);color:inherit;}
+.xclassic{position:relative;}
+.xcmenu{position:absolute;top:calc(100% + 6px);left:0;z-index:1050;background:#fff;border:1px solid var(--x-border-soft);border-radius:10px;box-shadow:var(--x-shadow);min-width:220px;padding:6px 0;}
+.xcmenu[hidden]{display:none;}
+.xcmenu .nl{height:auto!important;padding:8px 16px!important;color:var(--x-text)!important;border-bottom:none!important;font-weight:500;}
+.xcmenu .nl:hover{background:var(--x-hover);}
+.xcmenu .nl.active{background:var(--x-accent-tint);color:var(--x-accent-hover)!important;}
+.xcmenu .xcm-h{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--x-faint);padding:4px 16px 6px;}
+.xuser{color:#8fa88a;font-size:12px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;}
+.xuser span[role=button]{cursor:pointer;text-decoration:underline;}
+.ws{flex-wrap:wrap;gap:4px 14px!important;}
+@media (max-width:640px){.ws .ms-auto{display:none;}.jnav{padding:0 12px;}}
+
+.xs{background:var(--x-bg);color:var(--x-text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:14px;line-height:1.5;}
+.xwrap{max-width:1220px;margin:0 auto;padding:14px 16px 80px;}
+.xpanel{background:var(--x-surface);border:1px solid var(--x-border-soft);border-radius:10px;overflow:hidden;margin-bottom:14px;min-width:0;}
+.xph{display:flex;align-items:center;gap:6px 10px;padding:11px 16px;border-bottom:1px solid var(--x-border-soft);flex-wrap:wrap;}
+.xph h2{font-size:15px;font-weight:700;margin:0;}
+.xph .sub{font-size:12px;color:var(--x-muted);}
+.xph .act{margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.xpad{padding:14px 16px;}
+.xgrid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:14px;}
+.xgrid2>*{min-width:0;}
+.xsrc{display:inline-flex;font-size:10.5px;font-weight:600;border-radius:4px;padding:1px 7px;background:var(--x-tag-bg);color:var(--x-text-3);border:1px solid var(--x-border-soft);white-space:nowrap;}
+.xtag{display:inline-block;font-size:11px;font-weight:600;padding:1px 9px;border-radius:999px;background:var(--x-tag-bg);color:var(--x-text-3);white-space:nowrap;}
+.xtag.ok{background:var(--x-ok-bg);color:var(--x-ok-fg);border:1px solid var(--x-ok-border);}
+.xtag.warn{background:var(--x-warn-bg);color:var(--x-warn-fg);border:1px solid var(--x-warn-border);}
+.xtag.bad{background:var(--x-bad-bg);color:var(--x-bad-fg);border:1px solid var(--x-bad-border);}
+.xtag.info{background:var(--x-info-bg);color:var(--x-info-fg);}
+.xtag.vio{background:var(--x-violet-bg);color:var(--x-violet-fg);}
+.xbtn{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid transparent;white-space:nowrap;line-height:1.4;}
+.xbtn-p{background:var(--x-accent);color:#fff;}.xbtn-p:hover{background:var(--x-accent-hover);}
+.xbtn-s{background:var(--x-surface);border-color:var(--x-border);color:var(--x-text);}.xbtn-s:hover{background:var(--x-hover);}
+.xbtn-d{background:var(--x-surface);border-color:var(--x-bad-border);color:var(--x-bad-fg);}
+.xbtn-sm{padding:3px 10px;font-size:11px;}
+.xbtn[disabled]{opacity:.45;cursor:not-allowed;}
+.xwhy{font-size:11px;color:var(--x-muted);}
+.xmuted{color:var(--x-muted);}.xsmall{font-size:12px;}.xnum{font-variant-numeric:tabular-nums;}
+.xbanner{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-radius:10px;margin-bottom:14px;font-size:13px;}
+.xbanner.ok{background:var(--x-ok-bg);border:1px solid var(--x-ok-border);color:var(--x-ok-fg);}
+.xbanner.info{background:var(--x-info-bg);border:1px solid var(--x-info-border);color:var(--x-info-fg);}
+.xbanner.warn{background:var(--x-warn-bg);border:1px solid var(--x-warn-border);color:var(--x-warn-fg);}
+.xbanner.bad{background:var(--x-bad-bg);border:1px solid var(--x-bad-border);color:var(--x-bad-fg);}
+.xbanner .act{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;}
+.xstepper{display:flex;padding:12px 16px;flex-wrap:wrap;gap:4px 0;}
+.xstp{flex:1 1 140px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--x-muted);padding:3px 0;}
+.xstp .c{width:24px;height:24px;border-radius:50%;border:2px solid var(--x-border);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex:0 0 auto;background:#fff;}
+.xstp.done{color:var(--x-ok-fg);}.xstp.done .c{border-color:var(--x-ok-fg);background:var(--x-ok-bg);}
+.xstp.now{color:var(--x-info-fg);font-weight:600;}.xstp.now .c{border-color:var(--x-info-fg);background:var(--x-info-bg);}
+.xdrop{margin:16px;border:2px dashed var(--x-border);border-radius:10px;padding:26px 16px;text-align:center;background:var(--x-surface-2);}
+.xdrop.over{border-color:var(--x-accent);background:var(--x-accent-tint);}
+.xdrop h3{margin:0 0 6px;font-size:17px;}
+.xfield{display:inline-flex;flex-direction:column;gap:3px;text-align:left;}
+.xfield label{font-size:12px;font-weight:600;color:var(--x-text-2);}
+.xinput{border:1px solid var(--x-border);border-radius:6px;padding:6px 10px;font-size:13px;background:#fff;color:var(--x-text);min-width:0;}
+.xobj{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;padding:14px 16px;}
+.xob{border:1px solid var(--x-border-soft);border-radius:8px;padding:10px 13px;background:var(--x-surface-2);min-width:0;}
+.xob .v{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;}
+.xob .l{font-size:11px;color:var(--x-muted);text-transform:uppercase;letter-spacing:.04em;}
+.xob .f{font-size:11px;color:var(--x-muted);margin-top:2px;}
+.xob.hero{background:var(--x-accent-tint);border-color:var(--x-ok-border);}
+.xob.bad .v{color:var(--x-bad-fg);}.xob.warn .v{color:var(--x-warn-fg);}.xob.ok .v{color:var(--x-ok-fg);}
+.xbar{position:relative;height:16px;border-radius:999px;background:var(--x-tag-bg);display:flex;margin:4px 16px 2px;}
+.xbar i{height:100%;}.xbar i:first-child{border-radius:999px 0 0 999px;}
+.xbar .mark{position:absolute;top:-5px;bottom:-5px;width:2px;background:var(--x-text);}
+.xlegend{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:11px;color:var(--x-muted);padding:6px 16px 14px;}
+.xdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px;}
+.xlost{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));gap:10px;padding:14px 16px;}
+.xlc{border:1px dashed var(--x-warn-border);border-radius:8px;padding:8px 12px;font-size:13px;background:var(--x-warn-bg);}
+.xlc.n{border-color:var(--x-border);background:var(--x-surface-2);}
+.xlc b{display:block;font-variant-numeric:tabular-nums;font-size:16px;}
+.xscroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.xdata{width:100%;border-collapse:collapse;font-size:13px;}
+.xdata th{background:var(--x-surface-2);border-bottom:2px solid var(--x-border);padding:8px 10px;text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--x-text-3);white-space:nowrap;}
+.xdata td{padding:7px 10px;border-bottom:1px solid var(--x-rule);vertical-align:middle;}
+.xdata .r{text-align:right;font-variant-numeric:tabular-nums;}
+.xdata tr.x-row{cursor:pointer;}.xdata tr.x-row:hover{background:var(--x-surface-2);}
+.xdata tr.tot td{font-weight:700;}
+.xchips{display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--x-border-soft);}
+.xchip{border:1px solid var(--x-border);background:#fff;border-radius:999px;padding:3px 11px;font-size:11px;font-weight:600;cursor:pointer;color:var(--x-text-3);}
+.xchip.on{background:var(--x-text);border-color:var(--x-text);color:#fff;}
+.xtools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--x-border-soft);}
+.xtools .xinput{flex:1 1 200px;max-width:340px;}
+.xpager{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;padding:8px 16px;font-size:12px;color:var(--x-muted);}
+.xnote{font-size:12px;color:var(--x-muted);padding:10px 16px;border-top:1px solid var(--x-border-soft);background:var(--x-surface-2);}
+.xfiles .xf{display:flex;gap:8px 12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--x-rule);}
+.xfiles .xf:last-child{border-bottom:none;}
+.xfiles .xf .t{flex:1 1 220px;min-width:0;}
+.xfiles .xf .t b{display:block;font-size:13px;}
+.xempty{padding:22px 16px;text-align:center;color:var(--x-muted);font-size:13px;}
+#xOv{position:fixed;inset:0;background:var(--x-scrim);z-index:1060;}
+#xOv[hidden]{display:none;}
+#xDw{position:fixed;top:0;right:0;bottom:0;width:min(560px,100vw);background:#fff;box-shadow:var(--x-shadow);transform:translateX(102%);transition:transform .22s;z-index:1070;display:flex;flex-direction:column;visibility:hidden;}
+#xDw.open{transform:none;visibility:visible;}
+.xdwh{padding:14px 18px;border-bottom:1px solid var(--x-border-soft);display:flex;align-items:center;gap:10px;}
+.xdwh h3{margin:0;font-size:16px;min-width:0;overflow-wrap:anywhere;}
+.xx{margin-left:auto;border:none;background:transparent;font-size:22px;line-height:1;color:var(--x-muted);cursor:pointer;padding:2px 8px;border-radius:6px;}
+.xdwb{padding:14px 18px;overflow-y:auto;flex:1;font-size:13px;}
+.xdwb h4{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--x-faint);margin:18px 0 6px;}
+.xdwb h4:first-child{margin-top:0;}
+.xkv{display:grid;grid-template-columns:minmax(110px,180px) 1fr;gap:4px 12px;margin:0;}
+.xkv dt{color:var(--x-muted);font-weight:400;}.xkv dd{margin:0;font-weight:600;overflow-wrap:anywhere;}
+.xcart{border:2px solid var(--x-text-3);border-radius:8px;padding:8px 10px;margin-bottom:12px;background:var(--x-surface-2);}
+.xcart h5{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--x-muted);display:flex;gap:8px;flex-wrap:wrap;}
+.xshelf{display:grid;grid-template-columns:26px 1fr auto;gap:6px;border-bottom:2px solid var(--x-border);padding:6px 2px;font-size:12px;}
+.xshelf:last-child{border-bottom:none;}
+.xshelf .pos{font-weight:700;color:var(--x-faint);}
+@media (prefers-reduced-motion:reduce){#xDw{transition:none;}}
+.x-show-sm{display:none;}
+@media (max-width:640px){.xkv{grid-template-columns:1fr;}.x-hide-sm{display:none;}.x-show-sm{display:inline;}.xdata td.xreason{min-width:0!important;}.xwrap{padding:12px 12px 60px;}}
+</style>
 </head>
 <body>
 
@@ -79,19 +215,30 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
 
 <nav class="jnav">
   <span class="brand">&#127807; TPC <span style="font-weight:400;opacity:.7">- IPR Engine</span></span>
-  <span class="nl active" onclick="go('week',this)"><i class="bi bi-house me-1"></i>Week</span>
-  <span class="nl" onclick="go('activeplans',this);loadActivePlans()"><i class="bi bi-people me-1"></i>Active Plans</span>
-  <span class="nl" id="nl-oc" onclick="go('ordercreate',this)" style="display:none"><i class="bi bi-pencil-square me-1"></i>Order Environment</span>
-  <span class="nl" onclick="go('plan',this)"><i class="bi bi-clipboard-check me-1"></i>Review Plan</span>
-  <span class="nl" onclick="go('editor',this)"><i class="bi bi-cart3 me-1"></i>Order Editor</span>
-  <span class="nl" id="nl-cfg" onclick="go('configs',this)"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
-  <span class="nl" id="nl-draw" onclick="go('draw',this);loadDraw()" style="display:none"><i class="bi bi-boxes me-1"></i>Inventory Draw</span>
-  <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
-  <span class="nl" onclick="go('promos',this);loadPromos()"><i class="bi bi-megaphone me-1"></i>Promotions</span>
-  <span class="nl" onclick="go('scenarios',this);loadScenarios()"><i class="bi bi-magic me-1"></i>Scenarios</span>
-  <span class="nl" id="nl-routing" style="display:none" onclick="go('routing',this)"><i class="bi bi-geo-alt me-1"></i>Routing</span>
-  <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
-  <div class="ms-auto" style="color:#8fa88a;font-size:12px"><span id="nav-user"></span><span onclick="openChangePw()" style="cursor:pointer;text-decoration:underline;margin-left:10px"><i class="bi bi-key me-1"></i>Change password</span><span onclick="logout()" style="cursor:pointer;text-decoration:underline;margin-left:10px"><i class="bi bi-box-arrow-right me-1"></i>Sign out</span></div>
+  <div class="xnav" aria-label="Main">
+    <button type="button" class="xtab on" data-x="tw" aria-current="page" onclick="xGo('tw')"><i class="bi bi-house"></i>This Week</button>
+    <button type="button" class="xtab" data-x="exc" onclick="xGo('exc')"><i class="bi bi-flag"></i>Exceptions <span class="xbadge zero" id="xExcBadge">0</span></button>
+    <button type="button" class="xtab" data-x="cl" onclick="xGo('cl')"><i class="bi bi-truck"></i>Carts &amp; Loads</button>
+    <div class="xclassic">
+      <button type="button" class="xtab" id="xClassicBtn" aria-haspopup="true" aria-expanded="false" aria-controls="xCMenu" onclick="xToggleClassic(event)">Classic <i class="bi bi-chevron-down"></i></button>
+      <div class="xcmenu" id="xCMenu" role="menu" hidden onclick="if(event.target.closest('.nl'))xCloseClassic()">
+        <div class="xcm-h">Classic screens (unchanged)</div>
+        <span class="nl" onclick="go('week',this)"><i class="bi bi-house me-1"></i>Week (classic home)</span>
+        <span class="nl" onclick="go('activeplans',this);loadActivePlans()"><i class="bi bi-people me-1"></i>Active Plans</span>
+        <span class="nl" id="nl-oc" onclick="go('ordercreate',this)" style="display:none"><i class="bi bi-pencil-square me-1"></i>Order Environment</span>
+        <span class="nl" onclick="go('plan',this)"><i class="bi bi-clipboard-check me-1"></i>Review Plan</span>
+        <span class="nl" onclick="go('editor',this)"><i class="bi bi-cart3 me-1"></i>Order Editor</span>
+        <span class="nl" id="nl-cfg" onclick="go('configs',this)"><i class="bi bi-grid-3x3 me-1"></i>Cart Configs</span>
+        <span class="nl" id="nl-draw" onclick="go('draw',this);loadDraw()" style="display:none"><i class="bi bi-boxes me-1"></i>Inventory Draw</span>
+        <span class="nl" onclick="go('stores',this)"><i class="bi bi-shop me-1"></i>Stores</span>
+        <span class="nl" onclick="go('promos',this);loadPromos()"><i class="bi bi-megaphone me-1"></i>Promotions</span>
+        <span class="nl" onclick="go('scenarios',this);loadScenarios()"><i class="bi bi-magic me-1"></i>Scenarios</span>
+        <span class="nl" id="nl-routing" style="display:none" onclick="go('routing',this)"><i class="bi bi-geo-alt me-1"></i>Routing</span>
+        <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
+      </div>
+    </div>
+  </div>
+  <div class="ms-auto xuser"><span id="nav-user"></span><span role="button" tabindex="0" onclick="openChangePw()"><i class="bi bi-key me-1"></i>Change password</span><span role="button" tabindex="0" onclick="logout()"><i class="bi bi-box-arrow-right me-1"></i>Sign out</span></div>
 </nav>
 
 <div class="ws">
@@ -101,8 +248,69 @@ body{background:var(--paper);color:var(--ink);font-size:14px;font-family:"Segoe 
   <span class="ms-auto" style="opacity:.6;font-size:11px">JIM Deluxe v1.0 - The Plant Company</span>
 </div>
 
-<!-- WEEK -->
-<div id="screen-week" class="screen active">
+<!-- ===== IPR ENGINE V2: THIS WEEK ===== -->
+<div id="screen-tw" class="screen active xs">
+<div class="xwrap">
+  <div id="twFresh"></div>
+  <div class="xpanel">
+    <div class="xph"><h2>This week</h2><span class="sub">The engine writes, checks and corrects the orders. You upload availability, look over the results and make one release click. No routine approvals.</span>
+      <span class="act"><span class="xtag" id="twRunTag">No run yet</span></span></div>
+    <div class="xstepper" id="twSteps" aria-label="Weekly steps"></div>
+  </div>
+
+  <div class="xpanel" id="twUpload">
+    <div class="xph"><h2>1. Availability</h2><span class="sub">This week's greenhouse availability file from Aster (Excel or CSV).</span></div>
+    <div id="twUpBody"></div>
+  </div>
+
+  <div id="twResults"></div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: EXCEPTIONS ===== -->
+<div id="screen-exc" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Exceptions</h2><span class="sub">Only what the engine did not ship as planned, or flagged for a look. Everything else passed its checks. Click a row for the evidence.</span>
+      <span class="act"><span class="xsrc">Sec 24 &middot; run decisions</span></span></div>
+    <div class="xchips" id="excChips" role="group" aria-label="Filter by kind"></div>
+    <div class="xtools"><input class="xinput" id="excQ" type="search" placeholder="Search store, SKU or reason" aria-label="Search exceptions" oninput="xExcFilter()"></div>
+    <div id="excBody"><div class="xempty">Run the engine on This Week to see exceptions.</div></div>
+    <div class="xnote">Hard blocks are shown for information; they are not shipped. Warnings never wait for a person. Overrides (with manager approval) come in a later release.</div>
+  </div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: CARTS & LOADS ===== -->
+<div id="screen-cl" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Routing handoff</h2><span class="sub">The engine does not route (Sec 22). It sends stores and carts out and takes loads and dates back.</span>
+      <span class="act"><span class="xtag" id="clRouteTag">Not sent</span></span></div>
+    <div class="xstepper" id="clSteps"></div>
+    <div id="clHandAct" class="xpad" style="border-top:1px solid var(--x-border-soft)"></div>
+  </div>
+  <div class="xpanel">
+    <div class="xph"><h2>Stores and carts</h2><span class="sub">One row per store. Click a store to see each cart, shelf by shelf.</span></div>
+    <div class="xtools"><input class="xinput" id="clQ" type="search" placeholder="Search store #, name, city or cart code" aria-label="Search stores" oninput="xClFilter()"></div>
+    <div id="clBody"><div class="xempty">Run the engine on This Week to see stores and carts.</div></div>
+  </div>
+  <div class="xpanel">
+    <div class="xph"><h2>Loads</h2><span class="sub" id="clLoadSub">Engine loads are provisional until routing's workbook is imported.</span></div>
+    <div id="clLoads"><div class="xempty">No loads yet.</div></div>
+  </div>
+</div>
+</div>
+
+<!-- shared evidence / cart drawer -->
+<div id="xOv" hidden onclick="xCloseDw()"></div>
+<aside id="xDw" role="dialog" aria-modal="true" aria-labelledby="xDwT" aria-hidden="true">
+  <div class="xdwh"><h3 id="xDwT">Details</h3><button class="xx" id="xDwX" aria-label="Close" onclick="xCloseDw()">&times;</button></div>
+  <div class="xdwb" id="xDwB"></div>
+</aside>
+
+<!-- WEEK (Classic home) -->
+<div id="screen-week" class="screen">
 <div class="container-fluid p-4"><div class="row g-4">
   <div class="col-12 col-lg-6">
     <div class="card h-100">
@@ -733,6 +941,7 @@ function bootApp(){
   document.getElementById('alb').onclick=doApproveLoad;
   loadStores();
   loadHomeScenarios();
+  if(typeof xBoot==='function')xBoot();
 }
 
 /* NAV */
@@ -747,6 +956,7 @@ function go(n,el){
   if(n==='week')loadHomeScenarios();
   if(n==='configs')cfgTab(rId?'run':'perm');
   if(n==='ordercreate'&&rId){ocLoadCarts();ocLoadPlan();}
+  if(typeof xNavSync==='function')xNavSync(n);
 }
 function openScenarios(){
   var n=Array.prototype.slice.call(document.querySelectorAll('.nl')).filter(function(x){return /scenarios/.test(x.getAttribute('onclick')||'');})[0];
@@ -3521,6 +3731,547 @@ async function savePromo(){var name=document.getElementById('pm-name').value.tri
   try{if(id){await api('/api/promotions/'+id,{method:'PATCH',body:JSON.stringify(body)});}else{await api('/api/promotions/',{method:'POST',body:JSON.stringify(body)});}
     pmMod().hide();toast('Promotion saved','ok');loadPromos();}
   catch(e){var msg=e.message||'error';try{var j=JSON.parse(msg);msg=j.detail||msg;}catch(x){}document.getElementById('pm-val').textContent='Failed: '+msg;}
+}
+</script>
+<script>
+/* ===== IPR Engine v2 screens: This Week / Exceptions / Carts & Loads =====
+   ASCII only. Reuses api/apiBlob/apiUpload/escH/toast/canRole/go from the main block.
+   Shares bId/wk/rId with the Classic screens so they keep working on the same run. */
+var X={run:null,ipr:null,meta:null,batch:null,lines:[],job:null,routes:null,missing:{},fresh:null,
+  releasing:false,exc:{rows:[],kind:'all',page:0,loaded:null},fc:{rows:[],page:0,loaded:null,more:false},
+  cl:{orders:[],page:0,loaded:null},ex:null};
+var X_PAGE=50;
+var X_V2=['tw','exc','cl'];
+var X_KINDS=[
+  ['block','Hard blocks','bad','Not shipped. Nobody can override a hard block.'],
+  ['stopped_13wk','Stopped at 13-week review','bad','Below the 13-week sell-through bar, so the same shipment is not sent again (Sec 11).'],
+  ['reduced_13wk','Reduced at 13-week review','warn','Shipped smaller after the 13-week review (Sec 11).'],
+  ['review_hold','Held for review','warn','Not shipped this week; held for a DSM look.'],
+  ['allocation_shortfall','Supply shortfalls','warn','The store needed more than was available.'],
+  ['low_value_cart','Low-value carts','warn','Ships with a warning showing wholesale value and freight (Sec 19.1).'],
+  ['review_warning','Review warnings','warn','The reviewer flagged the order but it ships.'],
+  ['deferral','Deferred','n','Need is under one shelf; recalculated next week, never padded.'],
+  ['validation','Data checks','info','A data problem the engine found before planning.'],
+  ['gap_fill','Gap fills','ok','A short SKU was filled with a same-family best seller (Sec 21).'],
+  ['reactivation','Controlled tests','vio','Approved reactivation test, capped.']
+];
+var X_OTHER={review:['review','Order review','n',''],line:['line','Shipped line','ok','']};
+function xKind(k){for(var i=0;i<X_KINDS.length;i++)if(X_KINDS[i][0]===k)return X_KINDS[i];return X_OTHER[k]||[k,String(k).replace(/_/g,' '),'n',''];}
+
+/* ---------- formatting ---------- */
+function xN(n){return (n===null||n===undefined||n==='')?'&mdash;':Number(n).toLocaleString();}
+function xUsd(n){if(n===null||n===undefined)return '&mdash;';var a=Math.abs(n),s=n<0?'-':'';
+  if(a>=1e6)return s+'$'+(a/1e6).toFixed(a>=1e7?1:2)+'M';if(a>=1e4)return s+'$'+Math.round(a/1e3)+'K';
+  if(a>=1e3)return s+'$'+(a/1e3).toFixed(1)+'K';return s+'$'+Math.round(a).toLocaleString();}
+function xUsdFull(n){return (n===null||n===undefined)?'&mdash;':(n<0?'-':'')+'$'+Math.round(Math.abs(n)).toLocaleString();}
+function xDate(s){if(!s)return '&mdash;';var d=new Date(String(s).slice(0,10)+'T12:00:00');if(isNaN(d))return escH(s);
+  return d.toLocaleDateString('en-US',{weekday:'short',month:'numeric',day:'numeric'});}
+function xWhen(s){if(!s)return '';var d=new Date(s);if(isNaN(d))return escH(s);
+  return d.toLocaleString('en-US',{month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'});}
+function xHuman(k){return String(k).replace(/_/g,' ').replace(/\bwk\b/g,'week').replace(/\bpct\b/g,'%').replace(/^./,function(c){return c.toUpperCase();});}
+function xTile(label,val,foot,tone){return '<div class="xob'+(tone?' '+tone:'')+'"><div class="v">'+val+'</div><div class="l">'+escH(label)+'</div>'+(foot?'<div class="f">'+foot+'</div>':'')+'</div>';}
+function xStepper(steps){return steps.map(function(s,i){return '<div class="xstp '+(s[1]||'')+'"><span class="c">'+(s[1]==='done'?'<i class="bi bi-check"></i>':(i+1))+'</span><span>'+s[0]+'</span></div>';}).join('');}
+function xPager(total,page,fn){var pages=Math.max(1,Math.ceil(total/X_PAGE));if(total<=X_PAGE)return '<div class="xpager">'+xN(total)+' rows</div>';
+  return '<div class="xpager"><span>'+xN(page*X_PAGE+1)+'&ndash;'+xN(Math.min(total,(page+1)*X_PAGE))+' of '+xN(total)+'</span>'+
+    '<button class="xbtn xbtn-s xbtn-sm" '+(page<=0?'disabled':'')+' onclick="'+fn+'(-1)">Previous</button>'+
+    '<button class="xbtn xbtn-s xbtn-sm" '+(page>=pages-1?'disabled':'')+' onclick="'+fn+'(1)">Next</button></div>';}
+function xMatch(q,parts){if(!q)return true;q=q.toLowerCase();return parts.join(' ').toLowerCase().indexOf(q)>=0;}
+function xNextMonday(){var d=new Date();var add=((8-d.getDay())%7)||7;d.setDate(d.getDate()+add);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+
+/* ---------- nav ---------- */
+function xGo(n){go(n);
+  if(n==='exc')xLoadExc();
+  if(n==='cl')xLoadCl();
+  window.scrollTo(0,0);}
+function xNavSync(n){
+  var classic=X_V2.indexOf(n)<0;
+  document.querySelectorAll('.xtab[data-x]').forEach(function(t){var on=t.getAttribute('data-x')===n;t.classList.toggle('on',on);t.setAttribute('aria-current',on?'page':'false');});
+  var cb=document.getElementById('xClassicBtn');if(cb)cb.classList.toggle('on',classic);
+  xCloseClassic();
+}
+function xToggleClassic(ev){if(ev)ev.stopPropagation();var m=document.getElementById('xCMenu'),b=document.getElementById('xClassicBtn');if(!m)return;
+  if(!m.hidden){xCloseClassic();return;}
+  m.hidden=false;b.setAttribute('aria-expanded','true');
+  if(window.innerWidth<640){var r=b.getBoundingClientRect();m.style.position='fixed';m.style.left='12px';m.style.right='12px';m.style.top=(r.bottom+6)+'px';m.style.minWidth='0';}
+  else{m.style.position='';m.style.left='';m.style.right='';m.style.top='';m.style.minWidth='';}
+  var f=m.querySelector('.nl:not([style*="display: none"]):not([style*="display:none"])');if(f)f.focus();}
+function xCloseClassic(){var m=document.getElementById('xCMenu'),b=document.getElementById('xClassicBtn');if(m&&!m.hidden){m.hidden=true;if(b)b.setAttribute('aria-expanded','false');}}
+document.addEventListener('click',function(e){var m=document.getElementById('xCMenu');if(m&&!m.hidden&&!e.target.closest('.xclassic'))xCloseClassic();});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){xCloseClassic();xCloseDw();}
+  if((e.key==='Enter'||e.key===' ')&&e.target&&e.target.classList&&(e.target.classList.contains('nl')||e.target.classList.contains('x-row')||(e.target.getAttribute('role')==='button'&&e.target.tagName==='SPAN'))){e.preventDefault();e.target.click();}});
+
+/* ---------- boot ---------- */
+async function xBoot(){
+  document.querySelectorAll('#xCMenu .nl').forEach(function(n){n.setAttribute('tabindex','0');n.setAttribute('role','menuitem');});
+  xRenderUpload();xRenderSteps();
+  xLoadRoutes();
+  xLoadFreshness();
+  try{var rr=await api('/api/availability/recent-run');if(rr&&rr.run_id)await xLoadRun(rr.run_id,true);}catch(e){}
+  xRenderSteps();
+}
+async function xLoadRoutes(){
+  try{var r=await fetch(B+'/openapi.json');if(!r.ok)throw 0;var j=await r.json();X.routes=j.paths||{};}catch(e){X.routes=null;}
+  if(X.run)xRenderFiles();xRenderHandoff();
+}
+function xHas(path,method){if(X.missing[path])return false;if(!X.routes)return null;var p=X.routes[path];if(!p)return false;return !method||!!p[method];}
+
+/* ---------- data freshness ---------- */
+async function xLoadFreshness(){
+  var f=null;
+  try{f=await api('/api/ipr/freshness');}catch(e){}
+  if(!f&&X.ipr&&X.ipr.ipr_summary){var S=X.ipr.ipr_summary;f={sales_through:S.sales_anchor,age_days:(S.data_quality||{}).sales_age_days,warn_days:9,block_days:21,fromRun:true};}
+  X.fresh=f;xRenderFresh();
+}
+function xRenderFresh(){
+  var el=document.getElementById('twFresh');if(!el)return;var f=X.fresh;
+  if(!f||!f.sales_through){el.innerHTML='<div class="xbanner info"><i class="bi bi-info-circle"></i><span>Sales-through date not available yet. The engine checks it when it runs.</span></div>';return;}
+  var age=f.age_days,warn=age!=null&&age>(f.warn_days||9),block=age!=null&&age>(f.block_days||21);
+  var msg='<b>Sales through '+xDate(f.sales_through)+'</b> <span>('+(age==null?'age unknown':age+(age===1?' day':' days')+' old')+')</span>'+(f.fromRun?' <span class="xsmall">from the last run</span>':'');
+  if(block)msg+=' <span>&middot; Too old to plan: run the Monday sales ingest first. The engine will stop at more than '+(f.block_days||21)+' days.</span>';
+  else if(warn)msg+=' <span>&middot; Older than '+(f.warn_days||9)+' days. Check that the Monday sales ingest ran before you run the engine.</span>';
+  else msg+=' <span>&middot; Fresh enough to plan.</span>';
+  el.innerHTML='<div class="xbanner '+(block?'bad':warn?'warn':'ok')+'" role="status"><i class="bi '+(warn||block?'bi-exclamation-triangle-fill':'bi-check-circle-fill')+'"></i><span>'+msg+'</span></div>';
+}
+
+/* ---------- steps ---------- */
+function xStatus(){return X.meta&&X.meta.status;}
+function xRenderSteps(){
+  var el=document.getElementById('twSteps');if(!el)return;
+  var hasRun=!!X.run,released=xStatus()==='exported',hasBatch=!!X.batch,running=!!X.job;
+  el.innerHTML=xStepper([
+    ['Upload availability',hasBatch||hasRun?'done':'now'],
+    ['Check the file',hasRun?'done':hasBatch?'now':''],
+    ['Run the engine',hasRun&&!running?'done':running||hasBatch?'now':''],
+    ['Look over results',released?'done':hasRun?'now':''],
+    ['Release',released?'done':'']]);
+  var tag=document.getElementById('twRunTag');
+  if(tag){if(!hasRun){tag.className='xtag';tag.textContent='No run yet';}
+    else if(released){tag.className='xtag ok';tag.textContent='Released';}
+    else{tag.className='xtag info';tag.textContent='Draft, not released';}}
+}
+
+/* ---------- upload + validation preview ---------- */
+function xRenderUpload(){
+  var el=document.getElementById('twUpBody');if(!el)return;
+  var can=canRole('order_writer');
+  if(X.batch){xRenderPreview();return;}
+  el.innerHTML='<div class="xdrop" id="twDrop" ondragover="event.preventDefault();this.classList.add(\'over\')" ondragleave="this.classList.remove(\'over\')" ondrop="xOnDrop(event)">'+
+    '<h3>Upload this week\'s availability</h3>'+
+    '<p class="xmuted" style="margin:0 0 12px;font-size:13px">Drop the file here or choose it. You will see a check of the file before anything runs.</p>'+
+    '<div style="display:flex;gap:10px;justify-content:center;align-items:flex-end;flex-wrap:wrap">'+
+      '<div class="xfield"><label for="twWeek">Ship week (Monday)</label><input type="date" class="xinput" id="twWeek" value="'+xNextMonday()+'"></div>'+
+      '<label class="xbtn xbtn-p" style="margin:0'+(can?'':';opacity:.45;cursor:not-allowed')+'"><i class="bi bi-upload"></i>Choose file'+
+        '<input type="file" id="twFile" accept=".xlsx,.xls,.csv" style="display:none" '+(can?'':'disabled ')+'onchange="xOnPick(this)"></label>'+
+    '</div>'+
+    (can?'':'<div class="xwhy" style="margin-top:8px">Only order writers and managers can upload availability.</div>')+
+    '<div id="twUpMsg" class="xwhy" style="margin-top:8px" role="status"></div></div>';
+}
+function xOnDrop(e){e.preventDefault();var d=document.getElementById('twDrop');if(d)d.classList.remove('over');
+  if(!canRole('order_writer')){toast('Only order writers and managers can upload availability','warn');return;}
+  var f=e.dataTransfer.files&&e.dataTransfer.files[0];if(f)xUpload(f);}
+function xOnPick(i){var f=i.files&&i.files[0];if(f)xUpload(f);}
+async function xUpload(file){
+  var weekEl=document.getElementById('twWeek'),w=(weekEl&&weekEl.value)||xNextMonday();
+  var msg=document.getElementById('twUpMsg');if(msg)msg.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Uploading '+escH(file.name)+'&hellip;';
+  try{
+    var fd=new FormData();fd.append('file',file);fd.append('shipping_week',w);
+    var d=await apiUpload('/api/availability/upload',fd);
+    var bt=await api('/api/availability/batches/'+d.batch_id);
+    X.batch={id:d.batch_id,name:file.name,week:w,detail:bt};X.lines=bt.lines||[];
+    bId=d.batch_id;wk=w;  /* shared with Classic screens */
+    var gb=document.getElementById('gb');if(gb)gb.disabled=false;var eb=document.getElementById('eb');if(eb)eb.disabled=false;
+    setStrip(w,file.name);
+    xRenderPreview();xRenderSteps();
+    toast(file.name+' checked: '+X.lines.length+' SKUs','ok');
+  }catch(e){if(msg)msg.innerHTML='<span style="color:var(--x-bad-fg)"><i class="bi bi-exclamation-triangle-fill me-1"></i>Upload failed: '+escH(e.message)+'</span>';toast('Upload failed: '+e.message,'err');}
+}
+function xClearBatch(){X.batch=null;X.lines=[];xRenderUpload();xRenderSteps();}
+function xRenderPreview(){
+  var el=document.getElementById('twUpBody');if(!el||!X.batch)return;
+  var ls=X.lines,tot=0,noFam=0,fams={},zero=0;
+  ls.forEach(function(l){var u=Number(l.units_available||0);tot+=u;if(u<=0)zero++;if(!l.family)noFam++;else fams[l.family]=1;});
+  var nf=Object.keys(fams).length,can=canRole('order_writer'),busy=!!X.job;
+  var issues=[];
+  if(!ls.length)issues.push(['bad','The file loaded no SKUs. Check that it is the Aster availability export.']);
+  if(noFam)issues.push(['warn',noFam+' SKU'+(noFam===1?' has':'s have')+' no product family. The engine leaves '+(noFam===1?'it':'them')+' out (Sec 4.5).']);
+  if(zero)issues.push(['n',zero+' SKU'+(zero===1?'':'s')+' with zero units left.']);
+  if(!issues.length)issues.push(['ok','Every SKU maps to a product family.']);
+  var top=ls.slice(0,X_PAGE);
+  el.innerHTML='<div class="xbanner ok" style="margin:14px 16px"><i class="bi bi-file-earmark-check-fill"></i><span><b>'+escH(X.batch.name)+'</b> &middot; ship week '+xDate(X.batch.week)+'</span>'+
+      '<span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xClearBatch()" '+(busy?'disabled':'')+'>Use a different file</button></span></div>'+
+    '<div class="xobj" style="padding-top:0">'+xTile('SKUs',xN(ls.length))+xTile('Units available',xN(tot))+xTile('Product families',xN(nf))+
+      xTile('No family',xN(noFam),'left out of the plan',noFam?'warn':'ok')+'</div>'+
+    '<div style="padding:0 16px 10px">'+issues.map(function(i){return '<div class="xsmall" style="margin-bottom:4px"><span class="xtag '+i[0]+'">'+(i[0]==='ok'?'OK':i[0]==='n'?'Note':i[0]==='bad'?'Problem':'Check')+'</span> '+escH(i[1])+'</div>';}).join('')+'</div>'+
+    '<details style="padding:0 16px 12px"><summary class="xsmall" style="cursor:pointer;font-weight:600">See the SKUs (largest first'+(ls.length>X_PAGE?', top '+X_PAGE:'')+')</summary>'+
+      '<div class="xscroll" style="margin-top:8px"><table class="xdata"><thead><tr><th>SKU</th><th>Family</th><th class="r">Units</th></tr></thead><tbody>'+
+      top.map(function(l){return '<tr><td>'+escH(sn(l.description||('SKU '+l.sku_id)))+'</td><td>'+(l.family?escH(l.family):'<span class="xtag warn">none</span>')+'</td><td class="r">'+xN(l.units_available)+'</td></tr>';}).join('')+
+      '</tbody></table></div></details>'+
+    '<div class="xpad" style="border-top:1px solid var(--x-border-soft);display:flex;gap:10px;align-items:center;flex-wrap:wrap">'+
+      '<button class="xbtn xbtn-p" id="twRunBtn" onclick="xRun()" '+((!can||busy||!ls.length)?'disabled':'')+'><i class="bi bi-lightning-fill"></i>'+(busy?'Running&hellip;':'Run the engine')+'</button>'+
+      '<span class="xwhy" id="twRunMsg" role="status">'+(can?'Forecasts every store, applies this availability, loads carts and reviews every order. Takes a few minutes.':'Only order writers and managers can run the engine.')+'</span></div>';
+}
+
+/* ---------- run engine ---------- */
+async function xRun(){
+  if(!X.batch||X.job)return;
+  X.job='pending';xRenderPreview();xRenderSteps();
+  try{
+    var j=await api('/api/engine/generate',{method:'POST',body:JSON.stringify({batch_id:X.batch.id,shipping_week:X.batch.week,engine:'v2'})});
+    X.job=j.job_id;xPoll(0);
+  }catch(e){X.job=null;xRenderPreview();xRenderSteps();xRunMsg('Could not start: '+e.message,true);toast('Could not start: '+e.message,'err');}
+}
+function xRunMsg(t,bad){var m=document.getElementById('twRunMsg');if(m)m.innerHTML=bad?'<span style="color:var(--x-bad-fg)">'+escH(t)+'</span>':'<span class="spinner-border spinner-border-sm me-2"></span>'+escH(t);}
+function xPoll(n){
+  if(n>240){X.job=null;xRenderPreview();xRunMsg('Still running after 10 minutes. Refresh the page later to see the run.',true);return;}
+  setTimeout(async function(){
+    var j;try{j=await api('/api/engine/jobs/'+X.job);}catch(e){xPoll(n+1);return;}
+    if(j.status==='complete'){
+      X.job=null;rId=j.run_id;wk=X.batch.week;
+      ['nl-cfg','nl-draw','nl-routing'].forEach(function(id){var x=document.getElementById(id);if(x)x.style.display='flex';});
+      var fb=document.getElementById('fb');if(fb)fb.disabled=false;var psb=document.getElementById('psb');if(psb)psb.disabled=false;
+      setStrip(wk,null,'Draft Plan');
+      try{await loadPlan();}catch(e){}
+      X.batch=null;X.lines=[];xRenderUpload();
+      await xLoadRun(j.run_id);xLoadFreshness();
+      toast('Engine finished. Results are below.','ok');
+      var r=document.getElementById('twResults');if(r)r.scrollIntoView({behavior:'smooth',block:'start'});
+    }else if(j.status==='failed'){
+      X.job=null;xRenderPreview();xRenderSteps();xRunMsg('The engine stopped: '+(j.error_text||'unknown error'),true);toast('Engine stopped','err');
+    }else{xRunMsg(j.progress_msg||'Running the engine...');xPoll(n+1);}
+  },2500);
+}
+
+/* ---------- results ---------- */
+async function xLoadRun(id,quiet){
+  var r=await Promise.all([api('/api/ipr/runs/'+id+'/summary').catch(function(){return null;}),api('/api/orders/runs/'+id+'/summary').catch(function(){return null;})]);
+  if(!r[0]||r[0].engine_version!=='v2'||!r[0].ipr_summary){if(!quiet)toast('That run was not made by the v2 engine','warn');return;}
+  X.run=id;X.ipr=r[0];X.meta=r[1]||{};
+  X.exc={rows:[],kind:'all',page:0,loaded:null};X.fc={rows:[],page:0,loaded:null,more:false};X.cl={orders:[],page:0,loaded:null};X.ex=null;
+  xRenderResults();xRenderSteps();xExcBadge();xRenderHandoff();
+  if(!X.fresh||X.fresh.fromRun)xLoadFreshness();
+}
+function xExcCount(){var dc=(X.ipr&&X.ipr.decision_counts)||{},n=0;
+  X_KINDS.forEach(function(k){if(k[0]==='review_warning'){var c=((X.ipr.ipr_summary||{}).counts||{});n+=Number(c.review_warning||0);}else if(k[0]!=='gap_fill')n+=Number(dc[k[0]]||0);});return n;}
+function xExcBadge(){var b=document.getElementById('xExcBadge');if(!b)return;var n=X.run?xExcCount():0;b.textContent=n>999?'999+':n;b.classList.toggle('zero',!n);}
+function xRenderResults(){
+  var el=document.getElementById('twResults');if(!el)return;
+  if(!X.run){el.innerHTML='';return;}
+  var S=X.ipr.ipr_summary||{},o=S.objective||{},a=S.allocation||{},c=S.counts||{},dq=S.data_quality||{},dc=X.ipr.decision_counts||{};
+  var released=xStatus()==='exported',ps=X.ipr.pipeline_status||S.pipeline_status||'';
+  var h='';
+  /* run banner */
+  h+='<div class="xbanner '+(released?'ok':'info')+'"><i class="bi '+(released?'bi-check-circle-fill':'bi-clipboard-data')+'"></i><span><b>Run for ship week '+xDate(X.ipr.shipping_week||X.meta.shipping_week)+'</b>'+
+     ' &middot; sales through '+xDate(S.sales_anchor)+' &middot; in stores about '+xDate(S.arrival)+(ps?' &middot; status: '+escH(ps):'')+'</span>'+
+     '<span class="act"><a class="xbtn xbtn-s xbtn-sm" href="#twFiles" onclick="event.preventDefault();document.getElementById(\'twFiles\').scrollIntoView({behavior:\'smooth\'})">Files</a></span></div>';
+  /* objective */
+  var min=o.minimum_weekly_retail||900000,exp=o.expected_weekly_retail||0,base=o.baseline_weekly_retail||0,inc=o.incremental_weekly_retail||0,gap=o.gap_to_minimum;
+  var scale=Math.max(exp,min)*1.1||1;
+  h+='<div class="xpanel"><div class="xph"><h2>Weekly sales objective</h2><span class="sub">Expected register sales in the arrival week, with and without this plan (Sec 2).</span><span class="act"><span class="xsrc">Sec 2 &middot; objective</span></span></div>'+
+    '<div class="xobj">'+xTile('Baseline, no new orders',xUsd(base),'what stores sell from stock on hand')+
+      xTile('Added by this plan','+'+xUsd(inc),'incremental sales')+
+      '<div class="xob hero"><div class="v">'+xUsd(exp)+'</div><div class="l">Expected weekly sales</div><div class="f">baseline + this plan</div></div>'+
+      xTile(gap>0?'Short of '+xUsd(min)+' minimum':'Above '+xUsd(min)+' minimum',(gap>0?'-':'+')+xUsd(Math.abs(gap||0)),gap>0?'below the weekly minimum':'growth territory',gap>0?'bad':'ok')+
+      xTile('Store demand, unlimited supply',xUsd(o.unconstrained_weekly_demand_retail),'if every need were filled')+'</div>'+
+    '<div class="xbar" role="img" aria-label="Baseline '+xUsdFull(base)+', plus '+xUsdFull(inc)+' from this plan, against the '+xUsdFull(min)+' minimum">'+
+      '<i style="width:'+(base/scale*100).toFixed(1)+'%;background:var(--x-chart-1)"></i><i style="width:'+(Math.max(0,inc)/scale*100).toFixed(1)+'%;background:var(--x-chart-2)"></i>'+
+      '<span class="mark" style="left:'+(min/scale*100).toFixed(1)+'%"></span></div>'+
+    '<div class="xlegend"><span><i class="xdot" style="background:var(--x-chart-1)"></i>Baseline '+xUsd(base)+'</span><span><i class="xdot" style="background:var(--x-chart-2)"></i>This plan '+xUsd(inc)+'</span><span><i class="xdot" style="background:var(--x-text);border-radius:1px;width:3px"></i>'+xUsd(min)+' minimum</span></div>';
+  var ipu=S.incomplete_price_units!=null?S.incomplete_price_units:o.incomplete_price_units;
+  var notes=[];
+  if(ipu)notes.push(xN(ipu)+' units have no price yet, so the dollars above are understated.');
+  var pb=o.price_basis_units||{};if(pb.pricebook&&!pb.realized)notes.push('Dollars use pricebook retail until realized store prices load.');
+  if(notes.length)h+='<div class="xnote">'+notes.map(escH).join(' ')+'</div>';
+  h+='</div>';
+  /* review + corrections */
+  var corr=[['gap_fill','Gap fills'],['stopped_13wk','Stopped at 13 weeks'],['reduced_13wk','Reduced at 13 weeks'],['low_value_cart','Low-value cart warnings']].filter(function(k){return dc[k[0]]!=null;});
+  h+='<div class="xgrid2"><div class="xpanel"><div class="xph"><h2>Order review</h2><span class="sub">Every store order is checked before release (Sec 24&ndash;25).</span>'+
+       '<span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xGo(\'exc\')">Open exceptions</button></span></div>'+
+    '<div class="xobj">'+xTile('Passed',xN(c.review_pass),'stores','ok')+xTile('Warnings',xN(c.review_warning),'ship with a note',c.review_warning?'warn':'')+
+      xTile('Hard blocks',xN(c.lines_blocked),'lines not shipped',c.lines_blocked?'bad':'')+xTile('Held for review',xN(c.lines_review_held),'lines not shipped',c.lines_review_held?'warn':'')+
+      xTile('Deferred stores',xN(c.stores_deferred),'under one shelf of need')+xTile('Missing EDI',xN(c.stores_edi_gap),'stores held at baseline')+
+      corr.map(function(k){return xTile(k[1],xN(dc[k[0]]),'agent correction');}).join('')+'</div></div>';
+  /* release */
+  h+='<div class="xpanel" id="twRelease"><div class="xph"><h2>Release</h2><span class="sub">One click sends this plan on. No routine approvals.</span></div><div class="xpad">'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><span class="xtag info">'+xN(c.stores_shipped)+' stores</span><span class="xtag info">'+xN(c.carts)+' carts</span><span class="xtag info">'+xN(a.allocated_units)+' units</span></div>'+
+    xReleaseBody()+'</div></div></div>';
+  /* allocation + lost */
+  var rows=[['Available units',a.available_units],['What stores need',a.unconstrained_need_units],['Not shipped: blocked',a.blocked_units!=null?-a.blocked_units:null],
+    ['Not shipped: held for review',a.review_held_units!=null?-a.review_held_units:null],['Eligible need',a.eligible_need_units,1],['Allocated',a.allocated_units,1],
+    ['Unfilled (no supply)',a.unfilled_demand_units],['Deferred (under one shelf)',a.deferred_units],['Left over supply (fine, Sec 15)',a.unallocated_supply_units]];
+  if(a.gap_filled_units!=null)rows.splice(6,0,['Of which gap-filled',a.gap_filled_units]);
+  h+='<div class="xgrid2"><div class="xpanel"><div class="xph"><h2>Allocation</h2><span class="sub">No clearance target. Leftover supply is fine (Sec 15).</span></div>'+
+    '<table class="xdata"><tbody>'+rows.filter(function(r){return r[1]!=null;}).map(function(r){return '<tr'+(r[2]?' class="tot"':'')+'><td>'+escH(r[0])+'</td><td class="r">'+xN(r[1])+'</td></tr>';}).join('')+'</tbody></table></div>';
+  var lost=[['lost_unavailable_inventory','No inventory','store need with no supply this week'],['lost_blocks_and_holds','Blocks and holds','lines not shipped after review'],
+    ['lost_stopped_13wk','Stopped at 13 weeks','below the 13-week bar'],['lost_deferrals','Deferrals','need under one shelf, retried next week'],['lost_low_value','Low-value carts','held back for cart economics']];
+  h+='<div class="xpanel"><div class="xph"><h2>Sales we are leaving behind</h2><span class="sub">Per week, at retail (Sec 2).</span></div><div class="xlost">'+
+    lost.filter(function(l){return o[l[0]]!=null;}).map(function(l){return '<div class="xlc"><b>'+xUsd(o[l[0]])+'</b>'+escH(l[1])+' <span class="xwhy">&middot; '+escH(l[2])+'</span></div>';}).join('')+
+    (o.edi_uncertainty_at_risk!=null?'<div class="xlc n"><b>'+xUsd(o.edi_uncertainty_at_risk)+' at risk</b>Missing EDI at '+xN(c.stores_edi_gap)+' stores <span class="xwhy">&middot; demand held at baseline, not zeroed</span></div>':'')+
+    '</div></div></div>';
+  /* cart economics (engine stream; shown when present) */
+  var ce=S.cart_economics||S.cart_econ||null;
+  if(ce&&typeof ce==='object'){
+    var tiles=Object.keys(ce).filter(function(k){return typeof ce[k]==='number';}).map(function(k){var v=ce[k],lab=xHuman(k);
+      var val=/(^n_|_count$|count_|carts$|_n$)/i.test(k)?xN(v):/pct|percent|share|ratio/i.test(k)?(Math.abs(v)<=1?(v*100).toFixed(1):Number(v).toFixed(1))+'%':/usd|wholesale|cost|margin|freight|value|retail|revenue|dollar/i.test(k)?xUsd(v):xN(v);
+      return xTile(lab,val);}).join('');
+    if(tiles)h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Every cart is priced before release (Sec 19.1). Low-value carts ship with a warning.</span></div><div class="xobj">'+tiles+'</div></div>';
+  }
+  /* data notes */
+  var dn=[];
+  if(dq.onhand_source)dn.push('On-hand: '+dq.onhand_source+'.');
+  if(dq.family_mappings_unapproved)dn.push(dq.family_mappings_unapproved+' SKU-to-family mappings still need business approval (Sec 4.5).');
+  if(dn.length)h+='<div class="xbanner info" style="align-items:flex-start"><i class="bi bi-info-circle"></i><span>'+dn.map(escH).join('<br>')+'</span></div>';
+  /* forecast */
+  h+='<div class="xpanel"><details id="twFcD" ontoggle="if(this.open)xLoadFc()"><summary class="xph" style="cursor:pointer;list-style:none"><h2><i class="bi bi-chevron-right me-1"></i>Forecast before allocation</h2>'+
+    '<span class="sub">Store by SKU: weekly forecast, method, on hand, inbound and need, for every line that ships.</span></summary>'+
+    '<div class="xtools"><input class="xinput" id="fcQ" type="search" placeholder="Search store #, name or SKU" aria-label="Search forecast" oninput="X.fc.page=0;xRenderFc()" onkeydown="if(event.key===\'Enter\')xFcStore()"></div>'+
+    '<div id="fcBody"><div class="xempty">Loading&hellip;</div></div></details></div>';
+  /* files */
+  h+='<div class="xpanel" id="twFiles"><div class="xph"><h2>Files</h2><span class="sub">Built from this run. Files marked Coming are still being built.</span><span class="act"><span class="xsrc">Sec 22, 28 &middot; exports</span></span></div><div class="xfiles" id="twFilesBody"></div></div>';
+  el.innerHTML=h;
+  xRenderFiles();
+}
+function xReleaseBody(){
+  var released=xStatus()==='exported',can=canRole('order_writer');
+  if(released)return '<div class="xbanner ok" style="margin:0"><i class="bi bi-check-circle-fill"></i><span><b>Released.</b> It stays on record; later changes are logged as amendments.</span></div>';
+  if(!can)return '<p class="xsmall xmuted" style="margin:0">An order writer or manager releases the plan.</p>';
+  if(X.releasing)return '<p class="xsmall" style="margin:0 0 10px">Release this plan? Every store order is locked and the files are ready for Aster and routing. Exceptions do not hold the release.</p>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-p" id="twRelGo" onclick="xRelease()"><i class="bi bi-send-check"></i>Yes, release</button><button class="xbtn xbtn-s" onclick="X.releasing=false;xRefreshRelease()">Cancel</button></div>';
+  return '<p class="xsmall xmuted" style="margin:0 0 10px">Open exceptions do not hold the release. Overrides (with manager approval) come in a later release.</p>'+
+    '<button class="xbtn xbtn-p" onclick="X.releasing=true;xRefreshRelease()"><i class="bi bi-send"></i>Release this plan</button>';
+}
+function xRefreshRelease(){var p=document.querySelector('#twRelease .xpad');if(!p)return;var tags=p.firstElementChild?p.firstElementChild.outerHTML:'';p.innerHTML=tags+xReleaseBody();var g=document.getElementById('twRelGo');if(g)g.focus();}
+async function xRelease(){
+  var b=document.getElementById('twRelGo');if(b){b.disabled=true;b.innerHTML='<span class="spinner-border spinner-border-sm"></span> Releasing&hellip;';}
+  try{await api('/api/orders/runs/'+X.run+'/finalize',{method:'POST'});
+    X.releasing=false;X.meta=Object.assign({},X.meta,{status:'exported'});
+    if(String(rId)===String(X.run))setStrip(wk,null,'Released');
+    xRefreshRelease();xRenderSteps();var t=document.getElementById('twRunTag');if(t){t.className='xtag ok';t.textContent='Released';}
+    toast('Plan released','ok');
+  }catch(e){X.releasing=false;xRefreshRelease();toast('Release failed: '+e.message,'err');}
+}
+
+/* ---------- files ---------- */
+var X_FILES=[
+  {k:'sc',t:'Stores and Carts (.xlsx)',d:'One row per store with its carts. Goes to routing.',p:'/api/exports/runs/{run_id}/stores-and-carts.xlsx',ext:'xlsx'},
+  {k:'pp',t:'Pack plan (.xlsx)',d:'What to build: carts and shelves by configuration.',p:'/api/exports/runs/{run_id}/pack-plan.xlsx',ext:'xlsx'},
+  {k:'as',t:'Aster order file (.csv)',d:'The order import for Aster.',p:'/api/exports/runs/{run_id}/aster.csv',ext:'csv'}
+];
+function xRenderFiles(){
+  var el=document.getElementById('twFilesBody');if(!el||!X.run)return;
+  el.innerHTML=X_FILES.map(function(f){var has=xHas(f.p,'get'),coming=has===false;
+    return '<div class="xf"><div class="t"><b>'+escH(f.t)+'</b><span class="xwhy">'+escH(f.d)+'</span></div>'+
+      (coming?'<span class="xtag">Coming</span><button class="xbtn xbtn-s xbtn-sm" disabled>Download</button>':'<button class="xbtn xbtn-s xbtn-sm" id="xf-'+f.k+'" onclick="xDownload(\''+f.k+'\')"><i class="bi bi-download"></i>Download</button>')+'</div>';}).join('')+
+    '<div class="xf"><div class="t"><b>Routing workbook (import)</b><span class="xwhy">Routing\'s loads, ship and delivery dates come back here.</span></div><button class="xbtn xbtn-s xbtn-sm" onclick="xGo(\'cl\')">Go to Carts &amp; Loads</button></div>';
+}
+async function xDownload(k){
+  var f=X_FILES.filter(function(x){return x.k===k;})[0];if(!f||!X.run)return;
+  var b=document.getElementById('xf-'+k);if(b)b.disabled=true;
+  var path=f.p.replace('{run_id}',X.run);
+  try{
+    var sent=_curTok(),r=await fetch(B+path,{headers:authHdr()});
+    if(r.status===401&&await tryRefresh()){sent=_curTok();r=await fetch(B+path,{headers:authHdr()});}
+    if(r.status===401)_expire(sent);
+    if(r.status===404||r.status===405){var j=await r.json().catch(function(){return {};});
+      if(!j.detail||j.detail==='Not Found'){X.missing[f.p]=1;xRenderFiles();xRenderHandoff();toast(f.t+' is not available yet','warn');return;}
+      throw new Error(j.detail);}
+    if(!r.ok){var e=await r.json().catch(function(){return {detail:r.statusText};});throw new Error(e.detail||r.statusText);}
+    var blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement('a');
+    var wkS=String((X.ipr&&X.ipr.shipping_week)||'').slice(0,10);
+    a.href=u;a.download=f.t.replace(/ \(.*\)$/,'').replace(/[^A-Za-z0-9]+/g,'_')+(wkS?'_'+wkS:'')+'.'+f.ext;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(function(){URL.revokeObjectURL(u);},2000);
+  }catch(e){toast('Download failed: '+e.message,'err');}
+  finally{var b2=document.getElementById('xf-'+k);if(b2)b2.disabled=false;}
+}
+
+/* ---------- forecast before allocation ---------- */
+async function xLoadFc(storeId){
+  if(!X.run)return;var key=X.run+'|'+(storeId||'');if(X.fc.loaded===key)return;
+  var body=document.getElementById('fcBody');if(body)body.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading forecast&hellip;</div>';
+  try{var rows=await api('/api/ipr/runs/'+X.run+'/decisions?type=line&limit=5000'+(storeId?'&store_id='+encodeURIComponent(storeId):''));
+    X.fc.rows=rows||[];X.fc.loaded=key;X.fc.more=!storeId&&X.fc.rows.length>=5000;X.fc.page=0;X.fc.store=storeId||null;xRenderFc();}
+  catch(e){if(body)body.innerHTML='<div class="xempty">Could not load the forecast: '+escH(e.message)+'</div>';}
+}
+function xFcStore(){var q=(document.getElementById('fcQ').value||'').trim();
+  if(/^\d+$/.test(q)&&X.fc.more){X.fc.loaded=null;xLoadFc(q);}
+  else if(!q&&X.fc.store){X.fc.loaded=null;xLoadFc();}}
+function xFcPage(d){X.fc.page+=d;xRenderFc();}
+function xRenderFc(){
+  var body=document.getElementById('fcBody');if(!body)return;
+  var q=(document.getElementById('fcQ')||{}).value||'';
+  var rows=X.fc.rows.filter(function(r){return xMatch(q,[r.store_id,r.store_name||'',r.state||'',r.description||'',r.sku_id]);});
+  var pages=Math.max(1,Math.ceil(rows.length/X_PAGE));if(X.fc.page>=pages)X.fc.page=pages-1;if(X.fc.page<0)X.fc.page=0;
+  var pg=rows.slice(X.fc.page*X_PAGE,(X.fc.page+1)*X_PAGE);
+  var more=X.fc.more?'<div class="xnote">Showing the first 5,000 lines. Type a store number and press Enter to load all of that store\'s lines.</div>':'';
+  if(!rows.length){body.innerHTML='<div class="xempty">'+(X.fc.rows.length?'Nothing matches that search.':'No shipped lines in this run.')+'</div>'+more;return;}
+  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th>SKU</th><th class="x-hide-sm">Method</th><th class="r">Forecast / wk</th><th class="r x-hide-sm">On hand</th><th class="r x-hide-sm">Inbound</th><th class="r">Need</th><th class="r">Ships</th></tr></thead><tbody>'+
+    pg.map(function(r,i){var d=r.data||{};return '<tr class="x-row" tabindex="0" onclick="xFcOpen('+(X.fc.page*X_PAGE+i)+')"><td>'+escH(r.store_id)+' <span class="xwhy">'+escH(r.store_name||'')+'</span></td><td>'+escH(sn(r.description||('SKU '+r.sku_id)))+'</td>'+
+      '<td class="x-hide-sm"><span class="xtag">'+escH(d.method||'?')+'</span></td><td class="r">'+(d.forecast_wk!=null?Number(d.forecast_wk).toFixed(1):'&mdash;')+'</td>'+
+      '<td class="r x-hide-sm">'+xN(d.onhand!=null?Math.round(d.onhand):null)+(d.onhand_conf&&d.onhand_conf!=='HIGH'?' <span class="xwhy">'+escH(String(d.onhand_conf).toLowerCase())+'</span>':'')+'</td>'+
+      '<td class="r x-hide-sm">'+xN(d.inbound)+'</td><td class="r">'+xN(d.need_units!=null?Math.round(d.need_units):null)+'</td>'+
+      '<td class="r">'+(d.alloc_trays!=null?xN(d.alloc_trays)+' tr':'&mdash;')+'</td></tr>';}).join('')+'</tbody></table></div>'+xPager(rows.length,X.fc.page,'xFcPage')+more;
+  X.fc.view=rows;
+}
+function xFcOpen(i){var r=(X.fc.view||[])[i];if(r)xOpenEvidence(r,'line');}
+
+/* ---------- exceptions ---------- */
+async function xLoadExc(){
+  var body=document.getElementById('excBody');
+  if(!X.run){xRenderExcChips();if(body)body.innerHTML='<div class="xempty">Run the engine on This Week to see exceptions.</div>';return;}
+  if(X.exc.loaded===X.run){xRenderExcChips();xRenderExc();return;}
+  if(body)body.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading exceptions&hellip;</div>';
+  var failed=[];var dc=X.ipr.decision_counts||{},kinds=X_KINDS.map(function(k){return k[0];}).filter(function(k){return k==='review_warning'?!!dc.review:!!dc[k];});
+  var res=await Promise.all(kinds.map(function(k){var t=k==='review_warning'?'review':k;
+    return api('/api/ipr/runs/'+X.run+'/decisions?type='+t+'&limit=5000').then(function(rows){
+      if(k==='review_warning')rows=(rows||[]).filter(function(r){return (r.data||{}).verdict&&r.data.verdict!=='PASS';});
+      return (rows||[]).map(function(r){r._k=k;return r;});}).catch(function(){failed.push(xKind(k)[1]);return [];});}));
+  X.exc.rows=[].concat.apply([],res);X.exc.failed=failed;X.exc.loaded=failed.length?null:X.run;X.exc.page=0;
+  xRenderExcChips();xRenderExc();
+}
+function xRenderExcChips(){
+  var el=document.getElementById('excChips');if(!el)return;
+  var cnt={};X.exc.rows.forEach(function(r){cnt[r._k]=(cnt[r._k]||0)+1;});
+  var ks=X_KINDS.filter(function(k){return cnt[k[0]];});
+  if(!ks.length){el.innerHTML='';el.style.display='none';return;}el.style.display='';
+  el.innerHTML='<button class="xchip'+(X.exc.kind==='all'?' on':'')+'" aria-pressed="'+(X.exc.kind==='all')+'" onclick="xExcKind(\'all\')">All '+xN(X.exc.rows.length)+'</button>'+
+    ks.map(function(k){var on=X.exc.kind===k[0];return '<button class="xchip'+(on?' on':'')+'" aria-pressed="'+on+'" title="'+escH(k[3])+'" onclick="xExcKind(\''+k[0]+'\')">'+escH(k[1])+' '+xN(cnt[k[0]])+'</button>';}).join('');
+}
+function xExcKind(k){X.exc.kind=k;X.exc.page=0;xRenderExcChips();xRenderExc();}
+function xExcFilter(){X.exc.page=0;xRenderExc();}
+function xExcPage(d){X.exc.page+=d;xRenderExc();}
+function xRenderExc(){
+  var body=document.getElementById('excBody');if(!body||!X.run)return;
+  var q=(document.getElementById('excQ')||{}).value||'';
+  var rows=X.exc.rows.filter(function(r){return (X.exc.kind==='all'||r._k===X.exc.kind)&&xMatch(q,[r.store_id||'',r.store_name||'',r.state||'',r.description||'',r.sku_id||'',r.reason||'']);});
+  var fl=(X.exc.failed&&X.exc.failed.length)?'<div class="xbanner bad" style="margin:10px 16px"><i class="bi bi-exclamation-triangle-fill"></i><span>Could not load: '+escH(X.exc.failed.join(', '))+'.</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadExc()">Try again</button></span></div>':'';
+  if(!X.exc.rows.length){body.innerHTML=fl||'<div class="xempty"><i class="bi bi-check-circle me-1" style="color:var(--x-ok-fg)"></i>No exceptions in this run.</div>';return;}
+  if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches that filter.</div>';return;}
+  var pages=Math.max(1,Math.ceil(rows.length/X_PAGE));if(X.exc.page>=pages)X.exc.page=pages-1;if(X.exc.page<0)X.exc.page=0;
+  var pg=rows.slice(X.exc.page*X_PAGE,(X.exc.page+1)*X_PAGE);X.exc.view=rows;
+  var kk=X_KINDS.filter(function(k){return k[0]===X.exc.kind;})[0];
+  body.innerHTML=fl+(kk?'<div class="xnote" style="border-top:none;border-bottom:1px solid var(--x-border-soft)">'+escH(kk[1])+': '+escH(kk[3])+'</div>':'')+
+    '<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">SKU</th><th class="x-hide-sm">Kind</th><th>Reason</th></tr></thead><tbody>'+
+    pg.map(function(r,i){var k=xKind(r._k);return '<tr class="x-row" tabindex="0" onclick="xExcOpen('+(X.exc.page*X_PAGE+i)+')"><td>'+(r.store_id!=null?escH(r.store_id)+' <span class="xwhy">'+escH(r.store_name||'')+(r.state?', '+escH(r.state):'')+'</span>':'<span class="xwhy">All stores</span>')+
+      '<span class="x-show-sm">'+(r.sku_id!=null?'<br>'+escH(sn(r.description||('SKU '+r.sku_id))):'')+'</span></td>'+'<td class="x-hide-sm">'+(r.sku_id!=null?escH(sn(r.description||('SKU '+r.sku_id))):'<span class="xwhy">&mdash;</span>')+'</td><td class="x-hide-sm"><span class="xtag '+k[2]+'">'+escH(k[1])+'</span></td>'+'<td class="xreason" style="min-width:220px"><span class="x-show-sm"><span class="xtag '+k[2]+'">'+escH(k[1])+'</span><br></span>'+escH(xPlain(r.reason))+'</td></tr>';}).join('')+
+    '</tbody></table></div>'+xPager(rows.length,X.exc.page,'xExcPage');
+}
+function xPlain(s){return String(s||'').replace(/\u00a7\s?/g,'Sec ');}
+function xExcOpen(i){var r=(X.exc.view||[])[i];if(r)xOpenEvidence(r,r._k);}
+
+/* ---------- drawer ---------- */
+var _xDwRet=null;
+function xOpenDw(title,html){_xDwRet=document.activeElement;document.getElementById('xDwT').textContent=title;document.getElementById('xDwB').innerHTML=html;
+  document.getElementById('xOv').hidden=false;var d=document.getElementById('xDw');d.classList.add('open');d.setAttribute('aria-hidden','false');document.getElementById('xDwX').focus();}
+function xCloseDw(){var d=document.getElementById('xDw');if(!d||!d.classList.contains('open'))return;d.classList.remove('open');d.setAttribute('aria-hidden','true');document.getElementById('xOv').hidden=true;
+  if(_xDwRet&&_xDwRet.focus)try{_xDwRet.focus();}catch(e){}}
+function xKv(d){var skip={rates:1};var ks=Object.keys(d||{}).filter(function(k){return !skip[k]&&d[k]!==null&&d[k]!==''&&typeof d[k]!=='object';});
+  if(!ks.length)return '<p class="xmuted">No extra numbers recorded.</p>';
+  var h='<dl class="xkv">'+ks.map(function(k){return '<dt>'+escH(xHuman(k))+'</dt><dd>'+escH(xPlain(d[k]))+'</dd>';}).join('')+'</dl>';
+  if(d.rates&&typeof d.rates==='object')h+='<h4>Sales rate by window (units / week)</h4><dl class="xkv">'+Object.keys(d.rates).map(function(k){return '<dt>Last '+escH(k.replace(/^r/,''))+' weeks</dt><dd>'+escH(d.rates[k])+'</dd>';}).join('')+'</dl>';
+  return h;}
+async function xOpenEvidence(r,kind){
+  var k=xKind(kind||r._k||r.decision_type||'');
+  var title=(r.store_id!=null?'Store '+r.store_id+(r.store_name?' '+r.store_name:''):'Run-wide')+(r.sku_id!=null?' - '+sn(r.description||('SKU '+r.sku_id)):'');
+  var h='<h4>What happened</h4><p><span class="xtag '+k[2]+'">'+escH(k[1])+'</span> '+escH(xPlain(r.reason))+'</p>'+(k[3]?'<p class="xwhy">'+escH(k[3])+'</p>':'')+
+    '<h4>Numbers behind it</h4>'+xKv(r.data||{})+'<div id="xEvStore"></div>';
+  xOpenDw(title,h);
+  if(r.store_id==null||!X.run)return;
+  var box=document.getElementById('xEvStore');box.innerHTML='<h4>This store this run</h4><p class="xmuted"><span class="spinner-border spinner-border-sm me-2"></span>Loading&hellip;</p>';
+  try{var ev=await api('/api/ipr/runs/'+X.run+'/stores/'+r.store_id+'/evidence');
+    var ds=(ev.decisions||[]).filter(function(d){return d.decision_type!=='line';}),ln=(ev.decisions||[]).filter(function(d){return d.decision_type==='line';});
+    var eh='<h4>This store this run</h4><p class="xsmall">'+xN(ln.length)+' lines ship. '+(ds.length?xN(ds.length)+' other decisions:':'No other decisions.')+'</p>';
+    if(ds.length)eh+='<ul class="xsmall" style="padding-left:18px">'+ds.slice(0,40).map(function(d){var kk=xKind(d.decision_type);return '<li><span class="xtag '+kk[2]+'">'+escH(kk[1])+'</span> '+(d.description?escH(sn(d.description))+': ':'')+escH(xPlain(d.reason))+'</li>';}).join('')+'</ul>';
+    var fam=ev.families||[];
+    if(fam.length)eh+='<h4>Product families at this store</h4><div class="xscroll"><table class="xdata"><thead><tr><th>Family</th><th>Grade</th><th class="r">Units / wk</th><th class="r">13-wk sold</th><th>Status</th></tr></thead><tbody>'+
+      fam.slice(0,30).map(function(f){return '<tr><td>'+escH(f.ipr_family)+'</td><td>'+escH(f.grade||'')+'</td><td class="r">'+(f.weekly_velocity!=null?Number(f.weekly_velocity).toFixed(1):'&mdash;')+'</td><td class="r">'+(f.conversion_13wk!=null?Math.round(f.conversion_13wk*100)+'%':'&mdash;')+'</td><td>'+escH(String(f.service_status||'').toLowerCase())+'</td></tr>';}).join('')+'</tbody></table></div>';
+    box.innerHTML=eh;
+  }catch(e){box.innerHTML='<p class="xmuted">Store evidence could not load: '+escH(e.message)+'</p>';}
+}
+
+/* ---------- carts & loads ---------- */
+async function xLoadCl(force){
+  var body=document.getElementById('clBody');
+  xRenderHandoff();
+  if(!X.run){if(body)body.innerHTML='<div class="xempty">Run the engine on This Week to see stores and carts.</div>';return;}
+  if(X.cl.loaded===X.run&&!force){xRenderCl();return;}
+  if(body)body.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading stores&hellip;</div>';
+  var clErr=null;
+  var r=await Promise.all([api('/api/orders/runs/'+X.run).catch(function(e){clErr=e;return [];}),api('/api/orders/runs/'+X.run+'/loads').catch(function(){return [];}),
+    api('/api/routing/runs/'+X.run+'/exchange-status').catch(function(){return null;})]);
+  X.cl.orders=Array.isArray(r[0])?r[0]:[];X.cl.loads=Array.isArray(r[1])?r[1]:[];X.ex=r[2];X.cl.loaded=X.run;X.cl.page=0;
+  if(clErr){X.cl.loaded=null;if(body)body.innerHTML='<div class="xbanner bad" style="margin:14px 16px"><i class="bi bi-exclamation-triangle-fill"></i><span>Could not load stores: '+escH(clErr.message)+'</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadCl(true)">Try again</button></span></div>';xRenderLoads();xRenderHandoff();return;}
+  xRenderCl();xRenderLoads();xRenderHandoff();
+}
+function xClFilter(){X.cl.page=0;xRenderCl();}
+function xClPage(d){X.cl.page+=d;xRenderCl();}
+function xRenderCl(){
+  var body=document.getElementById('clBody');if(!body)return;
+  var q=(document.getElementById('clQ')||{}).value||'';
+  var rows=X.cl.orders.filter(function(o){return xMatch(q,[o.store_id,o.store_name||'',o.city||'',o.state||'',(o.cart_codes||[]).join(' '),o.load_name||'']);});
+  if(!X.cl.orders.length){body.innerHTML='<div class="xempty">No store orders in this run.</div>';return;}
+  if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches that search.</div>';return;}
+  var pages=Math.max(1,Math.ceil(rows.length/X_PAGE));if(X.cl.page>=pages)X.cl.page=pages-1;if(X.cl.page<0)X.cl.page=0;
+  var pg=rows.slice(X.cl.page*X_PAGE,(X.cl.page+1)*X_PAGE);X.cl.view=rows;
+  var tc=0,tu=0;rows.forEach(function(o){tc+=Number(o.cart_count||0);tu+=Number(o.total_units||0);});
+  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">City</th><th class="r">Carts</th><th class="r">Units</th><th>Cart configs</th><th class="x-hide-sm">Load</th></tr></thead><tbody>'+
+    pg.map(function(o,i){return '<tr class="x-row" tabindex="0" onclick="xClOpen('+(X.cl.page*X_PAGE+i)+')"><td><b>'+escH(o.store_id)+'</b> <span class="xwhy">'+escH(sn(o.store_name||''))+'</span></td>'+
+      '<td class="x-hide-sm">'+escH(o.city||'')+(o.state?', '+escH(o.state):'')+'</td><td class="r">'+xN(o.cart_count)+'</td><td class="r">'+xN(o.total_units)+'</td>'+
+      '<td>'+(o.cart_codes||[]).filter(Boolean).map(function(c){return '<span class="xtag" style="margin:1px">'+escH(c)+'</span>';}).join('')+'</td><td class="x-hide-sm">'+escH(o.load_name||'')+'</td></tr>';}).join('')+
+    '<tr class="tot"><td>'+xN(rows.length)+' stores</td><td class="x-hide-sm"></td><td class="r">'+xN(tc)+'</td><td class="r">'+xN(tu)+'</td><td></td><td class="x-hide-sm"></td></tr>'+
+    '</tbody></table></div>'+xPager(rows.length,X.cl.page,'xClPage');
+}
+async function xClOpen(i){
+  var o=(X.cl.view||[])[i];if(!o)return;
+  xOpenDw('Store '+o.store_id+' '+sn(o.store_name||''),'<p class="xmuted"><span class="spinner-border spinner-border-sm me-2"></span>Loading carts&hellip;</p>');
+  try{var d=await api('/api/orders/'+o.id);
+    var carts=d.carts||[];
+    var h='<dl class="xkv"><dt>Location</dt><dd>'+escH((o.city||'')+(o.state?', '+o.state:''))+'</dd><dt>Carts</dt><dd>'+xN(carts.length)+'</dd><dt>Units</dt><dd>'+xN(o.total_units)+'</dd>'+(o.load_name?'<dt>Load</dt><dd>'+escH(o.load_name)+'</dd>':'')+'</dl>';
+    h+='<h4>Carts, top shelf first</h4>';
+    h+=carts.map(function(c){var sh=c.shelves||[];
+      return '<div class="xcart"><h5><span>Cart '+escH(c.cart_number)+'</span>'+(c.config_code?'<span class="xtag">'+escH(c.config_code)+'</span>':'')+'<span>'+xN(c.shelves_used)+' shelves &middot; '+xN(c.total_units)+' units</span>'+(c.is_flagged?'<span class="xtag warn">'+escH(c.flag_reason||'flagged')+'</span>':'')+'</h5>'+
+        (sh.length?sh.map(function(s){return '<div class="xshelf"><span class="pos">'+escH(s.pos)+'</span><span>'+(s.varieties||[]).map(function(v){return escH(sn(v.variety_name||v.description||('SKU '+v.sku_id)))+' <span class="xwhy">'+xN(v.trays)+' tr</span>';}).join('<br>')+'</span><span class="xwhy">'+escH(s.profile_short||'')+'<br>'+xN(s.total_units)+' u</span></div>';}).join(''):'<p class="xwhy">No shelves.</p>')+'</div>';}).join('');
+    X.cl.curEv={store_id:o.store_id,store_name:o.store_name,reason:'Every decision the engine made for this store',data:{}};
+    h+='<div style="margin-top:10px"><button class="xbtn xbtn-s xbtn-sm" onclick="xOpenEvidence(X.cl.curEv,\'review\')">Why these carts</button></div>';
+    document.getElementById('xDwB').innerHTML=h;
+  }catch(e){document.getElementById('xDwB').innerHTML='<p class="xmuted">Could not load carts: '+escH(e.message)+'</p>';}
+}
+function xRenderLoads(){
+  var el=document.getElementById('clLoads');if(!el)return;var L=X.cl.loads||[];
+  var ext=X.ex&&X.ex.external_loads;
+  var sub=document.getElementById('clLoadSub');if(sub)sub.textContent=ext?'Loads from routing\'s workbook.':'Engine loads are provisional until routing\'s workbook is imported.';
+  if(!L.length){el.innerHTML='<div class="xempty">No loads yet.</div>';return;}
+  el.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Load</th><th class="r">Stores</th><th class="r">Carts</th><th class="r x-hide-sm">Full</th><th></th></tr></thead><tbody>'+
+    L.map(function(l){return '<tr><td>'+escH(l.load_name||('Load '+l.load_number))+'</td><td class="r">'+xN(l.store_count)+'</td><td class="r">'+xN(l.cart_count)+(l.capacity?' <span class="xwhy">/ '+xN(l.capacity)+'</span>':'')+'</td>'+
+      '<td class="r x-hide-sm">'+(l.utilization_pct!=null?Math.round(l.utilization_pct)+'%':'&mdash;')+'</td><td>'+(l.is_flagged?'<span class="xtag warn">'+escH(l.flag_reason||'check')+'</span>':'')+'</td></tr>';}).join('')+'</tbody></table></div>';
+}
+function xRenderHandoff(){
+  var st=document.getElementById('clSteps'),act=document.getElementById('clHandAct'),tag=document.getElementById('clRouteTag');if(!st||!act)return;
+  if(!X.run){st.innerHTML=xStepper([['Send stores and carts',''],['Routing builds loads',''],['Import routing\'s workbook',''],['Loads and dates attached','']]);act.innerHTML='<span class="xwhy">Run the engine first.</span>';if(tag)tag.textContent='No run';return;}
+  var ex=X.ex||{},imported=!!ex.routing_imported_at||!!ex.external_loads,sent=imported||!!ex.routing_submitted_at||ex.routing_status==='submitted';
+  st.innerHTML=xStepper([['Send stores and carts',sent?'done':'now'],['Routing builds loads',imported?'done':sent?'now':''],['Import routing\'s workbook',imported?'done':sent?'now':''],['Loads and dates attached',imported?'done':'']]);
+  if(tag){tag.className='xtag '+(imported?'ok':sent?'info':'');tag.textContent=imported?'Loads imported':sent?'Sent to routing':'Not sent';}
+  var scHas=xHas('/api/exports/runs/{run_id}/stores-and-carts.xlsx','get'),wbHas=xHas('/api/routing/runs/{run_id}/workbook','post'),can=canRole('order_writer');
+  var h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">'+
+    (scHas===false?'<button class="xbtn xbtn-s" disabled>Stores and Carts (.xlsx)</button><span class="xtag">Coming</span>':'<button class="xbtn xbtn-s" id="xf-sc" onclick="xDownload(\'sc\')"><i class="bi bi-download"></i>Stores and Carts (.xlsx)</button>')+
+    (wbHas===false?'<button class="xbtn xbtn-s" disabled>Import routing workbook</button><span class="xtag">Coming</span>':
+      '<label class="xbtn xbtn-p" style="margin:0'+(can?'':';opacity:.45;cursor:not-allowed')+'"><i class="bi bi-upload"></i>Import routing workbook<input type="file" accept=".xlsx,.xls,.csv" style="display:none" '+(can?'':'disabled ')+'onchange="xImportWb(this)"></label>')+
+    '</div><div class="xwhy" id="clWbMsg" role="status" style="margin-top:8px">';
+  if(imported)h+='Imported '+escH(ex.routing_filename||'workbook')+(ex.routing_imported_at?' on '+xWhen(ex.routing_imported_at):'')+' &middot; '+xN(ex.load_count)+' loads.';
+  else if(wbHas===false)h+='Workbook import is still being built. Until then, use Classic &gt; Routing to import routing\'s CSV.';
+  else if(!can)h+='Order writers and managers import the workbook.';
+  else h+='Send the Stores and Carts file to routing. When their workbook comes back, import it here.';
+  act.innerHTML=h+'</div>';
+}
+async function xImportWb(inp){
+  var f=inp.files&&inp.files[0];if(!f||!X.run)return;
+  var m=document.getElementById('clWbMsg');if(m)m.innerHTML='<span class="spinner-border spinner-border-sm me-2"></span>Importing '+escH(f.name)+'&hellip;';
+  try{var fd=new FormData();fd.append('file',f);
+    var r=await apiUpload('/api/routing/runs/'+X.run+'/workbook',fd);
+    toast('Workbook imported'+(r&&r.loads?': '+r.loads+' loads':''),'ok');X.cl.loaded=null;await xLoadCl(true);
+  }catch(e){
+    if(e.message==='Not Found'||e.message==='Method Not Allowed'){X.missing['/api/routing/runs/{run_id}/workbook']=1;xRenderHandoff();toast('Workbook import is not available yet','warn');}
+    else{if(m)m.innerHTML='<span style="color:var(--x-bad-fg)">Import failed: '+escH(e.message)+'</span>';toast('Import failed: '+e.message,'err');}
+  }finally{inp.value='';}
 }
 </script>
 </body>
