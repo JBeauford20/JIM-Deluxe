@@ -209,6 +209,22 @@ def main():
     sclean = [(s[0], s[1], s[2], s[3], s[4], feed) for s in sales if s[0] in valid_stores and s[1] in valid_skus]
     dclean = [(d[0], d[1], d[2], d[3], feed) for d in delivs if d[0] in valid_stores and d[1] in valid_skus]
 
+    # Cross-feed delivery dedupe (2026-11-20): weekly DTS files repeat delivery rows from other
+    # weeks (a delivery dated 11/5 showed up in the wk42, wk44 and wk45 files — 25.5K duplicate
+    # units since 10/1). The sales overlap guard tiles by SALE date and never sees this. First
+    # report wins: skip any delivery whose (store, sku, delivery_date) another feed already loaded.
+    if dclean:
+        lo, hi = min(d[2] for d in dclean), max(d[2] for d in dclean)
+        cur.execute("""SELECT DISTINCT store_id, sku_id, delivery_date FROM deliveries
+                       WHERE delivery_date BETWEEN %s AND %s AND feed_source <> %s""",
+                    (lo, hi, feed))
+        seen = {(r["store_id"], r["sku_id"], r["delivery_date"]) for r in cur.fetchall()}
+        before = len(dclean)
+        dclean = [d for d in dclean if (d[0], d[1], d[2]) not in seen]
+        if before - len(dclean):
+            log(f"  cross-feed dedupe: skipped {before - len(dclean):,} delivery rows already "
+                f"loaded by another feed")
+
     log(f"  inserting {len(sclean):,} sales + {len(dclean):,} deliveries (feed={feed})")
     psycopg2.extras.execute_batch(cur,
         "INSERT INTO sales (store_id, sku_id, sale_date, units_sold, dollars, feed_source) VALUES (%s,%s,%s,%s,%s,%s)",
