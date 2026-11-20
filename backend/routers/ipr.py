@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from db import get_db, cursor
-from routers.auth import get_current_user
+from routers.auth import get_current_user, require_role
+from routers.concurrency import log_change
 
 router = APIRouter()
 
@@ -18,6 +19,59 @@ DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", 
 # role (Josh), but one person can never sign both steps.
 DSM_ROLES = ("dsm", "admin")
 DIRECTOR_ROLES = ("sales_director", "admin")
+
+
+# Mirrors workers/ipr_engine.py CANCELLED_RUN_STATUSES: runs in these statuses are ignored by
+# the duplicate-run control, so a discarded test run no longer counts as inbound supply.
+CANCELLED_RUN_STATUSES = ("cancelled", "canceled", "failed", "rejected", "superseded", "deleted")
+
+
+@router.get("/runs")
+def list_runs(limit: int = Query(40, ge=1, le=200), include_cancelled: bool = False,
+              user=Depends(get_current_user)):
+    """Every run (draft, released, optionally discarded), newest first, for History and the
+    This Week 'earlier runs for this week' check."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT rr.id, rr.shipping_week, rr.run_at, rr.status, rr.pipeline_status, rr.engine_version,
+                   rr.stores_served, rr.total_carts, rr.total_units, rr.finalized_at, rr.created_by,
+                   ab.source_filename,
+                   (rr.ipr_summary->'objective'->>'expected_weekly_retail')::numeric AS expected_weekly_retail
+            FROM recommendation_runs rr
+            LEFT JOIN availability_batches ab ON ab.id = rr.batch_id
+            WHERE %s OR COALESCE(rr.status, '') NOT IN %s
+            ORDER BY rr.run_at DESC NULLS LAST
+            LIMIT %s
+        """, (include_cancelled, CANCELLED_RUN_STATUSES, limit))
+        return cur.fetchall()
+
+
+class DiscardRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/runs/{run_id}/discard")
+def discard_run(run_id: str, body: DiscardRequest,
+                user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Mark a run cancelled (test runs, bad uploads). Its orders stay on record but the engine's
+    duplicate-run control stops counting them as inbound. A released run can only be discarded
+    by a manager or admin."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT status FROM recommendation_runs WHERE id = %s FOR UPDATE", (run_id,))
+        r = cur.fetchone()
+        if not r:
+            raise HTTPException(404, "Run not found")
+        if (r["status"] or "") in CANCELLED_RUN_STATUSES:
+            raise HTTPException(409, "Run is already discarded")
+        if r["status"] == "exported" and user.get("role") not in ("manager", "admin"):
+            raise HTTPException(403, "Only a manager can discard a released run")
+        cur.execute("UPDATE recommendation_runs SET status = 'cancelled', last_activity_at = NOW() "
+                    "WHERE id = %s", (run_id,))
+        log_change(cur, run_id, "run", run_id,
+                   f"discarded (was {r['status']}): {body.reason.strip()}", user.get("email"))
+        return {"discarded": True, "previous_status": r["status"]}
 
 
 @router.get("/runs/{run_id}/summary")
@@ -39,6 +93,25 @@ def run_summary(run_id: str, user=Depends(get_current_user)):
 # Mirrors workers/ipr_engine.py STALE_SALES_WARN_DAYS / STALE_SALES_BLOCK_DAYS (Sec 5).
 FRESH_WARN_DAYS = 9
 FRESH_BLOCK_DAYS = 21
+
+
+@router.get("/store-grades")
+def store_grades(user=Depends(get_current_user)):
+    """One row per store: family grades (Sec 6), weekly demand and 13-week conversion (Sec 11)
+    from ipr_store_family, for the Stores screen."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT store_id,
+                   jsonb_object_agg(ipr_family, grade) FILTER (WHERE grade IS NOT NULL) AS grades,
+                   ROUND(SUM(weekly_velocity)::numeric, 1) AS weekly_units,
+                   ROUND(AVG(conversion_13wk)::numeric, 3) AS conversion_13wk,
+                   COUNT(*) FILTER (WHERE conversion_13wk IS NOT NULL AND conversion_13wk < 0.6) AS families_below_60,
+                   array_remove(array_agg(DISTINCT service_status), NULL) AS service_statuses
+            FROM ipr_store_family
+            GROUP BY store_id
+        """)
+        return cur.fetchall()
 
 
 @router.get("/freshness")

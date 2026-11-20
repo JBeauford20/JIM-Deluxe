@@ -199,6 +199,43 @@ html,body{overflow-x:hidden;}
 .x-show-sm{display:none;}
 .xraw{display:none;font-family:Consolas,monospace;font-size:10.5px;color:var(--x-faint);font-weight:400;}body.xtrace .xraw{display:inline;}body.xtrace p.xraw{display:block;}
 .xsrc{display:none!important;}body.xtrace .xsrc{display:inline-flex!important;}
+/* ===== v2 shell: light header + pill nav, matching the TPC IPR Engine v2 mockup ===== */
+body{background:var(--x-bg);}
+.xtop{max-width:1220px;margin:0 auto;padding:14px 16px 0;color:var(--x-text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:14px;line-height:1.5;}
+.xhd{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;margin-bottom:6px;}
+.xlogo{font-size:19px;font-weight:700;letter-spacing:-.01em;}
+.xlogo em{color:var(--x-accent);font-style:normal;}
+.xhd .right{margin-left:auto;display:flex;gap:8px 14px;align-items:center;flex-wrap:wrap;}
+.xhd .xuser{color:var(--x-muted);}
+.xsubhd{display:flex;gap:6px 16px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--x-muted);margin-bottom:12px;}
+.xsubhd b{color:var(--x-text-2);font-weight:600;}
+.xtabs{display:flex;gap:4px;flex-wrap:wrap;align-items:center;}
+.xtabs .sep{flex:1;}
+.xtab{border:1px solid var(--x-border-soft);background:var(--x-surface);color:var(--x-text-3);border-radius:999px;padding:6px 15px;font-size:13px;font-weight:500;}
+.xtab:hover{background:var(--x-hover);color:var(--x-text);}
+.xtab.on{background:var(--x-accent);border-color:var(--x-accent);color:#fff;font-weight:600;}
+.xtab.alt{border-style:dashed;}
+.xbadge{margin-left:4px;}
+.xbadge.zero{background:var(--x-tag-bg);color:var(--x-muted);}
+.xtab.on .xbadge.zero{background:rgba(255,255,255,.25);color:#fff;}
+.xpipe{display:flex;gap:4px;overflow-x:auto;padding:0 16px 12px;}
+.xpp{flex:0 0 auto;font-size:11px;font-weight:600;padding:4px 11px;border-radius:999px;border:1.5px solid var(--x-border);color:var(--x-faint);background:#fff;white-space:nowrap;}
+.xpp.done{border-color:var(--x-ok-fg);color:var(--x-ok-fg);background:var(--x-ok-bg);}
+.xpp.now{border-color:var(--x-info-fg);color:var(--x-info-fg);background:var(--x-info-bg);}
+.xsubtabs{display:flex;gap:4px;padding:10px 16px;border-bottom:1px solid var(--x-border-soft);flex-wrap:wrap;}
+.xsubtab{border:none;background:transparent;padding:5px 12px;border-radius:6px;font-size:13px;font-weight:600;color:var(--x-muted);cursor:pointer;}
+.xsubtab.on{background:var(--x-accent-tint);color:var(--x-accent-hover);}
+.xsubtab:focus-visible{outline:2px solid var(--x-focus);outline-offset:2px;}
+.xgc{display:inline-block;min-width:26px;text-align:center;font-size:11px;font-weight:700;border-radius:4px;padding:1px 4px;margin:1px;background:var(--x-tag-bg);color:var(--x-text-3);}
+.xgc.gA{background:var(--x-ok-bg);color:var(--x-ok-fg);}.xgc.gC{background:var(--x-warn-bg);color:var(--x-warn-fg);}.xgc.gD{background:var(--x-bad-bg);color:var(--x-bad-fg);}
+.xhbar{height:9px;border-radius:999px;background:var(--x-tag-bg);overflow:hidden;min-width:90px;position:relative;}
+.xhbar i{position:absolute;left:0;top:0;bottom:0;border-radius:999px;}
+.xflow{display:flex;gap:6px;flex-wrap:wrap;padding:12px 16px;align-items:center;}
+.xfbox{border:1px solid var(--x-border-soft);background:var(--x-surface-2);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;}
+.xfbox small{display:block;font-weight:500;color:var(--x-muted);font-size:10.5px;}
+.xarrow{color:var(--x-faint);font-weight:700;}
+.xdwb textarea.xinput{width:100%;min-height:70px;resize:vertical;}
+@media (max-width:640px){.xtop{padding:12px 12px 0;}.xhd .right{margin-left:0;}}
 @media (max-width:640px){.xkv{grid-template-columns:1fr;}.x-hide-sm{display:none;}.x-show-sm{display:inline;}.xdata td.xreason{min-width:0!important;}.xwrap{padding:12px 12px 60px;}}
 </style>
 </head>
@@ -215,14 +252,36 @@ html,body{overflow-x:hidden;}
   </div>
 </div>
 
-<nav class="jnav">
-  <span class="brand">&#127807; TPC <span style="font-weight:400;opacity:.7">- IPR Engine</span></span>
-  <div class="xnav" aria-label="Main">
-    <button type="button" class="xtab on" data-x="tw" aria-current="page" onclick="xGo('tw')"><i class="bi bi-house"></i>This Week</button>
-    <button type="button" class="xtab" data-x="exc" onclick="xGo('exc')"><i class="bi bi-flag"></i>Exceptions <span class="xbadge zero" id="xExcBadge">0</span></button>
-    <button type="button" class="xtab" data-x="cl" onclick="xGo('cl')"><i class="bi bi-truck"></i>Carts &amp; Loads</button>
+<div class="xtop">
+  <div class="xhd">
+    <span class="xlogo">TPC <em>IPR Engine</em> v2</span>
+    <span class="xtag" id="xRunPill">No run yet</span>
+    <div class="right">
+      <button type="button" class="xbtn xbtn-s xbtn-sm" id="xNeedsBtn" onclick="xOpenNeeds()" title="Data problems and held lines the engine could not settle with approved rules">Needs a person<span class="xbadge zero" id="xNeedsBadge">0</span></button>
+      <label class="xsmall xmuted" style="display:flex;gap:5px;align-items:center;margin:0"><input type="checkbox" class="xtrace-tgl" onchange="xTrace(this.checked)">Engine trace</label>
+      <span class="xuser"><span id="nav-user"></span><span role="button" tabindex="0" onclick="openChangePw()">Change password</span><span role="button" tabindex="0" onclick="logout()">Sign out</span></span>
+    </div>
+  </div>
+  <div class="xsubhd">
+    <span>Ship week <b id="sw">--</b></span>
+    <span>Sales through <b id="xSubSales">&mdash;</b></span>
+    <span id="xSubAvail">Availability <b>not uploaded yet</b></span>
+    <span id="sf" style="display:none"><span id="sfn"></span></span>
+    <span id="ss" style="display:none" class="xtag"></span>
+    <span class="xsrc" title="Engine trace chips name the Version 2 leadership doc section and the engine field behind each panel">Sec = Version 2 doc section</span>
+  </div>
+  <nav class="xtabs" aria-label="Main">
+    <button type="button" class="xtab on" data-x="tw" aria-current="page" onclick="xGo('tw')">This Week</button>
+    <button type="button" class="xtab" data-x="exc" onclick="xGo('exc')">Exceptions <span class="xbadge zero" id="xExcBadge">0</span></button>
+    <button type="button" class="xtab" data-x="cl" onclick="xGo('cl')">Carts &amp; Loads</button>
+    <button type="button" class="xtab" data-x="xst" onclick="xGo('xst')">Stores</button>
+    <button type="button" class="xtab" data-x="xbld" onclick="xGo('xbld')">Builds</button>
+    <button type="button" class="xtab" data-x="xrep" onclick="xGo('xrep')">Reports</button>
+    <button type="button" class="xtab" data-x="xhist" onclick="xGo('xhist')">History</button>
+    <span class="sep"></span>
+    <button type="button" class="xtab alt" data-x="xpol" onclick="xGo('xpol')">Policies</button>
     <div class="xclassic">
-      <button type="button" class="xtab" id="xClassicBtn" aria-haspopup="true" aria-expanded="false" aria-controls="xCMenu" onclick="xToggleClassic(event)">Classic <i class="bi bi-chevron-down"></i></button>
+      <button type="button" class="xtab alt" id="xClassicBtn" aria-haspopup="true" aria-expanded="false" aria-controls="xCMenu" onclick="xToggleClassic(event)">Classic <i class="bi bi-chevron-down"></i></button>
       <div class="xcmenu" id="xCMenu" role="menu" hidden onclick="if(event.target.closest('.nl'))xCloseClassic()">
         <div class="xcm-h">Classic screens (unchanged)</div>
         <span class="nl" onclick="go('week',this)"><i class="bi bi-house me-1"></i>Week (classic home)</span>
@@ -239,15 +298,7 @@ html,body{overflow-x:hidden;}
         <span class="nl" onclick="go('history',this);loadHistory()"><i class="bi bi-clock-history me-1"></i>Order History</span>
       </div>
     </div>
-  </div>
-  <div class="ms-auto xuser"><span id="nav-user"></span><span role="button" tabindex="0" onclick="openChangePw()"><i class="bi bi-key me-1"></i>Change password</span><span role="button" tabindex="0" onclick="logout()"><i class="bi bi-box-arrow-right me-1"></i>Sign out</span></div>
-</nav>
-
-<div class="ws">
-  <span><i class="bi bi-calendar-week me-1"></i><strong>Shipping Week:</strong> <span id="sw">--</span></span>
-  <span id="sf" style="display:none"><i class="bi bi-box-seam me-1"></i><span id="sfn"></span></span>
-  <span id="ss" style="display:none" class="wchip"></span>
-  <span class="ms-auto" style="opacity:.6;font-size:11px">TPC - IPR Engine v2 - The Plant Company</span>
+  </nav>
 </div>
 
 <!-- ===== IPR ENGINE V2: THIS WEEK ===== -->
@@ -258,10 +309,12 @@ html,body{overflow-x:hidden;}
     <div class="xph"><h2>This week</h2><span class="sub">The engine writes, checks and corrects the orders. You upload availability, look over the results and make one release click. No routine approvals.</span>
       <span class="act"><span class="xtag" id="twRunTag">No run yet</span></span></div>
     <div class="xstepper" id="twSteps" aria-label="Weekly steps"></div>
+    <div class="xpipe" id="twPipe" aria-label="Order status pipeline (Sec 28)"></div>
   </div>
 
   <div class="xpanel" id="twUpload">
     <div class="xph"><h2>1. Availability</h2><span class="sub">This week's greenhouse availability file from Aster (Excel or CSV).</span></div>
+    <div id="twPrior"></div>
     <div id="twUpBody"></div>
   </div>
 
@@ -275,6 +328,7 @@ html,body{overflow-x:hidden;}
   <div class="xpanel">
     <div class="xph"><h2>Exceptions</h2><span class="sub">Only what the engine did not ship as planned, or flagged for a look. Everything else passed its checks. Click a row for the evidence.</span>
       <span class="act"><span class="xsrc">Sec 24 &middot; run decisions</span></span></div>
+    <div class="xsubtabs" id="eTabs" role="group" aria-label="Exception views"></div>
     <div class="xchips" id="excChips" role="group" aria-label="Filter by kind"></div>
     <div class="xtools"><input class="xinput" id="excQ" type="search" placeholder="Search store, SKU or reason" aria-label="Search exceptions" oninput="xExcFilter()"></div>
     <div id="excBody"><div class="xempty">Run the engine on This Week to see exceptions.</div></div>
@@ -300,6 +354,84 @@ html,body{overflow-x:hidden;}
   <div class="xpanel">
     <div class="xph"><h2>Loads</h2><span class="sub" id="clLoadSub">Engine loads are provisional until routing's workbook is imported.</span></div>
     <div id="clLoads"><div class="xempty">No loads yet.</div></div>
+  </div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: STORES ===== -->
+<div id="screen-xst" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Stores</h2><span class="sub">Store master, family grades, demand and what this run does with each store. Click a store for detail.</span>
+      <span class="act"><span class="xsrc">Sec 4.1, 6, 11 &middot; stores + ipr_store_family</span></span></div>
+    <div class="xchips" id="stChips"></div>
+    <div class="xtools"><input class="xinput" id="stQ" type="search" placeholder="Search store #, name, city or merchant" aria-label="Search stores" oninput="X.st.page=0;xRenderSt()"></div>
+    <div id="stBody"><div class="xempty">Loading stores&hellip;</div></div>
+    <div class="xnote">Grades show past performance and service. They set test size and risk tolerance but never override what a SKU actually sells (Sec 11.4). Conversion is the share of the last delivery sold within 13 weeks; below 60% the engine stops, reduces or tests (Sec 11.3).</div>
+  </div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: BUILDS ===== -->
+<div id="screen-xbld" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Builds</h2><span class="sub">Promotions feed the engine. Special orders, custom carts and line edits are manual overrides.</span>
+      <span class="act"><span class="xtag warn">Override rules: being settled</span></span></div>
+    <div class="xsubtabs" id="bTabs">
+      <button type="button" class="xsubtab on" data-b="promo" onclick="xSubB('promo')">Promotions</button>
+      <button type="button" class="xsubtab" data-b="over" onclick="xSubB('over')">Special orders &amp; cart builder</button>
+    </div>
+    <div id="b-promo"><div class="xempty">Loading promotions&hellip;</div></div>
+    <div id="b-over" hidden>
+      <div class="xpad">
+        <p style="margin:0 0 10px">Until the override rules are settled, special orders, custom carts and line edits use the Classic tools on the same run. Every change there is logged with who and when.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button type="button" class="xbtn xbtn-s" onclick="go('editor')">Order Editor (line edits)</button>
+          <button type="button" class="xbtn xbtn-s" onclick="go('configs');if(typeof cfgTab==='function')cfgTab(rId?'run':'perm')">Cart &amp; shelf configs</button>
+          <button type="button" class="xbtn xbtn-s" onclick="go('promos');loadPromos()">Edit promotions</button>
+        </div>
+      </div>
+      <div class="xnote">Hard controls (inventory shortage, do-not-ship, duplicate order) can't be overridden. Who can override, and whether a manager signs off, is an open decision.</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: REPORTS ===== -->
+<div id="screen-xrep" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Reports</h2><span class="sub">One report for each phase of the order: what stores demand, how close the plan got, and what happened after delivery.</span></div>
+    <div class="xsubtabs" id="rTabs">
+      <button type="button" class="xsubtab on" data-r="r1" onclick="xSubR('r1')">1 &middot; What do stores demand?</button>
+      <button type="button" class="xsubtab" data-r="r2" onclick="xSubR('r2')">2 &middot; How close did the plan get?</button>
+      <button type="button" class="xsubtab" data-r="r3" onclick="xSubR('r3')">3 &middot; What actually sold?</button>
+    </div>
+    <div id="r-body"><div class="xempty">Run the engine on This Week to see reports.</div></div>
+  </div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: HISTORY ===== -->
+<div id="screen-xhist" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Runs</h2><span class="sub">Every engine run, newest first. Open one to view it on This Week. Discard test runs so the duplicate-run control stops counting them.</span>
+      <span class="act"><label class="xsmall xmuted" style="display:flex;gap:5px;align-items:center;margin:0"><input type="checkbox" id="hiAll" onchange="xLoadHist(true)">Show discarded</label></span></div>
+    <div id="hiBody"><div class="xempty">Loading runs&hellip;</div></div>
+    <div class="xnote">Released runs stay on record. A discarded run keeps its orders for the audit trail but no longer counts as inbound supply for a rerun of the same week (Sec 24 duplicate-run control).</div>
+  </div>
+</div>
+</div>
+
+<!-- ===== IPR ENGINE V2: POLICIES ===== -->
+<div id="screen-xpol" class="screen xs">
+<div class="xwrap">
+  <div class="xpanel">
+    <div class="xph"><h2>Policies</h2><span class="sub">The rules the engine runs on right now. Read only here.</span>
+      <span class="act"><span class="xsrc">ipr_settings</span></span></div>
+    <div id="polBody"><div class="xempty">Loading policies&hellip;</div></div>
   </div>
 </div>
 </div>
@@ -4001,7 +4133,7 @@ function xRenderResults(){
   h+='</div>';
   /* review + corrections */
   var corr=[['gap_fill','Gap fills'],['stopped_13wk','Stopped at 13 weeks'],['reduced_13wk','Reduced at 13 weeks'],['low_value_cart','Low-value cart warnings']].filter(function(k){return dc[k[0]]!=null;});
-  h+='<div class="xgrid2"><div class="xpanel"><div class="xph"><h2>Order review</h2><span class="sub">Every store order is checked before release (Sec 24&ndash;25).</span>'+
+  h+='<div class="xgrid2"><div class="xpanel"><div class="xph"><h2>Independent review</h2><span class="sub">Every store order is checked, and fixable problems corrected, before release (Sec 24&ndash;25).</span>'+
        '<span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xGo(\'exc\')">Open exceptions</button></span></div>'+
     '<div class="xobj">'+xTile('Passed',xN(c.review_pass),'stores','ok')+xTile('Warnings',xN(c.review_warning),'ship with a note',c.review_warning?'warn':'')+
       xTile('Hard blocks',xN(c.lines_blocked),'lines not shipped',c.lines_blocked?'bad':'')+xTile('Held for review',xN(c.lines_review_held),'lines not shipped',c.lines_review_held?'warn':'')+
@@ -4173,7 +4305,7 @@ function xExcPage(d){X.exc.page+=d;xRenderExc();}
 function xRenderExc(){
   var body=document.getElementById('excBody');if(!body||!X.run)return;
   var q=(document.getElementById('excQ')||{}).value||'';
-  var rows=X.exc.rows.filter(function(r){return (X.exc.kind==='all'||r._k===X.exc.kind)&&xMatch(q,[r.store_id||'',r.store_name||'',r.state||'',r.description||'',r.sku_id||'',xReason(r)]);});
+  var rows=X.exc.rows.filter(function(r){return xExcKindMatch(r)&&xMatch(q,[r.store_id||'',r.store_name||'',r.state||'',r.description||'',r.sku_id||'',xReason(r)]);});
   var fl=(X.exc.failed&&X.exc.failed.length)?'<div class="xbanner bad" style="margin:10px 16px"><i class="bi bi-exclamation-triangle-fill"></i><span>Could not load: '+escH(X.exc.failed.join(', '))+'.</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadExc()">Try again</button></span></div>':'';
   if(!X.exc.rows.length){body.innerHTML=fl||'<div class="xempty"><i class="bi bi-check-circle me-1" style="color:var(--x-ok-fg)"></i>No exceptions in this run.</div>';return;}
   if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches that filter.</div>';return;}
@@ -4327,5 +4459,278 @@ async function xImportWb(inp){
   }finally{inp.value='';}
 }
 </script>
+<script>
+/* ===== IPR Engine v2 shell, round 3: mockup header + nav, pipeline, test-run controls,
+   Stores / Builds / Reports / History / Policies. ASCII only. Wraps the round-2 functions
+   above (same globals) so upload -> run -> release -> exports keep their wiring. */
+X_V2=['tw','exc','cl','xst','xbld','xrep','xhist','xpol'];
+X.runs=null;X.st={rows:null,page:0,region:'all'};X.rep='r1';X.corr=null;
+var X_STAGES=['Input Received','Data Validated','Demand Calculated','Inventory Allocated','Cart Built','Independent AI Review','Final Validated','Sent to Pin Routes','Routing Response Received','Released'];
+var X_CANCELLED=['cancelled','canceled','failed','rejected','superseded','deleted'];
+function xIsCancelled(st){return X_CANCELLED.indexOf(String(st||''))>=0;}
+
+/* ---------- nav ---------- */
+xGo=function(n){go(n);
+  if(n==='exc')xLoadExc();
+  if(n==='cl')xLoadCl();
+  if(n==='xst')xLoadSt();
+  if(n==='xbld')xLoadPromos();
+  if(n==='xrep')xRenderRep();
+  if(n==='xhist')xLoadHist();
+  if(n==='xpol')xLoadPol();
+  window.scrollTo(0,0);};
+function xOpenNeeds(){X.exc.kind='needs';X.exc.page=0;xGo('exc');}
+
+/* ---------- header, sub-header, pipeline ---------- */
+var _xSteps0=xRenderSteps;
+xRenderSteps=function(){_xSteps0();
+  var tag=document.getElementById('twRunTag'),pill=document.getElementById('xRunPill');
+  if(tag&&X.run&&xIsCancelled(xStatus())){tag.className='xtag bad';tag.textContent='Discarded';}
+  if(pill&&tag){pill.className=tag.className;pill.textContent=tag.textContent;}
+  xRenderPipe();xRenderSub();
+  var nb=document.getElementById('xNeedsBadge'),dc=(X.ipr&&X.ipr.decision_counts)||{},n=!X.run?0:(X.exc.loaded===X.run?X.exc.rows.filter(xNeeds).length:(dc.review_hold||0));
+  if(nb){nb.textContent=n>999?'999+':n;nb.classList.toggle('zero',!n);}
+};
+function xRenderPipe(){
+  var el=document.getElementById('twPipe');if(!el)return;
+  var S=(X.ipr&&X.ipr.ipr_summary)||{},ps=S.pipeline_status||{},det={};
+  (ps.stages||[]).forEach(function(s){det[s.stage]=s.detail||'';});
+  var cur=X.run?String(X.ipr.pipeline_status||ps.current||''):'';
+  if(X.run&&xStatus()==='exported'&&X_STAGES.indexOf(cur)<X_STAGES.indexOf('Released'))cur='Released';
+  var ci=X.run?X_STAGES.indexOf(cur):(X.batch?0:-1);
+  if(X.run&&ci<0)ci=X_STAGES.indexOf('Final Validated');
+  el.innerHTML=X_STAGES.map(function(s,i){var c=i<=ci?'done':(i===ci+1&&(X.run||X.batch)?'now':'');
+    return '<span class="xpp '+c+'" title="'+escH(det[s]||'')+'">'+escH(s)+'</span>';}).join('');
+}
+function xRenderSub(){
+  var f=X.fresh,s=document.getElementById('xSubSales');
+  if(s)s.textContent=f&&f.sales_through?xDateT(f.sales_through)+(f.age_days!=null?' ('+f.age_days+'d old)':''):'-';
+  var a=document.getElementById('xSubAvail');if(!a)return;
+  if(X.batch){a.innerHTML='Availability <b>'+escH(X.batch.name)+'</b> (not run yet)';return;}
+  var r=X.run&&X.runs?X.runs.filter(function(x){return String(x.id)===String(X.run);})[0]:null;
+  a.innerHTML='Availability <b>'+(r&&r.source_filename?escH(r.source_filename):X.run?'from this run':'not uploaded yet')+'</b>';
+  if(X.run&&X.ipr){var sw=document.getElementById('sw');if(sw)sw.textContent=String(X.ipr.shipping_week||'').slice(0,10);}
+}
+var _xFresh0=xRenderFresh;
+xRenderFresh=function(){_xFresh0();xRenderSub();};
+
+/* ---------- earlier runs for the ship week (duplicate-run control) ---------- */
+async function xLoadRuns(){
+  try{X.runs=await api('/api/ipr/runs?limit=60');}catch(e){X.runs=X.runs||[];}
+  xRenderPrior();xRenderSub();
+}
+function xPriorWeek(){if(X.batch)return X.batch.week;var w=document.getElementById('twWeek');return w&&w.value?w.value:xNextMonday();}
+function xRenderPrior(){
+  var el=document.getElementById('twPrior');if(!el)return;
+  if(!X.runs){el.innerHTML='';return;}
+  var wkS=xPriorWeek(),rs=X.runs.filter(function(r){return String(r.shipping_week).slice(0,10)===wkS&&!xIsCancelled(r.status);});
+  if(!rs.length){el.innerHTML='';return;}
+  var blocking=rs.filter(function(r){return r.status==='exported'||['Sent to Pin Routes','Routing Response Received','Released','Aster Exported','Shipped'].indexOf(r.pipeline_status||'')>=0;});
+  var can=canRole('order_writer');
+  el.innerHTML='<div class="xbanner '+(blocking.length?'bad':'warn')+'" style="margin:14px 16px 0;align-items:flex-start"><i class="bi bi-exclamation-triangle-fill"></i><span style="flex:1 1 260px">'+
+    (blocking.length?'<b>Ship week '+xDateT(wkS)+' already has a run that was sent to routing or released.</b> The engine will refuse a new run for this week until it is discarded.':
+      '<b>'+rs.length+' earlier run'+(rs.length===1?'':'s')+' for ship week '+xDateT(wkS)+'.</b> A new run counts their units as already on the way, so it plans only what is left. Discard test runs first for a clean run.')+
+    '<br>'+rs.map(function(r){return '<span style="display:inline-flex;gap:6px;align-items:center;margin:6px 10px 0 0"><span class="xtag">'+escH(xWhen(r.run_at))+' &middot; '+escH(r.status||'')+(r.pipeline_status?' &middot; '+escH(r.pipeline_status):'')+' &middot; '+xN(r.total_carts)+' carts</span>'+
+      (can?'<button class="xbtn xbtn-d xbtn-sm" onclick="xDiscardAsk(\''+escH(r.id)+'\')">Discard</button>':'')+'</span>';}).join('')+'</span></div>';
+}
+var _xUp0=xRenderUpload;
+xRenderUpload=function(){_xUp0();var w=document.getElementById('twWeek');if(w&&!w._xp){w._xp=1;w.addEventListener('change',xRenderPrior);}xRenderPrior();};
+var _xPrev0=xRenderPreview;
+xRenderPreview=function(){_xPrev0();xRenderPrior();var b=document.getElementById('twRunBtn');if(b&&!X.job)b.innerHTML='<i class="bi bi-lightning-fill"></i>Confirm and run the agent';};
+
+/* ---------- discard a run ---------- */
+function xDiscardAsk(id){
+  var r=(X.runs||[]).filter(function(x){return String(x.id)===String(id);})[0]||{};
+  var rel=r.status==='exported';
+  xOpenDw('Discard run',
+    '<p>Run for ship week <b>'+escH(String(r.shipping_week||(X.ipr&&X.ipr.shipping_week)||'').slice(0,10))+'</b>'+(r.run_at?' made '+escH(xWhen(r.run_at)):'')+(r.total_carts!=null?' &middot; '+xN(r.total_carts)+' carts':'')+'.</p>'+
+    '<p class="xsmall">Discarding keeps the run and its orders on record, but the engine stops counting them as inbound supply, so the next run for this week plans the full need. Use it for test runs and bad uploads.'+(rel?' <b>This run was released:</b> only a manager can discard it, and nothing already sent to Aster or routing is recalled.':'')+'</p>'+
+    '<div class="xfield" style="display:flex;width:100%"><label for="xDiscR">Reason</label><textarea class="xinput" id="xDiscR">Test run</textarea></div>'+
+    '<div id="xDiscMsg" class="xwhy" role="status" style="margin:6px 0"></div>'+
+    '<div style="display:flex;gap:8px;margin-top:8px"><button class="xbtn xbtn-d" id="xDiscGo" onclick="xDiscardGo(\''+escH(id)+'\')">Discard run</button><button class="xbtn xbtn-s" onclick="xCloseDw()">Cancel</button></div>');
+}
+async function xDiscardGo(id){
+  var reason=(document.getElementById('xDiscR').value||'').trim(),m=document.getElementById('xDiscMsg'),b=document.getElementById('xDiscGo');
+  if(reason.length<3){m.textContent='Add a short reason. It goes in the change log.';return;}
+  b.disabled=true;
+  try{await api('/api/ipr/runs/'+id+'/discard',{method:'POST',body:JSON.stringify({reason:reason})});
+    xCloseDw();toast('Run discarded','ok');
+    if(String(X.run)===String(id)){X.run=null;X.ipr=null;X.meta=null;X.corr=null;xRenderResults();xExcBadge();xRenderHandoff();setStrip('--');}
+    await xLoadRuns();xRenderSteps();
+    var hs=document.getElementById('screen-xhist');if(hs&&hs.classList.contains('active'))xLoadHist(true);
+  }catch(e){b.disabled=false;m.innerHTML='<span style="color:var(--x-bad-fg)">'+escH(e.message)+'</span>';}
+}
+
+/* ---------- results: run actions + agent corrections ---------- */
+var _xLoadRun0=xLoadRun;
+xLoadRun=async function(id,quiet){await _xLoadRun0(id,quiet);if(String(X.run)===String(id)){X.corr=null;setStrip(String(X.ipr.shipping_week||'').slice(0,10),null,null);xRenderSteps();if(X.runs&&!X.runs.some(function(r){return String(r.id)===String(id);}))xLoadRuns();}};
+var _xRes0=xRenderResults;
+xRenderResults=function(){_xRes0();if(!X.run)return;
+  var act=document.querySelector('#twResults .xbanner .act');
+  if(act&&canRole('order_writer')&&(xStatus()!=='exported'||canRole('manager')))act.insertAdjacentHTML('beforeend','<button class="xbtn xbtn-d xbtn-sm" onclick="xDiscardAsk(\''+escH(X.run)+'\')">Discard run</button>');
+  var f=document.getElementById('twFiles');if(!f)return;
+  var dc=X.ipr.decision_counts||{},S=X.ipr.ipr_summary||{},gf=S.gap_fill||{},ce=S.cart_economics||{};
+  f.insertAdjacentHTML('beforebegin','<div class="xpanel" id="twCorr"><div class="xph"><h2>Agent corrections</h2><span class="sub">What the engine fixed on its own this run. Nobody had to approve these.</span><span class="act"><span class="xsrc">Sec 21 gap filling &middot; Sec 19.1 &middot; Sec 11.3</span></span></div>'+
+    '<div class="xobj">'+xTile('Gap fills made',xN(gf.fills!=null?gf.fills:dc.gap_fill),gf.units!=null?xN(gf.units)+' units, '+xN(gf.short_store_families)+' short store-families':'')+
+      xTile('Controlled tests',xN(dc.reactivation||0),'capped, each with a review date')+
+      xTile('Low-value carts',xN(dc.low_value_cart||0),'ship with a warning, never padded',dc.low_value_cart?'warn':'')+
+      xTile('Light carts waiting a week',xN(dc.deferred_economics||0),'ship next due week regardless')+'</div>'+
+    '<div class="xflow" aria-label="Gap filling candidate order"><span class="xsmall xmuted">Gap filling order (Sec 21):</span><span class="xfbox">1 Proven winner<small>in this store</small></span><span class="xarrow">&rarr;</span><span class="xfbox">2 Proven family<small>another approved SKU</small></span><span class="xarrow">&rarr;</span><span class="xfbox">3 Comparable-store<small>winner</small></span><span class="xarrow">&rarr;</span><span class="xfbox">4 Seasonal priority</span><span class="xarrow">&rarr;</span><span class="xfbox">5 Controlled test<small>capped</small></span></div>'+
+    '<div id="twCorrBody">'+(dc.gap_fill?'<div class="xempty"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadCorr()">Show the gap fills</button></div>':'<div class="xempty">No gap fills this run.</div>')+'</div>'+
+    '<div class="xnote">Gap filling never adds slow product to fill a cart. If no same-family SKU has its own need and supply, the gap stays and the cart ships incomplete (Sec 21).</div></div>');
+  if(X.corr)xRenderCorr();
+};
+async function xLoadCorr(){var b=document.getElementById('twCorrBody');if(!b||!X.run)return;
+  b.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading&hellip;</div>';
+  try{X.corr=await api('/api/ipr/runs/'+X.run+'/decisions?type=gap_fill&limit=1000');xRenderCorr();}
+  catch(e){b.innerHTML='<div class="xempty">Could not load: '+escH(e.message)+'</div>';}}
+function xRenderCorr(){var b=document.getElementById('twCorrBody');if(!b)return;var rs=X.corr||[];
+  if(!rs.length){b.innerHTML='<div class="xempty">No gap fills this run.</div>';return;}
+  b.innerHTML='<div class="xscroll" style="max-height:360px;overflow-y:auto"><table class="xdata"><thead><tr><th>Store</th><th>Filled with</th><th>What happened</th></tr></thead><tbody>'+
+    rs.slice(0,300).map(function(r,i){return '<tr class="x-row" tabindex="0" onclick="xOpenEvidence(X.corr['+i+'],\'gap_fill\')"><td><b>'+escH(r.store_id)+'</b> <span class="xwhy">'+escH(r.store_name||'')+'</span></td><td>'+escH(sn(r.description||('SKU '+r.sku_id)))+'</td><td>'+escH(xPlain(r.reason))+'</td></tr>';}).join('')+
+    '</tbody></table></div>'+(rs.length>300?'<div class="xpager">Showing 300 of '+xN(rs.length)+'</div>':'');}
+
+/* ---------- exceptions: subtabs + needs-a-person ---------- */
+var X_NEEDS=['validation','review_hold'],X_13=['stopped_13wk','reduced_13wk'];
+function xNeeds(r){if(r._k==='review_hold')return true;if(r._k!=='validation')return false;var sv=String((r.data||{}).severity||'').toLowerCase();return sv!=='warning'&&sv!=='info';}
+function xExcKindMatch(r){var k=X.exc.kind;if(k==='all')return true;if(k==='needs')return xNeeds(r);if(k==='d13')return X_13.indexOf(r._k)>=0;return r._k===k;}
+function xExcTab(k){X.exc.kind=k;X.exc.page=0;xRenderExcChips();xRenderExc();}
+var _xBadge0=xExcBadge;
+xExcBadge=function(){_xBadge0();xRenderSteps.__busy||(xRenderSteps.__busy=1,xRenderSteps(),xRenderSteps.__busy=0);};
+var _xChips0=xRenderExcChips;
+xRenderExcChips=function(){_xChips0();
+  var t=document.getElementById('eTabs');if(!t)return;var k=X.exc.kind,grp=k==='needs'?'needs':k==='d13'?'d13':'all';
+  var cnt=function(ks){return X.exc.rows.filter(function(r){return ks.indexOf(r._k)>=0;}).length;};
+  t.innerHTML=[['all','All exceptions',X.exc.rows.length],['needs','Needs a person',X.exc.rows.filter(xNeeds).length],['d13','13-week decisions',cnt(X_13)]].map(function(x){
+    return '<button type="button" class="xsubtab'+(grp===x[0]?' on':'')+'" aria-pressed="'+(grp===x[0])+'" onclick="xExcTab(\''+x[0]+'\')">'+escH(x[1])+' <span class="xwhy">'+xN(x[2])+'</span></button>';}).join('');
+  var c=document.getElementById('excChips');if(c&&(k==='needs'||k==='d13'))c.style.display='none';
+};
+
+/* ---------- stores ---------- */
+var X_GR={'AA':0,'A':1,'B':2,'C+':3,'C':4,'C-':5,'D':6};
+function xGcls(g){return g==='AA'||g==='A'?'gA':/^C/.test(g)?'gC':g==='D'?'gD':'';}
+async function xLoadSt(force){
+  var body=document.getElementById('stBody');
+  if(X.st.rows&&X.st.run===X.run&&!force){xRenderSt();return;}
+  if(body)body.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading stores&hellip;</div>';
+  try{
+    var r=await Promise.all([api('/api/stores/?limit=2500'),api('/api/ipr/store-grades').catch(function(){return [];}),
+      X.run?(X.cl.loaded===X.run?Promise.resolve(X.cl.orders):api('/api/orders/runs/'+X.run).catch(function(){return [];})):Promise.resolve([])]);
+    var g={};(r[1]||[]).forEach(function(x){g[x.store_id]=x;});
+    var o={};(r[2]||[]).forEach(function(x){o[x.store_id]=x;});
+    X.st.rows=(r[0]||[]).map(function(s){s._g=g[s.store_id]||{};s._o=o[s.store_id]||null;return s;});X.st.run=X.run;X.st.page=0;
+    xRenderSt();
+  }catch(e){if(body)body.innerHTML='<div class="xbanner bad" style="margin:14px 16px"><span>Could not load stores: '+escH(e.message)+'</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadSt(true)">Try again</button></span></div>';}
+}
+function xStRegion(r){X.st.region=r;X.st.page=0;xRenderSt();}
+function xStPage(d){X.st.page+=d;xRenderSt();}
+function xRenderSt(){
+  var body=document.getElementById('stBody'),ch=document.getElementById('stChips');if(!body||!X.st.rows)return;
+  var regs={};X.st.rows.forEach(function(s){var k=s.region||'No region';regs[k]=(regs[k]||0)+1;});
+  if(ch)ch.innerHTML=['all'].concat(Object.keys(regs).sort()).map(function(k){var on=X.st.region===k;return '<button class="xchip'+(on?' on':'')+'" aria-pressed="'+on+'" onclick="xStRegion(\''+escH(k).replace(/'/g,'&#39;')+'\')">'+(k==='all'?'All '+xN(X.st.rows.length):escH(k)+' '+xN(regs[k]))+'</button>';}).join('')+
+    (X.run?'<button class="xchip'+(X.st.region==='run'?' on':'')+'" onclick="xStRegion(\'run\')">In this run</button>':'');
+  var q=(document.getElementById('stQ')||{}).value||'';
+  var rows=X.st.rows.filter(function(s){return (X.st.region==='all'||(X.st.region==='run'?!!s._o:(s.region||'No region')===X.st.region))&&xMatch(q,[s.store_id,s.store_name||'',s.city||'',s.state||'',s.merchant||'']);});
+  if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches.</div>';return;}
+  var pages=Math.max(1,Math.ceil(rows.length/X_PAGE));if(X.st.page>=pages)X.st.page=pages-1;if(X.st.page<0)X.st.page=0;
+  var pg=rows.slice(X.st.page*X_PAGE,(X.st.page+1)*X_PAGE);X.st.view=rows;
+  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">Region</th><th class="x-hide-sm">Status</th><th>Best family grades</th><th class="r">Demand / wk</th><th class="x-hide-sm">Conversion (13 wk)</th><th>This run</th></tr></thead><tbody>'+
+    pg.map(function(s,i){var gr=s._g.grades||{},fams=Object.keys(gr).sort(function(a,b){return (X_GR[gr[a]]!=null?X_GR[gr[a]]:9)-(X_GR[gr[b]]!=null?X_GR[gr[b]]:9);}).slice(0,3);
+      var cv=s._g.conversion_13wk!=null?Number(s._g.conversion_13wk):null,o=s._o;
+      return '<tr class="x-row" tabindex="0" onclick="xStOpen('+(X.st.page*X_PAGE+i)+')"><td><b>'+escH(s.store_id)+'</b> <span class="xwhy">'+escH(sn(s.store_name||''))+(s.city?', '+escH(s.city):'')+(s.state?' '+escH(s.state):'')+'</span></td>'+
+        '<td class="x-hide-sm">'+escH(s.region||'')+'</td><td class="x-hide-sm">'+(s.store_status&&!/^active$/i.test(s.store_status)?'<span class="xtag warn">'+escH(s.store_status)+'</span>':'<span class="xtag ok">Active</span>')+'</td>'+
+        '<td>'+(fams.length?fams.map(function(f){return '<span class="xgc '+xGcls(gr[f])+'" title="'+escH(f)+'">'+escH(gr[f])+'</span> <span class="xwhy">'+escH(f)+'</span>';}).join('<br>'):'<span class="xwhy">Not graded yet</span>')+'</td>'+
+        '<td class="r">'+(s._g.weekly_units!=null?Number(s._g.weekly_units).toFixed(1):'&mdash;')+'</td>'+
+        '<td class="x-hide-sm">'+(cv!=null?'<div style="display:flex;gap:6px;align-items:center"><div class="xhbar" style="flex:1"><i style="width:'+Math.min(100,cv*100).toFixed(0)+'%;background:'+(cv<0.6?'var(--x-bad-fg)':'var(--x-chart-1)')+'"></i></div><span class="xnum xsmall">'+Math.round(cv*100)+'%</span></div>':'<span class="xwhy">&mdash;</span>')+'</td>'+
+        '<td>'+(o?'<span class="xtag info">'+xN(o.cart_count)+' carts &middot; '+xN(o.total_units)+' u</span>':'<span class="xwhy">'+(X.run?'Not shipping':'No run')+'</span>')+'</td></tr>';}).join('')+
+    '</tbody></table></div>'+xPager(rows.length,X.st.page,'xStPage');
+}
+function xStOpen(i){var s=(X.st.view||[])[i];if(!s)return;var gr=s._g.grades||{},o=s._o;
+  var h='<dl class="xkv"><dt>Location</dt><dd>'+escH((s.city||'')+(s.state?', '+s.state:''))+'</dd><dt>Region / division</dt><dd>'+escH((s.region||'')+(s.division?' / '+s.division:''))+'</dd>'+
+    '<dt>Merchant</dt><dd>'+escH(s.merchant||'')+'</dd><dt>Volume code</dt><dd>'+escH(s.volume_code||'')+'</dd><dt>Status</dt><dd>'+escH(s.store_status||'Active')+'</dd>'+
+    '<dt>Demand (units / wk)</dt><dd>'+(s._g.weekly_units!=null?escH(s._g.weekly_units):'&mdash;')+'</dd><dt>Conversion (13 wk)</dt><dd>'+(s._g.conversion_13wk!=null?Math.round(s._g.conversion_13wk*100)+'%':'&mdash;')+'</dd>'+
+    '<dt>Families below 60%</dt><dd>'+xN(s._g.families_below_60||0)+'</dd><dt>This run</dt><dd>'+(o?xN(o.cart_count)+' carts, '+xN(o.total_units)+' units':(X.run?'Not shipping this run':'No run loaded'))+'</dd></dl>';
+  var fams=Object.keys(gr).sort(function(a,b){return (X_GR[gr[a]]!=null?X_GR[gr[a]]:9)-(X_GR[gr[b]]!=null?X_GR[gr[b]]:9);});
+  h+='<h4>Family grades (Sec 6)</h4>'+(fams.length?'<div>'+fams.map(function(f){return '<div class="xsmall" style="margin-bottom:3px"><span class="xgc '+xGcls(gr[f])+'">'+escH(gr[f])+'</span> '+escH(f)+'</div>';}).join('')+'</div>':'<p class="xmuted">Not graded yet.</p>');
+  X.st.curEv={store_id:s.store_id,store_name:s.store_name,reason:'Every decision the engine made for this store this run',data:{}};
+  if(X.run)h+='<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-s xbtn-sm" onclick="xOpenEvidence(X.st.curEv,\'review\')">This run\'s decisions for this store</button></div>';
+  xOpenDw('Store '+s.store_id+' '+sn(s.store_name||''),h);}
+
+/* ---------- builds: promotions ---------- */
+function xSubB(k){document.querySelectorAll('#bTabs .xsubtab').forEach(function(x){var on=x.getAttribute('data-b')===k;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on);});
+  document.getElementById('b-promo').hidden=k!=='promo';document.getElementById('b-over').hidden=k!=='over';}
+async function xLoadPromos(){var el=document.getElementById('b-promo');if(!el)return;
+  try{var ps=await api('/api/promotions/');
+    if(!ps.length){el.innerHTML='<div class="xempty">No promotions loaded.</div>';return;}
+    el.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Program</th><th>Window</th><th>Regions</th><th class="r">SKUs</th><th class="r">Stores in scope</th><th class="r">Landed</th><th class="r">Left</th><th>Status</th></tr></thead><tbody>'+
+      ps.map(function(p){var m=p.metrics||{};return '<tr><td><b>'+escH(p.name||('Promotion '+p.id))+'</b></td><td>'+xDate(p.start_date)+' &ndash; '+xDate(p.end_date)+'</td><td>'+escH([].concat(p.regions||[]).join(', ')||'All')+'</td>'+
+        '<td class="r">'+xN((p.sku_ids||[]).length)+'</td><td class="r">'+xN(m.scope)+'</td><td class="r">'+xN(m.landed)+'</td><td class="r">'+xN(m.left)+'</td><td>'+(p.is_active?'<span class="xtag ok">Active</span>':'<span class="xtag">Inactive</span>')+'</td></tr>';}).join('')+
+      '</tbody></table></div><div class="xnote">Each program needs its in-store date, eligible stores and expected uplift (Sec 14). The engine\'s 13-week ad protection is not built yet; edit programs in Classic &gt; Promotions.</div>';
+  }catch(e){el.innerHTML='<div class="xempty">Could not load promotions: '+escH(e.message)+'</div>';}}
+
+/* ---------- reports ---------- */
+function xSubR(k){X.rep=k;document.querySelectorAll('#rTabs .xsubtab').forEach(function(x){var on=x.getAttribute('data-r')===k;x.classList.toggle('on',on);x.setAttribute('aria-pressed',on);});xRenderRep();}
+function xFamBars(obj,fmt,mx,col,thr){var ks=Object.keys(obj||{}).filter(function(k){return obj[k]!=null;}).sort(function(a,b){return obj[b]-obj[a];});
+  if(!ks.length)return '<div class="xempty">No data in this run.</div>';
+  mx=mx||Math.max.apply(null,ks.map(function(k){return obj[k];}))||1;
+  return '<div class="xscroll"><table class="xdata"><tbody>'+ks.map(function(k){var v=obj[k];return '<tr><td style="width:34%">'+escH(k)+'</td><td><div class="xhbar"><i style="width:'+Math.min(100,v/mx*100).toFixed(1)+'%;background:'+(thr!=null&&v<thr?'var(--x-warn-fg)':col)+'"></i></div></td><td class="r" style="width:90px">'+fmt(v)+'</td></tr>';}).join('')+'</tbody></table></div>';}
+function xRenderRep(){
+  var el=document.getElementById('r-body');if(!el)return;
+  if(!X.run||!X.ipr){el.innerHTML='<div class="xempty">Run the engine on This Week (or open a run from History) to see reports.</div>';return;}
+  var S=X.ipr.ipr_summary||{},o=S.objective||{},a=S.allocation||{},se=S.shipping_efficiency||{},gf=S.gap_fill||{},pct=function(v){return Math.round(v*100)+'%';};
+  var h='';
+  if(X.rep==='r1'){
+    h='<div class="xobj">'+xTile('Store demand, unlimited supply',xUsd(o.unconstrained_weekly_demand_retail),'weekly retail if every need were filled','')+xTile('What stores need',xN(a.unconstrained_need_units),'units, before rules')+
+      xTile('Eligible need',xN(a.eligible_need_units),'after 13-week stops, blocks and holds')+xTile('Available units',xN(a.available_units),'this week\'s greenhouse file')+'</div>'+
+      '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Shipping efficiency by family</h2><span class="sub">Units sold &divide; units delivered, last 13 weeks. Below 60% is the Sec 11.3 bar.</span></div>'+
+      xFamBars(se.by_family,pct,Math.max(1,Math.max.apply(null,Object.keys(se.by_family||{}).map(function(k){return se.by_family[k]||0;}))),'var(--x-chart-1)',0.6);
+  }else if(X.rep==='r2'){
+    var fill=a.eligible_need_units?a.allocated_units/a.eligible_need_units:null;
+    h='<div class="xobj">'+xTile('Allocated',xN(a.allocated_units),'units shipping','ok')+xTile('Fill rate',fill!=null?pct(fill):'&mdash;','allocated &divide; eligible need',fill!=null&&fill<0.9?'warn':'')+
+      xTile('Unfilled, no supply',xN(a.unfilled_demand_units),'units short',a.unfilled_demand_units?'warn':'')+xTile('Gap-filled',xN(gf.units),xN(gf.fills)+' fills')+
+      xTile('Expected weekly sales',xUsd(o.expected_weekly_retail),'baseline + this plan')+xTile(o.gap_to_minimum>0?'Short of minimum':'Above minimum',xUsd(Math.abs(o.gap_to_minimum||0)),'vs '+xUsd(o.minimum_weekly_retail||900000),o.gap_to_minimum>0?'bad':'ok')+'</div>'+
+      '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Where the need went</h2><span class="sub">Units, this run</span></div>'+
+      xFamBars({'Allocated':a.allocated_units,'Unfilled (no supply)':a.unfilled_demand_units,'Stopped at 13 weeks':a.stopped_13wk_units,'Removed at 13-week reduce':a.reduced_13wk_units_removed,'Deferred':a.deferred_units,'Blocked':a.blocked_units,'Held for review':a.review_held_units},xN,null,'var(--x-chart-2)');
+  }else{
+    h='<div class="xbanner info" style="margin:14px 16px"><i class="bi bi-info-circle"></i><span><b>Post-delivery report is not built yet.</b> It measures each run about 5 weeks after delivery, once sales mature (Sec 29). Until then, the closest read is last-13-week shipping efficiency on Report 1.</span></div>'+
+      ((S.not_yet_implemented||[]).length?'<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Not built yet in the engine</h2></div><ul class="xsmall" style="padding:10px 16px 14px 34px;margin:0">'+S.not_yet_implemented.map(function(t){return '<li>'+escH(xPlain(t))+'</li>';}).join('')+'</ul>':'');
+  }
+  el.innerHTML=h;
+}
+
+/* ---------- history ---------- */
+async function xLoadHist(force){
+  var el=document.getElementById('hiBody');if(!el)return;
+  var all=(document.getElementById('hiAll')||{}).checked;
+  el.innerHTML='<div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading runs&hellip;</div>';
+  try{var rs=await api('/api/ipr/runs?limit=80'+(all?'&include_cancelled=true':''));if(!all)X.runs=rs;
+    if(!rs.length){el.innerHTML='<div class="xempty">No runs yet.</div>';return;}
+    var can=canRole('order_writer'),mgr=canRole('manager');
+    el.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Ship week</th><th>Run at</th><th>Engine</th><th class="r">Stores</th><th class="r">Carts</th><th class="r">Units</th><th class="r x-hide-sm">Expected $/wk</th><th>Status</th><th></th></tr></thead><tbody>'+
+      rs.map(function(r){var cx=xIsCancelled(r.status),rel=r.status==='exported',cur=String(r.id)===String(X.run);
+        return '<tr'+(cur?' style="background:var(--x-accent-tint)"':'')+'><td><b>'+escH(String(r.shipping_week).slice(0,10))+'</b>'+(r.source_filename?'<br><span class="xwhy">'+escH(r.source_filename)+'</span>':'')+'</td><td>'+escH(xWhen(r.run_at))+'</td><td>'+escH(r.engine_version||'v1')+'</td>'+
+          '<td class="r">'+xN(r.stores_served)+'</td><td class="r">'+xN(r.total_carts)+'</td><td class="r">'+xN(r.total_units)+'</td><td class="r x-hide-sm">'+(r.expected_weekly_retail!=null?xUsd(Number(r.expected_weekly_retail)):'&mdash;')+'</td>'+
+          '<td><span class="xtag '+(cx?'bad':rel?'ok':'info')+'">'+escH(cx?'Discarded':rel?'Released':(r.status||'draft'))+'</span>'+(r.pipeline_status&&!cx?' <span class="xwhy">'+escH(r.pipeline_status)+'</span>':'')+'</td>'+
+          '<td style="white-space:nowrap">'+(r.engine_version==='v2'&&!cx?'<button class="xbtn xbtn-s xbtn-sm" onclick="xOpenRun(\''+escH(r.id)+'\')">'+(cur?'Showing':'Open')+'</button> ':'')+
+            (can&&!cx&&(!rel||mgr)?'<button class="xbtn xbtn-d xbtn-sm" onclick="xDiscardAsk(\''+escH(r.id)+'\')">Discard</button>':'')+'</td></tr>';}).join('')+'</tbody></table></div>';
+  }catch(e){el.innerHTML='<div class="xempty">Could not load runs: '+escH(e.message)+'</div>';}
+}
+async function xOpenRun(id){try{await xLoadRun(id);rId=id;xGo('tw');toast('Showing that run','ok');}catch(e){toast('Could not open run: '+e.message,'err');}}
+
+/* ---------- policies ---------- */
+async function xLoadPol(){var el=document.getElementById('polBody');if(!el)return;
+  try{var rs=await api('/api/ipr/settings');
+    el.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Policy</th><th>Value</th><th>Source</th><th>Status</th></tr></thead><tbody>'+
+      rs.map(function(r){var v=r.value,vs=typeof v==='object'?JSON.stringify(v):String(v);if(vs.length>140)vs=vs.slice(0,140)+'...';
+        var st=String(r.status||''),tone=/spec/i.test(st)?'ok':/back-?test|initial/i.test(st)?'warn':/supersed/i.test(st)?'':'info';
+        return '<tr><td><b>'+escH(xHuman(r.key))+'</b><br><span class="xraw">'+escH(r.key)+'</span>'+(r.note?'<div class="xwhy">'+escH(xPlain(r.note))+'</div>':'')+'</td><td class="xsmall" style="font-family:Consolas,monospace;overflow-wrap:anywhere;max-width:340px">'+escH(vs)+'</td><td>'+escH(xPlain(r.spec_ref||''))+'</td><td><span class="xtag '+tone+'">'+escH(st)+'</span></td></tr>';}).join('')+
+      '</tbody></table></div><div class="xnote">Tunables marked "requires back-testing" are initial values from the leadership doc. Editing policies from this screen comes later.</div>';
+  }catch(e){el.innerHTML='<div class="xempty">Could not load policies: '+escH(e.message)+'</div>';}}
+
+/* ---------- boot ---------- */
+var _xBoot0=xBoot;
+xBoot=async function(){xLoadRuns();await _xBoot0();xRenderSteps();};
+</script>
+
 </body>
 </html>

@@ -35,6 +35,8 @@ def recent_run(user=Depends(get_current_user)):
                    ab.id as batch_id, ab.source_filename, ab.shipping_week_start
             FROM recommendation_runs rr
             JOIN availability_batches ab ON ab.id = rr.batch_id
+            WHERE COALESCE(rr.status, '') NOT IN
+                  ('cancelled', 'canceled', 'failed', 'rejected', 'superseded', 'deleted')
             ORDER BY rr.run_at DESC LIMIT 1
         """)
         return cur.fetchone()

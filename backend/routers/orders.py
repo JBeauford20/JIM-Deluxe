@@ -409,7 +409,8 @@ def finalize_run(run_id: str, user=Depends(require_role("manager", "admin", "ord
         # Lock the run
         cur.execute("""
             UPDATE recommendation_runs
-            SET status = 'exported', finalized_at = NOW()
+            SET status = 'exported', finalized_at = NOW(),
+                pipeline_status = CASE WHEN engine_version = 'v2' THEN 'Released' ELSE pipeline_status END
             WHERE id = %s
             RETURNING id
         """, (run_id,))
