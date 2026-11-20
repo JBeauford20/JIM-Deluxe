@@ -480,6 +480,7 @@ def _v2_model(cur, run_id: str):
     if not model["carts"]:
         raise HTTPException(400, "Run has no carts")
     ref = v2x.load_reference(cur, model["run"]["batch_id"])
+    v2x.ensure_config_names(cur, model)   # CC 1..n, persisted per run on first export
     return model, ref
 
 
@@ -512,8 +513,7 @@ def export_stores_and_carts(run_id: str, mark_submitted: bool = Query(True),
             bump_activity(cur, run_id)
     wk = v2x.week_number(model["run"]["shipping_week"])
     return _xlsx_response(wb, f"Week {wk} Stores and Carts.xlsx",
-                          {"X-Config-Columns": str(rep["config_columns"]),
-                           "X-Unmapped-Configs": str(rep["unmapped_configs"])})
+                          {"X-Config-Columns": str(rep["distinct_configs"])})
 
 
 @router.get("/runs/{run_id}/pack-plan.xlsx")
@@ -553,7 +553,7 @@ def export_aster_v2(run_id: str, include_draft: bool = Query(False),
 
 @router.get("/runs/{run_id}/v2-export-report")
 def export_report_v2(run_id: str, user=Depends(get_current_user)):
-    """What the three exports would contain: unmapped cart configs, unrouted carts,
+    """What the three exports would contain: distinct cart configs, unrouted carts,
     Aster gaps (no variety line / no 3M kit code) and the realized jute/ceramic split."""
     with get_db() as conn:
         cur = cursor(conn)
@@ -561,6 +561,29 @@ def export_report_v2(run_id: str, user=Depends(get_current_user)):
     _, sc = v2x.build_stores_and_carts(model, ref)
     _, pp = v2x.build_pack_plan(model, ref)
     _, ast = v2x.build_aster_csv(model, ref, include_draft=True)
-    sc["unmapped_config_examples"] = sc["unmapped_config_examples"][:25]
     ast["gaps"] = ast.get("gaps", [])[:100]
     return {"stores_and_carts": sc, "pack_plan": pp, "aster": ast}
+
+
+@router.get("/runs/{run_id}/config-names")
+def config_names_v2(run_id: str, user=Depends(get_current_user)):
+    """The run's cart config names (CC 1..n + permanent carts) — the same names the
+    Stores and Carts / Pack Plan exports print. Persists them on first call."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        model = v2x.load_run(cur, run_id)
+        if not model:
+            raise HTTPException(404, "Run not found")
+        names = v2x.ensure_config_names(cur, model)
+    per = {}
+    for c in model["carts"]:
+        e = per.setdefault(names[c["id"]], {"name": names[c["id"]], "cart_count": 0, "stores": set(),
+                                            "engine_codes": set()})
+        e["cart_count"] += 1
+        e["stores"].add(c["store_id"])
+        e["engine_codes"].add(c.get("config_code"))
+    out = sorted(per.values(), key=lambda e: v2x._config_sort_key(e["name"]))
+    return {"persisted": model["config_names_persisted"],
+            "configs": [{**e, "stores": len(e["stores"]), "engine_codes": sorted(filter(None, e["engine_codes"]))}
+                        for e in out],
+            "carts": {cid: n for cid, n in names.items()}}

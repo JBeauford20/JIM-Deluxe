@@ -198,22 +198,94 @@ def build_reference(stores, skus, avail, apm, aster_names, profiles) -> dict:
 
 
 # ── config naming ────────────────────────────────────────────────────────────
+# Josh 2026-11-19: every distinct cart config is named "CC 1", "CC 2", ... ascending,
+# ordered by number of carts using it (desc), ties by first (lowest) store number.
+# Permanent carts keep their existing names. The mapping is persisted per run in
+# run_config_names (run_id, signature -> name) so Pack Plan, Stores and Carts, Aster
+# and the UI all show the same name, and names stay stable after later edits.
 
-def config_label(code: str | None) -> tuple[str, bool]:
-    """Engine config code -> (name routing/ops know, mapped?).
-
-    The only DB-backed mapping today is permanent carts (order_carts.config_code
-    'PC <cart_templates.name>'). Engine v2 codes (CC1..CCn, one per exact cart signature)
-    have no named equivalent in any table, so they are emitted as-is and reported."""
-    code = (code or "").strip() or "CC?"
+def cart_signature(cart: dict, shelves: list) -> str:
+    """Exact-content key of a cart: (layer, sku, kit) -> trays, aggregated over the
+    availability-line segments. Permanent carts are keyed by their own name."""
+    code = (cart.get("config_code") or "").strip()
     if code.startswith("PC ") and len(code) > 3:
-        return code[3:].strip(), True
-    return code, False
+        return "PC:" + code[3:].strip()
+    agg = defaultdict(int)
+    for s in shelves:
+        agg[(int(s["shelf_position"]), int(s["sku_id"]), s.get("kit_type") or "")] += int(s.get("tray_count") or 0)
+    return "|".join(f"{p}:{k}:{kt}:{t}" for (p, k, kt), t in sorted(agg.items()))
+
+
+def _cc_number(name: str):
+    m = re.fullmatch(r"CC (\d+)", name or "")
+    return int(m.group(1)) if m else None
+
+
+def assign_config_names(model: dict, existing: dict | None = None):
+    """Returns ({cart_id: name}, {signature: name}, new_rows).
+
+    existing: persisted {signature: name} for the run — kept as-is; signatures not yet
+    named continue the sequence after the highest existing CC number.
+    new_rows: [(signature, name, cart_count, first_store)] to persist."""
+    existing = dict(existing or {})
+    by_cart = defaultdict(list)
+    for s in model["shelves"]:
+        by_cart[s["cart_id"]].append(s)
+    sig_of, count, first = {}, Counter(), {}
+    for c in model["carts"]:
+        sig = cart_signature(c, by_cart.get(c["id"], []))
+        sig_of[c["id"]] = sig
+        count[sig] += 1
+        first[sig] = min(first.get(sig, 10 ** 9), int(c["store_id"]))
+    names = dict(existing)
+    n = max([_cc_number(v) or 0 for v in existing.values()] + [0])
+    new_rows = []
+    for sig in sorted((s for s in count if s not in names), key=lambda s: (-count[s], first[s], s)):
+        if sig.startswith("PC:"):
+            names[sig] = sig[3:]
+        else:
+            n += 1
+            names[sig] = f"CC {n}"
+        new_rows.append((sig, names[sig], count[sig], first[sig]))
+    return {cid: names[sig] for cid, sig in sig_of.items()}, names, new_rows
+
+
+def ensure_config_names(cur, model: dict) -> dict:
+    """Load/persist the run's names and attach model['config_names'] = {cart_id: name}.
+    If the run_config_names migration is not applied yet, names are computed (same
+    deterministic rule) but not persisted; model['config_names_persisted'] says which."""
+    cur.execute("SELECT to_regclass('public.run_config_names') AS t")
+    row = cur.fetchone()
+    has_table = bool(row and (row["t"] if isinstance(row, dict) else row[0]))
+    existing = {}
+    if has_table:
+        cur.execute("SELECT signature, name FROM run_config_names WHERE run_id = %s",
+                    (model["run"]["id"],))
+        existing = {r["signature"]: r["name"] for r in cur.fetchall()}
+    by_cart, names, new_rows = assign_config_names(model, existing)
+    if has_table and new_rows:
+        cur.executemany("""INSERT INTO run_config_names (run_id, signature, name, cart_count, first_store)
+                           VALUES (%s,%s,%s,%s,%s) ON CONFLICT (run_id, signature) DO NOTHING""",
+                        [(model["run"]["id"], *r) for r in new_rows])
+        # a concurrent export may have won the insert race — re-read the persisted truth
+        cur.execute("SELECT signature, name FROM run_config_names WHERE run_id = %s",
+                    (model["run"]["id"],))
+        by_cart, names, _ = assign_config_names(model, {r["signature"]: r["name"] for r in cur.fetchall()})
+    model["config_names"] = by_cart
+    model["config_names_persisted"] = has_table
+    return by_cart
+
+
+def config_names(model: dict) -> dict:
+    """{cart_id: name} — persisted names when ensure_config_names ran, else computed."""
+    if "config_names" not in model:
+        model["config_names"] = assign_config_names(model)[0]
+    return model["config_names"]
 
 
 def _config_sort_key(label: str):
-    m = re.fullmatch(r"CC(\d+)", label)
-    return (1, int(m.group(1)), "") if m else (0, 0, label.lower())
+    n = _cc_number(label)
+    return (0, n, "") if n is not None else (1, 0, (label or "").lower())
 
 
 # ── 1. Stores and Carts (to routing) ─────────────────────────────────────────
@@ -223,6 +295,12 @@ def store_city_label(store_id: int, s: dict) -> str:
     legacy 'HOME DEPOT OF X, ST' strings that no table carries."""
     name = (s.get("store_name") or s.get("city") or "").strip().upper()
     return f"{store_id:04d}-{name}"
+
+
+def store_vol(s: dict) -> str:
+    """Vol = stores.volume_code (the store's DTS volume / Velo code). No v1 Stores and
+    Carts generator ever existed, so there is no other source to stay consistent with."""
+    return (s.get("volume_code") or "").strip()
 
 
 def build_stores_and_carts(model: dict, ref: dict):
@@ -235,14 +313,7 @@ def build_stores_and_carts(model: dict, ref: dict):
         carts_by_store[c["store_id"]].append(c)
     desired = {o["store_id"]: o.get("cart_count") for o in model["orders"]}
 
-    labels, mapped, unmapped = {}, {}, Counter()
-    for c in model["carts"]:
-        lab, ok = config_label(c.get("config_code"))
-        labels[c["id"]] = lab
-        if ok:
-            mapped[c.get("config_code")] = lab
-        else:
-            unmapped[lab] += 1
+    labels = config_names(model)
     cols = sorted(set(labels.values()), key=_config_sort_key)
     col_idx = {lab: i for i, lab in enumerate(cols)}
 
@@ -270,8 +341,7 @@ def build_stores_and_carts(model: dict, ref: dict):
         want = desired.get(sid)
         want = int(want) if want is not None else total
         ws.append([sid, "", xl(s.get("division") or ""), xl(store_city_label(sid, s)),
-                   xl((s.get("state") or "").strip()),
-                   xl(s.get("volume_code") or s.get("dynamic_velocity_tier") or ""),
+                   xl((s.get("state") or "").strip()), xl(store_vol(s)),
                    xl(s.get("merchant") or ""), "", want, total, want - total] + counts)
     for i, w in enumerate(SC_META_WIDTHS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -282,11 +352,12 @@ def build_stores_and_carts(model: dict, ref: dict):
     report = {
         "stores": ws.max_row - 1,
         "carts": len(model["carts"]),
-        "config_columns": len(cols),
-        "mapped_configs": mapped,
-        "unmapped_configs": len(unmapped),
-        "unmapped_config_examples": sorted(unmapped, key=_config_sort_key)[:25],
+        "distinct_configs": len(cols),
+        "config_names_persisted": bool(model.get("config_names_persisted")),
+        "permanent_cart_configs": [c for c in cols if _cc_number(c) is None],
         "stores_missing_metadata": missing_meta,
+        "stores_missing_vol": [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)
+                               if not ws.cell(r, 6).value],
         "cart_count_mismatch": [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)
                                 if ws.cell(r, 11).value],
     }
@@ -540,6 +611,7 @@ def pack_plan_rows(model: dict, ref: dict):
     Aster splits that don't divide evenly across a config's carts become 'Mix' rows."""
     skus, avail, profiles = ref["skus"], ref["avail"], ref["profiles"]
     route_of = _routing_index(model)
+    names = config_names(model)
     shelves_by_cart = defaultdict(list)
     for s in model["shelves"]:
         shelves_by_cart[s["cart_id"]].append(s)
@@ -547,7 +619,7 @@ def pack_plan_rows(model: dict, ref: dict):
     groups = defaultdict(list)            # (ship, route, label) -> carts
     for c in model["carts"]:
         route, ship = route_of.get(c["id"], (UNROUTED, None))
-        groups[(ship, route, config_label(c.get("config_code"))[0])].append(c)
+        groups[(ship, route, names[c["id"]])].append(c)
 
     def gkey(k):
         ship, route, lab = k
@@ -561,9 +633,8 @@ def pack_plan_rows(model: dict, ref: dict):
         K = len(carts)
         variation_seq[lab] += 1
         variation = variation_seq[lab]
-        # per-cart layer content (identical across carts sharing an exact config code;
-        # carts with different codes but one label — only possible for mapped names —
-        # are averaged by the same mix logic)
+        # per-cart layer content (identical across carts sharing one config name, since
+        # names are assigned per exact content signature)
         per_layer = defaultdict(lambda: {"trays": 0, "units": 0, "profile": None, "aster": defaultdict(int)})
         for c in carts:
             for s in shelves_by_cart.get(c["id"], []):
