@@ -623,7 +623,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
           AND r.shipping_week > %s AND r.shipping_week < %s
           AND NOT (r.shipping_week = ANY(%s::date[]))
         GROUP BY o.store_id, ol.sku_id
-    """, (anchor - timedelta(days=7), shipping_week, sorted(it_weeks)))
+    """, (anchor - timedelta(days=ARRIVAL_OFFSET_DAYS), shipping_week, sorted(it_weeks)))
+    # ^ a run counts as inbound only while its arrival (ship week + 2 days) is after the
+    #   sales anchor. The old 7-day window double-counted a run that had already arrived
+    #   and entered the delivery/on-hand data (audit 2 N2 — understated need).
     inbound_known = {(r["store_id"], r["sku_id"]): int(r["qty"] or 0) for r in cur.fetchall()}
     manifest_est_stores = set()
     log(f"Inbound after {anchor}: loaded in-transit {sum(m + lo for m, lo, _ in it_lines.values()):,.0f}u "
@@ -755,7 +758,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         fresh_est = max(0.0, float(dv.get("recent8") or 0) * (1.0 - shr) - sv["w8"])
         shr_txt = f"; shrink {shr:.0%} ({fam_s})"
         lc = lot_credit.get((store_id, sku_id), 0.0)
-        if lc < fresh_est:                  # lot-age credit is the tighter, evidence-based bound
+        lot_bound = lc < fresh_est          # lot-age credit is the tighter, evidence-based bound
+        if lot_bound:
             fresh_est = lc
             shr_txt = "; lot-age sellable credit (units x sellable share by age, ~60% lifetime)"
         sn = snap.get((store_id, sku_id))
@@ -769,9 +773,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         else:
             oh, conf, oh_src = fresh_est, "LOW", (f"estimate: {fresh_of.get(sku_id, fresh_days)}-day "
                                                   f"deliveries × (1 − shrink) − sales{shr_txt}")
-        # the freshness cap is already the conservative bound — no second haircut on top
+        # the freshness cap is already the conservative bound — no second haircut on top.
+        # When the calibrated lot-age credit set the bound, the LOW confidence factor would
+        # be a third stacked haircut (shrink x lot share x 0.70) — skip it (audit 2 N3).
         oh_adj = 0.0 if conf == "UNUSABLE" else max(0.0, oh) * (
-            1.0 if sn is not None else float(conf_factor[conf]))
+            1.0 if (sn is not None or lot_bound) else float(conf_factor[conf]))
 
         if store_id in it_stores:
             med, low, how = it_lines.get((store_id, sku_id), (0.0, 0.0, None))
@@ -806,8 +812,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if conf == "UNUSABLE" or store_id in edi_gap:
             risk = "Unknown"
         elif oh_adj + inbound < before_arrival:
-            # unreliable on-hand cannot create Critical risk (§9)
-            risk = "High" if conf == "LOW" else "Critical"
+            # §9: UNRELIABLE on-hand cannot create Critical risk — but confidence was LOW
+            # everywhere, so Critical was unreachable and the §8 critical-due bypass was dead
+            # code (audit 2 N1). When the delivery arithmetic itself says nothing sellable
+            # remains (oh == 0 from evidence) and nothing is inbound, the emptiness is
+            # evidence-backed, not a confidence artifact: that line is Critical.
+            risk = "Critical" if (oh <= 0 and inbound <= 0) else (
+                "High" if conf == "LOW" else "Critical")
         elif cover_days < 7:
             risk = "High"
         elif cover_days < 14:
