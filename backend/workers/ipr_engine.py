@@ -222,15 +222,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                        severity="warning", family=info["ipr_family"])
     unapproved_map = sum(1 for s in plannable if not sku_info[s]["approved"])
 
+    def usd(l):
+        """Price for $ totals: a missing price contributes nothing (never guessed)."""
+        return l["price"] if l["price"] is not None else 0.0
+
     def price(sku_id, realized=None):
         if realized:
             return realized, "realized"
         info = sku_info.get(sku_id) or {}
         if info.get("retail_price"):
             return float(info["retail_price"]), "pricebook"
-        if info.get("wholesale_price_whl"):
-            return float(info["wholesale_price_whl"]) * 2.0, "wholesale x2 (fallback)"
-        return 0.0, "missing"
+        # No retail price: never guessed (wholesale x2 removed). The line still plans on units;
+        # it is excluded from every $ total and counted in summary.incomplete_price_units.
+        return None, "missing"
 
     # Stores
     cur.execute("""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
@@ -533,7 +537,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     # ══ 6. ALLOCATE AVAILABILITY (§12, §13, §15) — only after need exists ═══
     if ship:
-        inc = _norm({k: l["trays"] * l["upt"] * l["price"] for k, l in ship.items()})
+        inc = _norm({k: l["trays"] * l["upt"] * usd(l) for k, l in ship.items()})
         fv = _norm({k: fam_vel[(l["store_id"], l["family"])] for k, l in ship.items()})
         rec = {k: min(1.0, ((anchor - fam_lastdel[(l["store_id"], l["family"])]).days / 84.0)
                       if fam_lastdel[(l["store_id"], l["family"])] else 1.0) for k, l in ship.items()}
@@ -665,16 +669,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     base_units_rev = with_rev = demand_rev = 0.0
     for l in lines.values():
         wk_dem = l["fc"]
-        demand_rev += wk_dem * l["price"]
+        demand_rev += wk_dem * usd(l)
         base = min(wk_dem, l["projected"])
         add = ship.get((l["store_id"], l["sku_id"]), {}).get("alloc_units", 0)
-        base_units_rev += base * l["price"]
-        with_rev += min(wk_dem, l["projected"] + add) * l["price"]
+        base_units_rev += base * usd(l)
+        with_rev += min(wk_dem, l["projected"] + add) * usd(l)
     incr_rev = with_rev - base_units_rev
-    lost_unavail = sum(l.get("short_units", 0) * l["price"] for l in ship.values()) / cover_wk
-    lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * lines[k]["price"] for k in held) / cover_wk
-    lost_deferred = sum(l["trays"] * l["upt"] * l["price"] for l in deferred.values()) / cover_wk
-    edi_risk = sum(l["fc"] * l["price"] for l in lines.values() if l["store_id"] in edi_gap)
+    lost_unavail = sum(l.get("short_units", 0) * usd(l) for l in ship.values()) / cover_wk
+    lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * usd(lines[k]) for k in held) / cover_wk
+    lost_deferred = sum(l["trays"] * l["upt"] * usd(l) for l in deferred.values()) / cover_wk
+    edi_risk = sum(l["fc"] * usd(l) for l in lines.values() if l["store_id"] in edi_gap)
     price_srcs = defaultdict(int)
     for l in ship.values():
         price_srcs[l["price_src"]] += l.get("alloc_units", 0)
@@ -696,8 +700,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "price_basis_units": dict(price_srcs),
             "method_note": ("Arrival-week retail across every store x SKU with velocity: "
                             "min(weekly forecast, projected stock) x price. Prices are realized "
-                            "(DTS dollars) where loaded, else pricebook retail."),
+                            "(DTS dollars) where loaded, else pricebook retail. SKUs with no "
+                            "price are never guessed: they ship on units and are excluded from $."),
         },
+        "incomplete_price_units": int(price_srcs.get("missing", 0)),
         "allocation": {
             "available_units": total_supply,
             "unconstrained_need_units": int(sum(l["trays"] * l["upt"] for l in lines.values())),
@@ -925,7 +931,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                risk=l["risk"], need_units=round(l["need"], 1), need_trays=l["trays"],
                alloc_trays=l["alloc_trays"], upt=l["upt"], cap_note=l["cap_note"],
                conversion=l["conversion"], priority=round(l["priority"], 4), sku_fit=round(l["sku_fit"], 4),
-               price=round(l["price"], 2), price_src=l["price_src"])
+               price=None if l["price"] is None else round(l["price"], 2), price_src=l["price_src"])
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO run_decisions (id, run_id, decision_type, store_id, sku_id, reason, data, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,now())
