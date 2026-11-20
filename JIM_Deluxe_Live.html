@@ -4716,6 +4716,7 @@ async function xLoadSt(force){
 function xStRegion(r){X.st.region=r;X.st.page=0;xRenderSt();}
 function xStPage(d){X.st.page+=d;xRenderSt();}
 function xRenderSt(){
+  X.st.cur=null;                 // typing in search or revisiting the tab leaves the profile
   var body=document.getElementById('stBody'),ch=document.getElementById('stChips');if(!body||!X.st.rows)return;
   var regs={};X.st.rows.forEach(function(s){var k=s.region||'No region';regs[k]=(regs[k]||0)+1;});
   if(ch)ch.innerHTML=['all'].concat(Object.keys(regs).sort()).map(function(k){var on=X.st.region===k;return '<button class="xchip'+(on?' on':'')+'" aria-pressed="'+on+'" onclick="xStRegion(\''+escH(k).replace(/'/g,'&#39;')+'\')">'+(k==='all'?'All '+xN(X.st.rows.length):escH(k)+' '+xN(regs[k]))+'</button>';}).join('')+
@@ -4759,7 +4760,7 @@ function xStProfile(s){
     '<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;padding:14px 16px 4px">'+
       '<div style="font-size:22px;font-weight:700">'+escH(s.store_id)+' &middot; '+escH(sn(s.store_name||''))+'</div>'+
       '<div class="xmuted">'+escH([s.city,s.state].filter(Boolean).join(', '))+' &middot; '+escH(s.merchant||'no merchant')+' &middot; '+escH([s.region,s.division].filter(Boolean).join(' / ')||'no region')+'</div>'+
-      (st?'<span class="xtag warn">'+escH(X_STATUS_LABEL[s.store_status]||s.store_status)+'</span>':'<span class="xtag ok">Active</span>')+
+      (st?'<span class="xtag warn">'+escH(X_STATUS_LABEL[s.store_status]||xHuman(s.store_status))+'</span>':'<span class="xtag ok">Active</span>')+
       (o?'<span class="xtag info">This run: '+xN(o.cart_count)+' carts &middot; '+xN(o.total_units)+' u</span>'
         :'<span class="xtag">'+(X.run?'Not shipping this run':'No run loaded')+'</span>')+
       '<span style="margin-left:auto;display:flex;gap:8px">'+
@@ -4767,38 +4768,43 @@ function xStProfile(s){
       '</span></div>'+
     '<div id="stpTiles" class="xobj" style="padding:8px 16px"><div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading store facts&hellip;</div></div>'+
     '<div class="xgrid2" style="padding:0 16px 8px">'+
-      '<div class="xpanel"><div class="xph"><h2>Weekly sales, last 13 weeks</h2><span class="sub">Units sold at the register per week.</span></div><div id="stpSales" class="xempty">Loading&hellip;</div></div>'+
-      '<div class="xpanel"><div class="xph"><h2>Family grades</h2><span class="sub">Grade, weekly demand and 13-week conversion per family (Sec 6, Sec 11).</span></div><div id="stpFams" class="xempty">Loading&hellip;</div></div>'+
+      '<div class="xpanel"><div class="xph"><h2>Weekly sales, last 13 weeks</h2><span class="sub">Units sold at the register per week.</span></div><div id="stpSales"><div class="xempty">Loading&hellip;</div></div></div>'+
+      '<div class="xpanel"><div class="xph"><h2>Family grades</h2><span class="sub">Grade, weekly demand and 13-week conversion per family (Sec 6, Sec 11).</span></div><div id="stpFams"><div class="xempty">Loading&hellip;</div></div></div>'+
     '</div>'+
     '<div class="xgrid2" style="padding:0 16px 8px">'+
-      '<div class="xpanel"><div class="xph"><h2>Stockout risks</h2><span class="sub">From the latest run: lines projected short at arrival.</span></div><div id="stpRisk" class="xempty">Loading&hellip;</div></div>'+
-      '<div class="xpanel"><div class="xph"><h2>Shipment response</h2><span class="sub">How each delivery sold in its first 28 days (Sec 29). 60% is the target.</span></div><div id="stpResp" class="xempty">Loading&hellip;</div></div>'+
+      '<div class="xpanel"><div class="xph"><h2>Stockout risks</h2><span class="sub">From the latest run: lines projected short at arrival.</span></div><div id="stpRisk"><div class="xempty">Loading&hellip;</div></div></div>'+
+      '<div class="xpanel"><div class="xph"><h2>Shipment response</h2><span class="sub">How each delivery sold in its first 28 days (Sec 29). 60% is the target.</span></div><div id="stpResp"><div class="xempty">Loading&hellip;</div></div></div>'+
     '</div>'+
-    '<div class="xpanel" style="margin:0 16px 8px"><div class="xph"><h2>SKU performance</h2><span class="sub">13-week units, 4-week trend, and the reason behind every weak SKU.</span></div><div id="stpSkus" class="xempty">Loading&hellip;</div></div>'+
-    '<div class="xpanel" style="margin:0 16px 16px"><div class="xph"><h2>What the engine decided here (latest run)</h2><span class="sub">Gates, pushes, exclusions and warnings for this store, in plain English.</span></div><div id="stpDec" class="xempty">Loading&hellip;</div></div>';
+    '<div class="xpanel" style="margin:0 16px 8px"><div class="xph"><h2>SKU performance</h2><span class="sub">13-week units, 4-week trend, and the reason behind every weak SKU.</span></div><div id="stpSkus"><div class="xempty">Loading&hellip;</div></div></div>'+
+    '<div class="xpanel" style="margin:0 16px 16px"><div class="xph"><h2>What the engine decided here (latest run)</h2><span class="sub">Gates, pushes, exclusions and warnings for this store, in plain English.</span></div><div id="stpDec"><div class="xempty">Loading&hellip;</div></div></div>';
   window.scrollTo(0,0);
   xStFill(s.store_id);
 }
+function xStRetry(){if(X.st.cur)xStProfile(X.st.cur);}
 async function xStFill(id){
-  if((X.st.cur||{}).store_id!==id)return;
-  var set=function(el,html){var e=document.getElementById(el);if(e&&(X.st.cur||{}).store_id===id)e.innerHTML=html;};
-  var fail=function(el,what,e){set(el,'<div class="xempty">'+escH(what)+' did not load: '+escH(e.message)+' <a href="#" onclick="xStFill('+id+');return false">Retry</a></div>');};
+  var cur=X.st.cur;                                   // snapshot: Back-while-loading safe
+  if(!cur||String(cur.store_id)!==String(id))return;
+  var set=function(el,html){var e=document.getElementById(el);
+    if(e&&String((X.st.cur||{}).store_id)===String(id))e.innerHTML=html;};
+  var fail=function(el,what,e){set(el,'<div class="xbanner bad" style="margin:10px 16px;align-items:flex-start"><i class="bi bi-x-circle"></i>'+
+    '<span>'+escH(what)+' did not load: '+escH(e.message)+'</span>'+
+    '<button class="xbtn xbtn-s xbtn-sm" style="margin-left:auto" onclick="xStRetry()">Try again</button></div>');};
   try{
     var p=await api('/api/dsm/stores/'+id+'/profile');
     var t='';
     if(p.ranks)t+=xTile('National rank','#'+xN(p.ranks.national_rank),'of '+xN(p.ranks.national_of)+' stores')+
-                 xTile('Region rank','#'+xN(p.ranks.region_rank),'of '+xN(p.ranks.region_of)+' in '+escH(X.st.cur.region||'region'));
+                 xTile('Region rank','#'+xN(p.ranks.region_rank),'of '+xN(p.ranks.region_of)+' in '+escH(cur.region||'region'));
     t+=xTile('YTD sales',(p.ytd&&p.ytd.dollars!=null)?xUsd(p.ytd.dollars):'&mdash;',(p.ytd&&p.ytd.units!=null)?xN(p.ytd.units)+' units':'')+
-       xTile('Demand / wk',(X.st.cur._g.weekly_units!=null?Number(X.st.cur._g.weekly_units).toFixed(1):'&mdash;'),'units, engine forecast')+
+       xTile('Demand / wk',(cur._g.weekly_units!=null?Number(cur._g.weekly_units).toFixed(1):'&mdash;'),'units, engine forecast')+
        xTile('Last delivery',p.last_delivery?xDate(p.last_delivery):'none','')+
        xTile('Inbound',xN((p.inbound||{}).loaded_units||0)+' u',(p.inbound&&p.inbound.manifest_delivery_after_sales)?'truck en route':'loaded in transit')+
-       xTile('DSM',escH(X.st.cur.dsm||p.store.dsm||'not assigned'),'');
+       xTile('DSM',escH(cur.dsm||(p.store||{}).dsm||'not assigned'),'');
     if(p.edi&&p.edi.suspected_gap)t+=xTile('Register scans','Silent '+((p.edi.last_sale)?'since '+xDate(p.edi.last_sale):''),'possible data-feed gap','warn');
     set('stpTiles',t);
     var wk=p.weekly_sales_13wk||[],mx=1;wk.forEach(function(w){mx=Math.max(mx,w.units||0);});
     set('stpSales',wk.length?'<div style="display:flex;align-items:flex-end;gap:4px;height:90px;padding:10px 16px 2px">'+
       wk.map(function(w){return '<div title="'+escH(w.week)+': '+xN(w.units)+' u" style="flex:1;min-height:3px;border-radius:2px 2px 0 0;background:var(--x-chart-1);height:'+Math.max(3,Math.round((w.units||0)/mx*100))+'%"></div>';}).join('')+
-      '</div><div class="xsmall xmuted" style="padding:0 16px 10px">'+escH(String(wk[0].week))+' &rarr; '+escH(String(wk[wk.length-1].week))+' &middot; tallest = '+xN(mx)+' u &middot; data as of '+escH(p.data_as_of||'?')+'</div>'
+      '</div><div class="xsmall xmuted" style="padding:0 16px 10px">'+xDate(wk[0].week)+' &rarr; '+xDate(wk[wk.length-1].week)+' &middot; tallest = '+xN(mx)+' u &middot; data as of '+(p.data_as_of?xDate(p.data_as_of):'&mdash;')+'</div>'
       :'<div class="xempty">No register sales in the last 13 weeks.</div>');
     var fams=p.families||[];
     set('stpFams',fams.length?'<div class="xscroll"><table class="xdata"><thead><tr><th>Family</th><th>Grade</th><th class="r">Demand / wk</th><th>Sold of delivered (13 wk)</th><th>Service</th></tr></thead><tbody>'+
@@ -4841,7 +4847,9 @@ async function xStFill(id){
       set('stpDec',ds.length?'<div class="xscroll"><table class="xdata"><tbody>'+
         ds.slice(0,40).map(function(d2){var k=xKind(d2.decision_type);
           return '<tr><td style="white-space:nowrap"><span class="xtag '+(k[2]==='bad'?'bad':k[2]==='warn'?'warn':'')+'">'+escH(k[1])+'</span></td><td>'+escH(xPlain(d2.reason||''))+'</td></tr>';}).join('')+
-        '</tbody></table></div>':'<div class="xempty">No gates or exceptions for this store in the open run &mdash; it shipped clean or was not in scope.</div>');
+        '</tbody></table></div>'+
+        (ds.length>40?'<div class="xnote">Showing the first 40 of '+xN(ds.length)+' &mdash; open <b>This run\'s decisions</b> above for the full list.</div>':'')
+        :'<div class="xempty">No gates or exceptions for this store in the open run &mdash; it shipped clean or was not in scope.</div>');
     }else set('stpDec','<div class="xempty">Open a run on This Week (or from History) to see its decisions for this store.</div>');
   }catch(e){fail('stpDec','Engine decisions',e);}
 }
