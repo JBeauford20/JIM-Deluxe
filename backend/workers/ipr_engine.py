@@ -33,7 +33,7 @@ import psycopg2.extras
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
 from recommendation_engine import (CART_SHELVES, CART_CEILING_IN, MIN_SHELF_CLEAR_IN,
-                                   PROFILE_HEIGHT_RANK, determine_kit_type,
+                                   PROFILE_HEIGHT_RANK,
                                    _distribute_units_across_lines)
 
 ENGINE_VERSION = "v2"
@@ -639,7 +639,6 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     low_value_wh = float(S.get("cart_wholesale_low", 1700) or 1700)
     consolidate = str(S.get("cart_consolidate", True)).lower() not in ("false", "0", "no")
     orders = {}
-    store_kit = defaultdict(lambda: defaultdict(int))
     for l in ship.values():
         if l.get("alloc_trays", 0) <= 0:
             continue
@@ -660,7 +659,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 while left > 0:
                     take = min(left, room)
                     units = take * l["upt"]
-                    kit = determine_kit_type(l["sku_id"], units, store_kit[store_id], avail_meta)
+                    kit = None                      # assigned network-wide after release/defer
                     cur_items.append((l["sku_id"], take, units, kit, pid))
                     left -= take
                     room -= take
@@ -774,6 +773,47 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     log(f"Cart economics: {econ['released_low_value']:,} low-value carts released (whole orders) · {econ['deferred_carts']:,} "
         f"deferred ({econ['deferred_units']:,}u, ${econ['deferred_wholesale']:,.0f} wholesale) · "
         f"{len(deferred_stores):,} stores fully deferred")
+
+    # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
+    # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
+    # jute. Kit options per SKU come from every availability line: a grower-pot (1M) line can be
+    # kitted either way; finished 3M kits only as the kit types actually available. When both
+    # are possible each shelf item goes to the side behind the target share
+    # (kit_split_ceramic_share, default 0.5); exact ties alternate. Done after release/defer so
+    # deferred orders do not skew the split of what ships. Units and trays are unchanged.
+    _cs = S.get("kit_split_ceramic_share")
+    cer_share = 0.5 if _cs is None else float(_cs)
+    kit_opts = defaultdict(set)
+    for r in avail_rows:
+        if (r["code_level"] or "3M") != "3M":
+            kit_opts[r["sku_id"]] |= {"jute_kit", "ceramic_kit"}
+        elif r["hard_good_type"] in ("jute_kit", "ceramic_kit"):
+            kit_opts[r["sku_id"]].add(r["hard_good_type"])
+    kit_units = defaultdict(lambda: {"jute_kit": 0, "ceramic_kit": 0})
+    kit_tie = defaultdict(bool)
+    for store_id in sorted(orders):
+        for c in orders[store_id]["carts"]:
+            new = []
+            for (pos, sku_id, trays, units, _k, pid) in c["contents"]:
+                opts = kit_opts.get(sku_id, set())
+                if len(opts) == 2:
+                    t = kit_units[sku_id]
+                    after = t["jute_kit"] + t["ceramic_kit"] + units
+                    dev_c = abs(t["ceramic_kit"] + units - cer_share * after)
+                    dev_j = abs(t["ceramic_kit"] - cer_share * after)
+                    if dev_c == dev_j:
+                        kit = "ceramic_kit" if kit_tie[sku_id] else "jute_kit"
+                        kit_tie[sku_id] = not kit_tie[sku_id]
+                    else:
+                        kit = "ceramic_kit" if dev_c < dev_j else "jute_kit"
+                    t[kit] += units
+                elif len(opts) == 1:
+                    kit = next(iter(opts))
+                    kit_units[sku_id][kit] += units
+                else:
+                    kit = avail_meta.get(sku_id, {}).get("hard_good_type", "ceramic_kit")
+                new.append((pos, sku_id, trays, units, kit, pid))
+            c["contents"] = new
 
     # ══ 8. REVIEW (§24–25) + $900K OBJECTIVE (§2) + ALLOCATION OUTPUTS (§15) ══
     review = {}
