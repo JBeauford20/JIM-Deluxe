@@ -550,6 +550,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     for k, l in ship.items():
         by_sku[l["sku_id"]].append(l)
     unfilled = defaultdict(float)        # sku -> units of need not covered by supply
+    sku_left = {}                        # sku -> supply left after priority allocation
     alloc_units_total = 0
     for sku_id, lst in by_sku.items():
         remaining = supply.get(sku_id, 0)
@@ -570,6 +571,62 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    f"Need {want:,}u vs supply {supply.get(sku_id, 0):,}u — {int(unfilled[sku_id]):,}u unfilled; "
                    f"allocated by store priority (§12)", sku_id=sku_id,
                    need_units=want, supply_units=supply.get(sku_id, 0), unfilled_units=int(unfilled[sku_id]))
+        sku_left[sku_id] = remaining
+
+    # ══ 6b. ORDER-GAP FILLING (§21, simple form) — after allocation, priority order unchanged ══
+    # Where a store x family has unfilled need, give extra trays to OTHER SKUs in the same
+    # store x family that have positive own need (passed every gate) and supply left, ranked by
+    # that store's forecast. Guards: the store x family total never exceeds the family's eligible
+    # need; a substitute gets at most its own need again (selling-window guard); H2O/Terrarium
+    # (§17 tray caps), approved test quantities and unreliable-inventory lines are not used.
+    fam_lines = defaultdict(list)
+    for l in ship.values():
+        fam_lines[(l["store_id"], l["family"])].append(l)
+    gaps = []
+    for fk, fl in fam_lines.items():
+        short = [l for l in fl if l.get("short_units")]
+        if short and fk[1] not in H2O_TERR_FAMILIES:
+            gaps.append((-max(l["priority"] for l in short), fk))
+    gap_fill_units = gap_fill_trays = 0
+    gap_fills = 0
+    for _p, fk in sorted(gaps):
+        fl = fam_lines[fk]
+        fam_need = sum(l["trays"] * l["upt"] for l in fl)
+        fam_alloc = sum(l["alloc_units"] for l in fl)
+        short = sorted((l for l in fl if l.get("short_units")), key=lambda x: (-x["short_units"], x["sku_id"]))
+        cands = sorted((l for l in fl if not l.get("short_units") and not l.get("reactivation")
+                        and l["conf"] != "UNUSABLE" and l["need"] > 0 and sku_left.get(l["sku_id"], 0) > 0),
+                       key=lambda x: (-x["fc"], x["sku_id"]))
+        for c in cands:
+            if fam_need - fam_alloc < c["upt"]:
+                continue
+            add = min(c["trays"] - c.get("gap_fill_trays", 0),           # selling-window guard
+                      sku_left[c["sku_id"]] // c["upt"],
+                      (fam_need - fam_alloc) // c["upt"])
+            if add <= 0:
+                continue
+            u = add * c["upt"]
+            c["alloc_trays"] += add
+            c["alloc_units"] += u
+            c["gap_fill_trays"] = c.get("gap_fill_trays", 0) + add
+            sku_left[c["sku_id"]] -= u
+            fam_alloc += u
+            gap_fill_units += u
+            gap_fill_trays += add
+            gap_fills += 1
+            orig = short[0]
+            decide("gap_fill", f"{fk[1]}: {orig['short_units']}u of {orig['sku_id']} unavailable — "
+                               f"+{add} trays ({u}u) of {c['sku_id']} (forecast {c['fc']:.1f}/wk, own need "
+                               f"{c['trays']} trays); family total stays within need (§21)",
+                   store_id=fk[0], sku_id=c["sku_id"], family=fk[1], original_sku=orig["sku_id"],
+                   original_skus=[l["sku_id"] for l in short], substitute_sku=c["sku_id"], trays=add,
+                   units=u, substitute_forecast_wk=round(c["fc"], 2), family_need_units=fam_need,
+                   family_alloc_units=fam_alloc,
+                   basis="proven SKU in the same store x family with positive own need and supply left")
+    alloc_units_total += gap_fill_units
+    if gaps:
+        log(f"Gap fill: {gap_fills:,} fills · {gap_fill_trays:,} trays · {gap_fill_units:,}u across "
+            f"{len(gaps):,} short store x families")
 
     # ══ 7. TRAYS -> CART-LOADING PLAN (§17–19): physical fit only ═══════════
     # §19.1 cart economics — editable assumptions, not rules: delivered cart cost is roughly
@@ -719,6 +776,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                             "price are never guessed: they ship on units and are excluded from $."),
         },
         "incomplete_price_units": int(price_srcs.get("missing", 0)),
+        "gap_fill": {"fills": gap_fills, "trays": gap_fill_trays, "units": gap_fill_units,
+                     "short_store_families": len(gaps)},
         "cart_economics": {
             "carts": len(all_carts),
             "wholesale_value": round(tot_wh, 2),
