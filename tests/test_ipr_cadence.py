@@ -79,3 +79,24 @@ def test_light_due_order_is_deferred_once_then_ships():
     assert economic_action(500, 1, 50, 240, 1700, False, 0, 1) == "defer"
     assert economic_action(500, 1, 50, 240, 1700, False, 1, 1) == "release_after_deferral"
     assert economic_action(500, 1, 50, 240, 1700, False, 0, 0) == "release_after_deferral"
+
+
+# ── §8 shrink + week-1 deferral seed ─────────────────────────────────────────
+from ipr_engine import is_overdue, shrink_rate  # noqa: E402
+
+
+def test_shrink_rate_formula_clamp_and_fallback():
+    assert shrink_rate(1000, 700, onhand_change=100) == (0.2, "sold + Δ DTS on-hand vs delivered")
+    assert shrink_rate(1000, 100, onhand_change=0)[0] == 0.6                  # clamped
+    assert shrink_rate(1000, 1200, onhand_change=0)[0] == 0.0                 # clamped
+    assert shrink_rate(1000, 700, onhand_change=None, efficiency=0.75)[0] == 0.25
+    assert shrink_rate(0, 0) == (None, "no data")
+
+
+def test_overdue_store_is_released_not_deferred():
+    arrival = date(2026, 11, 25)
+    assert is_overdue(date(2026, 11, 3), arrival, 2) is True                 # 22 days > 21
+    assert is_overdue(date(2026, 11, 4), arrival, 2) is False                # 21 days
+    assert is_overdue(None, arrival, 1) is True
+    assert economic_action(500, 1, 50, 240, 1700, False, 0, 1, overdue=True) == "release_overdue"
+    assert economic_action(500, 1, 50, 240, 1700, False, 0, 1, overdue=False) == "defer"
