@@ -1801,7 +1801,7 @@ async function iprRefresh(){
     document.getElementById('iprObj').innerHTML=
       _iprTile('Baseline / wk',_usd(o.baseline_weekly_retail),'no new orders')+
       _iprTile('Incremental',  '+'+_usd(o.incremental_weekly_retail),'from this plan','ok')+
-      _iprTile('Expected / wk',_usd(o.expected_weekly_retail),'retail register $')+
+      _iprTile('Expected / wk',_usd(o.expected_weekly_retail),'wholesale $')+
       _iprTile(gap>0?'Gap to $900K':'Above $900K',_usd(Math.abs(gap)),gap>0?'below the weekly minimum':'growth territory',gap>0?'bad':'ok')+
       _iprTile('Lost — no supply',_usd(o.lost_unavailable_inventory),'per week','warn')+
       _iprTile('Lost — blocks/holds',_usd(o.lost_blocks_and_holds),'per week','warn');
@@ -4171,12 +4171,14 @@ function xRenderResults(){
   var ce=S.cart_economics||null;
   if(ce&&typeof ce==='object'){
     var fp=ce.freight_pct;
-    h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Every cart is priced before release (Sec 19.1). Light carts either ship with a warning or wait one week.</span></div><div class="xobj">'+
-      xTile('Avg wholesale per cart',ce.avg_wholesale_per_cart!=null?xUsdFull(ce.avg_wholesale_per_cart):'&mdash;',xN(ce.carts)+' carts')+
+    var pm=ce.pushed_min_cart||{};
+    h+='<div class="xpanel"><div class="xph"><h2>Cart economics</h2><span class="sub">Shipping carts only. Minimum order is one full CC cart (leadership, Nov 20); smaller orders wait a week and are counted separately.</span></div><div class="xobj">'+
+      xTile('Carts shipping',xN(ce.carts),ce.avg_tray_fill_shipping!=null?Math.round(ce.avg_tray_fill_shipping*100)+'% avg tray fill':'this week')+
+      xTile('Avg wholesale per cart',ce.avg_wholesale_per_cart!=null?xUsdFull(ce.avg_wholesale_per_cart):'&mdash;','shipping carts')+
+      xTile('Wholesale shipping',ce.wholesale_value!=null?xUsd(ce.wholesale_value):'&mdash;','in shipping carts')+
       xTile('Freight % of wholesale',fp!=null?(fp*100).toFixed(1)+'%':'&mdash;','delivered cost &divide; wholesale')+
-      xTile('Low-value carts released',xN(ce.carts_released_low_value),'ship with a warning',ce.carts_released_low_value?'warn':'')+
-      xTile('Carts waiting a week',xN(ce.carts_deferred),'light orders deferred')+
-      xTile('Wholesale waiting',ce.deferred_wholesale!=null?xUsd(ce.deferred_wholesale):'&mdash;','in deferred carts')+'</div>'+
+      xTile('Pushed: under one cart',xN(pm.stores||0)+' stores',xN(pm.carts||0)+' partial carts &middot; '+xUsd(pm.wholesale||0)+' wholesale',pm.stores?'warn':'')+
+      (ce.carts_deferred?xTile('Carts waiting a week',xN(ce.carts_deferred),'light orders deferred'):'')+'</div>'+
       (ce.carts_missing_wholesale_price?'<div class="xnote">'+xN(ce.carts_missing_wholesale_price)+' carts have SKUs with no wholesale price, so their value is understated.</div>':'')+'</div>';
   }
   /* data notes */
