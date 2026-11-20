@@ -637,6 +637,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # $180–$300 (default $240); normal wholesale value per cart is roughly $1,700–$3,000.
     cart_cost = float(S.get("cart_delivered_cost", 240) or 240)
     low_value_wh = float(S.get("cart_wholesale_low", 1700) or 1700)
+    consolidate = str(S.get("cart_consolidate", True)).lower() not in ("false", "0", "no")
     orders = {}
     store_kit = defaultdict(lambda: defaultdict(int))
     for l in ship.values():
@@ -671,19 +672,26 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # pack shelves into carts, tallest first; first-fit within 5 shelves / 95in / profile max
         shelves.sort(key=lambda s: (PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
         carts = []
+        if consolidate:
+            # §19.1 consolidate within the store: best-fit decreasing by shelf height — each shelf
+            # goes to the open cart it fills most tightly (least height left), same physical
+            # limits (5 shelves / ceiling / profile max). Shelves and trays are never dropped or
+            # added; same-profile partial trays are already merged onto one shelf above.
+            shelves.sort(key=lambda s: (-float(pack[s[1][0][0]]["clear_height_in"] or MIN_SHELF_CLEAR_IN),
+                                        PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
         for pid, items in shelves:
             h = float(pack[items[0][0]]["clear_height_in"] or MIN_SHELF_CLEAR_IN)
             pmax = int(pack[items[0][0]]["max_shelves"] or CART_SHELVES)
-            placed = False
-            for c in carts:
-                if (len(c["shelves"]) < CART_SHELVES and c["height"] + h <= CART_CEILING_IN
-                        and c["prof_ct"][pid] < pmax):
-                    c["shelves"].append((pid, items))
-                    c["height"] += h
-                    c["prof_ct"][pid] += 1
-                    placed = True
-                    break
-            if not placed:
+            fits = [c for c in carts
+                    if (len(c["shelves"]) < CART_SHELVES and c["height"] + h <= CART_CEILING_IN
+                        and c["prof_ct"][pid] < pmax)]
+            if fits:
+                c = (min(fits, key=lambda c: (CART_CEILING_IN - c["height"] - h, len(c["shelves"])))
+                     if consolidate else fits[0])
+                c["shelves"].append((pid, items))
+                c["height"] += h
+                c["prof_ct"][pid] += 1
+            else:
                 carts.append({"shelves": [(pid, items)], "height": h, "prof_ct": defaultdict(int, {pid: 1})})
         out = []
         for ci, c in enumerate(carts, 1):
