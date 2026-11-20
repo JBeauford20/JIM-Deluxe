@@ -27,9 +27,9 @@ def test_exact_allocation_conserves_units():
     sc = {1: {"Holiday C": 1}, 2: {"Holiday C": 2}}
     pack = [row("R1", "Holiday C", 3, 111, 300), row("R1", "Holiday C", 3, 222, 30)]
     lines, rep, unalloc, *_ = allocate(compiled, sc, pack)
-    assert lines[(1, 111, "R1")][0] == 100 and lines[(2, 111, "R1")][0] == 200
-    assert lines[(2, 222, "R1")][2] == "exact"
-    assert lines[(1, 111, "R1")][1] == date(2026, 11, 18)
+    assert lines[(1, 111, "R1", "MEDIUM")][0] == 100 and lines[(2, 111, "R1", "MEDIUM")][0] == 200
+    assert lines[(2, 222, "R1", "MEDIUM")][2] == "exact"
+    assert lines[(1, 111, "R1", "MEDIUM")][1] == date(2026, 11, 18)
     assert total(lines) == 330 and not unalloc
 
 
@@ -51,9 +51,9 @@ def test_unmatched_config_pools_on_route_then_day():
             row("N8", "Holiday D", 1, 111, 50, day=D2),           # 1 of 4 S&C carts shipped
             row("N9", "BM 6", 3, 999, 300, day=D2)]               # route with no stores -> day-pool
     lines, rep, unalloc, *_ = allocate(compiled, sc, pack)
-    assert lines[(1, 111, "N1")][0] == 100 and lines[(1, 111, "N1")][2] == "route-pool"
-    assert lines[(3, 999, "N8")][0] == 225 and lines[(4, 999, "N8")][0] == 75
-    assert lines[(3, 999, "N8")][2] == "day-pool"
+    assert lines[(1, 111, "N1", "MEDIUM")][0] == 100 and lines[(1, 111, "N1", "MEDIUM")][2] == "route-pool"
+    assert lines[(3, 999, "N8", "LOW")][0] == 225 and lines[(4, 999, "N8", "LOW")][0] == 75
+    assert lines[(3, 999, "N8", "LOW")][2] == "day-pool"
     assert abs(total(lines) - 550) < 1e-9 and not unalloc
 
 
@@ -64,9 +64,9 @@ def test_store_specific_kit_and_split_stop():
             row("S4", "Holiday C - BM (Store 0156)", 1, 222, 40),
             row("N3", "BM 2", 2, 333, 60, day=D2)]
     lines, rep, unalloc, *_ = allocate(compiled, sc, pack)
-    assert lines[(7, 111, "S4")][0] == 100 and (156, 111, "S4") not in lines
-    assert lines[(156, 222, "S4")][2] == "store"
-    assert lines[(4180, 333, "N3")][0] == 30 and lines[(4180, 333, "N3")][1] == D2
+    assert lines[(7, 111, "S4", "MEDIUM")][0] == 100 and (156, 111, "S4", "MEDIUM") not in lines
+    assert lines[(156, 222, "S4", "MEDIUM")][2] == "store"
+    assert lines[(4180, 333, "N3", "MEDIUM")][0] == 30 and lines[(4180, 333, "N3", "MEDIUM")][1] == D2
     assert not unalloc
 
 

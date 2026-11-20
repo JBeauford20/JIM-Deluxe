@@ -287,8 +287,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     #      lines: avg delivery size, flagged LOW.
     cur.execute("SELECT DISTINCT store_id FROM delivery_manifest WHERE delivery_date > %s", (anchor,))
     in_transit_stores = {r["store_id"] for r in cur.fetchall()}
-    it_lines, it_weeks = IN_TRANSIT_SOURCE(cur, anchor)
+    it_lines, it_weeks = IN_TRANSIT_SOURCE(cur, anchor)   # (store, sku) -> (medium u, low u, methods)
     it_stores = {s for s, _ in it_lines}
+    it_low = float(S.get("in_transit_low_factor", 0.5))      # LOW lines (pooled guesses) count at 50%
     cur.execute("""
         SELECT o.store_id, ol.sku_id,
                SUM(COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty)) AS qty
@@ -302,7 +303,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     """, (anchor - timedelta(days=7), shipping_week, sorted(it_weeks)))
     inbound_known = {(r["store_id"], r["sku_id"]): int(r["qty"] or 0) for r in cur.fetchall()}
     manifest_est_stores = set()
-    log(f"Inbound after {anchor}: loaded in-transit {sum(u for u, _ in it_lines.values()):,.0f}u "
+    log(f"Inbound after {anchor}: loaded in-transit {sum(m + lo for m, lo, _ in it_lines.values()):,.0f}u "
+        f"({sum(lo for _, lo, _ in it_lines.values()):,.0f}u LOW at {it_low:.0%}) "
         f"at {len(it_stores)} stores (weeks {', '.join(str(w) for w in sorted(it_weeks)) or 'none'}) · "
         f"manifest stores without loaded lines: {len(in_transit_stores - it_stores)}")
 
@@ -352,9 +354,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             1.0 if sn is not None else float(conf_factor[conf]))
 
         if store_id in it_stores:
-            inbound, how = it_lines.get((store_id, sku_id), (0.0, None))
+            med, low, how = it_lines.get((store_id, sku_id), (0.0, 0.0, None))
+            inbound = med + low * it_low
             inbound_src = (f"in transit (loaded, {how})" if how
                            else "in transit (loaded) — SKU not on the truck")
+            if low:
+                inbound_src += (f" · LOW confidence {low:.0f}u counted at {it_low:.0%} "
+                                f"({low * it_low:.0f}u) — store assignment estimated")
         else:
             inbound, inbound_src = inbound_known.get((store_id, sku_id), 0), "prior exported run"
             if not inbound and store_id in in_transit_stores and dv.get("n_del"):
@@ -958,17 +964,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
 def _in_transit_lines(cur, anchor):
     """Loaded in-transit units arriving after the sales anchor.
-    Returns ({(store_id, sku_id): (units, method)}, {shipping_week with any loaded lines})."""
+    Returns ({(store_id, sku_id): (medium_units, low_units, methods)}, {shipping_weeks loaded})."""
     cur.execute("SELECT to_regclass('public.in_transit_lines') IS NOT NULL")
     if not cur.fetchone()[0]:
         return {}, set()
     cur.execute("SELECT DISTINCT shipping_week FROM in_transit_lines")
     weeks = {r[0] for r in cur.fetchall()}
-    cur.execute("""SELECT store_id, sku_id, SUM(units) AS u,
+    cur.execute("""SELECT store_id, sku_id,
+                          COALESCE(SUM(units) FILTER (WHERE confidence <> 'LOW'), 0) AS med,
+                          COALESCE(SUM(units) FILTER (WHERE confidence = 'LOW'), 0) AS low,
                           string_agg(DISTINCT method, '+') AS m
                    FROM in_transit_lines WHERE delivery_date > %s
                    GROUP BY store_id, sku_id""", (anchor,))
-    return {(r[0], r[1]): (float(r[2]), r[3]) for r in cur.fetchall()}, weeks
+    return {(r[0], r[1]): (float(r[2]), float(r[3]), r[4]) for r in cur.fetchall()}, weeks
 
 
 # Swappable for previews (feed loader output in memory without writing the table).

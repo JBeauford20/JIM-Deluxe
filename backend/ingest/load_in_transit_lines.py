@@ -30,6 +30,8 @@ Allocation (per route, per kit; units conserve to the pack plan):
                carts across all routes shipping that day (LOW confidence; route re-cut
                after the Compiled sheet was frozen)
   unallocated  nothing to pool against — reported, not loaded
+Confidence: day-pool units are written as separate rows with confidence 'LOW' (the engine
+counts them at ipr_settings.in_transit_low_factor, default 50%); everything else is 'MEDIUM'.
 
 SKUs: [Sheet].SKU is the Home Depot SKU (= skus.sku_id). Rows with no SKU (soil) or SKUs
 absent from skus (Bloomaker) are reported as unmapped and not loaded.
@@ -58,9 +60,10 @@ CREATE TABLE IF NOT EXISTS in_transit_lines (
     delivery_date  date,
     units          numeric(10,2) NOT NULL CHECK (units >= 0),
     method         text    NOT NULL,
+    confidence     text    NOT NULL DEFAULT 'MEDIUM' CHECK (confidence IN ('MEDIUM','LOW')),
     source_file    text,
     loaded_at      timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (shipping_week, store_id, sku_id, route)
+    PRIMARY KEY (shipping_week, store_id, sku_id, route, confidence)
 );
 CREATE INDEX IF NOT EXISTS in_transit_lines_deliv ON in_transit_lines(delivery_date);
 ALTER TABLE in_transit_lines ENABLE ROW LEVEL SECURITY;
@@ -259,7 +262,7 @@ def allocate(compiled, sc, pack_rows):
     unalloc = Counter()
 
     def put(s, rt, sku, u, method):
-        rec = lines[(s, sku, rt)]
+        rec = lines[(s, sku, rt, "LOW" if method == "day-pool" else "MEDIUM")]
         rec[0] += u
         rec[1] = store_routes[s].get(rt) or (route_day.get(rt) and route_day[rt] + timedelta(days=1))
         rec[2] = method if rec[2] in (None, method) else "mixed"
@@ -327,14 +330,14 @@ def reconcile(b, valid_stores=None, valid_skus=None, log=print):
     log(f"Week {b['week']} -> shipping_week {b['shipping_week']}")
     log("  sources: " + " | ".join(p.name for p in b["files"]))
     comp_stores = {s for s, _, _ in b["compiled"]}
-    line_stores = {s for s, _, _ in lines}
+    line_stores = {k[0] for k in lines}
     log(f"  stores: Compiled {len(comp_stores)} ({len(b['compiled'])} rows) | with in-transit lines "
         f"{len(line_stores)} | Compiled stores with no lines {sorted(comp_stores - line_stores)[:15]}")
     log(f"  units: pack plan {pack_total:,.0f} = allocated {alloc:,.0f} + unallocated "
         f"{sum(b['unalloc'].values()):,.0f} + no-SKU {sum(b['unmapped'].values()):,.0f}  "
         f"(diff {pack_total - alloc - sum(b['unalloc'].values()) - sum(b['unmapped'].values()):+.1f})")
     by_fam = defaultdict(float)
-    for (s, sku, rt), v in lines.items():
+    for (s, sku, rt, _c), v in lines.items():
         by_fam[b["family_of"].get(sku, "?")] += v[0]
     for sku, u in b["unalloc"].items():
         by_fam[b["family_of"].get(sku, "?")] += u
@@ -365,7 +368,7 @@ def reconcile(b, valid_stores=None, valid_skus=None, log=print):
     bad_sku = bad_store = Counter()
     if valid_skus is not None:
         bad_sku = Counter()
-        for (s, sku, rt), v in lines.items():
+        for (s, sku, rt, _c), v in lines.items():
             if sku not in valid_skus:
                 bad_sku[(sku, b["family_of"].get(sku))] += v[0]
         if bad_sku:
@@ -373,7 +376,7 @@ def reconcile(b, valid_stores=None, valid_skus=None, log=print):
                 ", ".join(f"{k} '{f}' {u:,.0f}u" for (k, f), u in bad_sku.items()))
     if valid_stores is not None:
         bad_store = Counter()
-        for (s, sku, rt), v in lines.items():
+        for (s, sku, rt, _c), v in lines.items():
             if s not in valid_stores:
                 bad_store[s] += v[0]
         if bad_store:
@@ -383,9 +386,50 @@ def reconcile(b, valid_stores=None, valid_skus=None, log=print):
 
 
 def loadable(b, valid_stores, valid_skus):
-    return [(b["shipping_week"], s, sku, rt, v[1], round(v[0], 2), v[2], b["files"][2].name)
-            for (s, sku, rt), v in sorted(b["lines"].items())
+    return [(b["shipping_week"], s, sku, rt, v[1], round(v[0], 2), v[2], conf, b["files"][2].name)
+            for (s, sku, rt, conf), v in sorted(b["lines"].items())
             if s in valid_stores and sku in valid_skus and v[0] > 0]
+
+
+def gap_table(b, valid_stores, valid_skus, log=print):
+    """Explicit bridge: pack plan = loaded + not-in-SKU-master + no-SKU + unknown store + unallocated."""
+    cols = ("pack", "loaded", "low", "sku_not_in_master", "no_sku", "unknown_store", "unallocated")
+    t = defaultdict(lambda: dict.fromkeys(cols, 0.0))
+    fam = b["family_of"]
+    for r in b["pack_rows"]:
+        t[str(r["ItemDescription"])]["pack"] += float(r["Total Used"] or 0)
+    for (s, sku, rt, conf), v in b["lines"].items():
+        f = t[fam.get(sku, "?")]
+        if sku not in valid_skus:
+            f["sku_not_in_master"] += v[0]
+        elif s not in valid_stores:
+            f["unknown_store"] += v[0]
+        else:
+            f["loaded"] += v[0]
+            if conf == "LOW":
+                f["low"] += v[0]
+    for sku, u in b["unalloc"].items():
+        t[fam.get(sku, "?")]["unallocated"] += u
+    for d, u in b["unmapped"].items():
+        t[d.replace("(no SKU) ", "")]["no_sku"] += u
+    log("  RECONCILIATION  pack plan = loaded + SKU not in master + no SKU + unknown store + unallocated")
+    log(f"    {'family':<46}" + "".join(f"{c:>18}" for c in cols) + "    check")
+    tot = dict.fromkeys(cols, 0.0)
+    for name in sorted(t):
+        row = t[name]
+        for c in cols:
+            tot[c] += row[c]
+        diff = row["pack"] - sum(row[c] for c in cols if c not in ("pack", "low"))
+        log(f"    {name[:46]:<46}" + "".join(f"{row[c]:>18,.0f}" for c in cols) +
+            ("       ok" if abs(diff) < 0.5 else f"  {diff:+,.1f}"))
+    diff = tot["pack"] - sum(tot[c] for c in cols if c not in ("pack", "low"))
+    log(f"    {'TOTAL':<46}" + "".join(f"{tot[c]:>18,.0f}" for c in cols) +
+        ("       ok" if abs(diff) < 0.5 else f"  {diff:+,.1f}"))
+    log(f"    gap pack - loaded = {tot['pack'] - tot['loaded']:,.0f}u = SKU not in master "
+        f"{tot['sku_not_in_master']:,.0f} + no SKU {tot['no_sku']:,.0f} + unknown store "
+        f"{tot['unknown_store']:,.0f} + unallocated {tot['unallocated']:,.0f}  "
+        f"| loaded at LOW confidence: {tot['low']:,.0f}u")
+    return tot
 
 
 def main():
@@ -408,12 +452,15 @@ def main():
     valid_skus = {r[0] for r in cur.fetchall()}
     reconcile(b, valid_stores, valid_skus)
     rows = loadable(b, valid_stores, valid_skus)
+    gap_table(b, valid_stores, valid_skus)
     print(f"  loadable rows: {len(rows):,} | units {sum(r[5] for r in rows):,.0f} | "
-          f"stores {len({r[1] for r in rows})} | SKUs {len({r[2] for r in rows})}")
+          f"stores {len({r[1] for r in rows})} | SKUs {len({r[2] for r in rows})} | "
+          f"LOW {sum(r[5] for r in rows if r[7] == 'LOW'):,.0f}u")
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(
             [dict(shipping_week=str(r[0]), store_id=r[1], sku_id=r[2], route=r[3],
-                  delivery_date=str(r[4]) if r[4] else None, units=r[5], method=r[6]) for r in rows]))
+                  delivery_date=str(r[4]) if r[4] else None, units=r[5], method=r[6],
+                  confidence=r[7]) for r in rows]))
         print(f"  wrote {args.json_out}")
     if not args.apply:
         cur.execute("SELECT to_regclass('public.in_transit_lines') IS NOT NULL")
@@ -429,11 +476,13 @@ def main():
         return
     import psycopg2.extras
     cur.execute(DDL)
+    cur.execute("""ALTER TABLE in_transit_lines ADD COLUMN IF NOT EXISTS confidence text NOT NULL
+                   DEFAULT 'MEDIUM'""")
     cur.execute("DELETE FROM in_transit_lines WHERE shipping_week = %s", (b["shipping_week"],))
     deleted = cur.rowcount
     psycopg2.extras.execute_values(cur, """
         INSERT INTO in_transit_lines (shipping_week, store_id, sku_id, route, delivery_date,
-                                      units, method, source_file) VALUES %s""", rows, page_size=1000)
+                                      units, method, confidence, source_file) VALUES %s""", rows, page_size=1000)
     conn.commit()
     print(f"COMMITTED - replaced {deleted} rows with {len(rows)} for shipping_week {b['shipping_week']}")
     conn.close()
