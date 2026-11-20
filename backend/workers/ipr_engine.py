@@ -218,6 +218,32 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # no limit (always defer when the test fails).
     _md = S.get("max_economic_deferrals")
     max_econ_def = 10 ** 6 if econ_defer_due else int(1 if _md is None else _md)
+    # §29 post-delivery feedback (leadership 11/20: 7–28 day shipment response, measured by
+    # services/post_delivery.py each week). observe = report only (default). apply = a store
+    # whose measured response is clearly strong/weak gets its cadence shifted ONE week,
+    # bounded and logged — the training loop: measure → aggregate → adjust → measure again.
+    pd_mode = str(S.get("post_delivery_feedback", "observe") or "observe").lower()
+    pd_response, pd_adj = {}, {}
+    if pd_mode in ("observe", "apply"):
+        cur.execute("SELECT to_regclass('public.store_family_response') IS NOT NULL AS ok")
+        if cur.fetchone()["ok"]:
+            cur.execute("""SELECT store_id, ipr_family, cohorts, avg_lift, avg_sell28,
+                                  response_class
+                           FROM store_family_response WHERE cohorts >= 2""")
+            pd_response = {(r["store_id"], r["ipr_family"]): dict(r) for r in cur.fetchall()}
+    if pd_mode == "apply" and pd_response:
+        _t = defaultdict(lambda: [0, 0, 0])            # strong, weak, total cohorts per store
+        for (st_, _f), r in pd_response.items():
+            _t[st_][2] += r["cohorts"]
+            if r["response_class"] == "strong":
+                _t[st_][0] += r["cohorts"]
+            elif r["response_class"] == "weak":
+                _t[st_][1] += r["cohorts"]
+        for st_, (s_, w_, n_) in _t.items():
+            if n_ >= 3 and s_ / n_ >= 0.5:
+                pd_adj[st_] = -1                        # proven responder: one week sooner
+            elif n_ >= 3 and w_ / n_ >= 0.5:
+                pd_adj[st_] = 1                         # proven weak: one week later
     fw = S["forecast_weights"]
     min_rate = float(S["min_weekly_rate_units"])
     conv_thr = S["conversion_thresholds"]
@@ -671,7 +697,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     def store_cadence(store_id):
         g = cadence_grade((stores.get(store_id) or {}).get("volume_code"),
                           store_best_grade.get(store_id), cadence)
-        return g, int(cadence[g])
+        # measured-response shift (§29, post_delivery_feedback=apply): at most ±1 week, floor 1
+        return g, max(1, int(cadence[g]) + pd_adj.get(store_id, 0))
 
     def size_line(l):
         """§10 need for one line: coverage = store cadence + buffer weeks (capped by the family
@@ -881,6 +908,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         cg, cw = store_cadence(st_id)
         due, nxt = due_status(store_last_del.get(st_id), arrival, cw, st_id in crit_stores)
         store_due[st_id] = (due, cg, cw, nxt)
+    for st_id in sorted(set(pd_adj) & set(store_due)):
+        decide("response_adjustment",
+               f"Delivery cadence {'shortened' if pd_adj[st_id] < 0 else 'lengthened'} one week "
+               f"from the measured 7–28 day shipment response (§29, post_delivery_feedback=apply)",
+               store_id=st_id, severity="info", adjustment_weeks=pd_adj[st_id])
 
     # FILL TO ONE FULL CC CART (leadership minimum, 2026-11-20). A due store whose cadence-sized
     # order is below one full cart gets its coverage extended a week at a time — forecast demand
@@ -1583,6 +1615,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "delivery_cadence": cadence_summary,
         "shipping_efficiency": eff_summary,
         "shrink": shrink_summary,
+        "post_delivery": {
+            "mode": pd_mode,
+            "store_families_measured": len(pd_response),
+            "stores_cadence_adjusted": len(set(pd_adj) & set(store_due)) if pd_mode == "apply" else 0,
+            "note": "7–28 day shipment response (§29); observe = measured + reported only; "
+                    "apply shifts a measured store's cadence by at most one week",
+        },
         "gap_fill": {"fills": gap_fills, "trays": gap_fill_trays, "units": gap_fill_units,
                      "short_store_families": len(gaps)},
         "cart_economics": {
