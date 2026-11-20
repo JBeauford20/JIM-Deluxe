@@ -47,7 +47,7 @@ def _model():
     for i, c in enumerate(carts):
         # 3 carts x 2 trays of 17cm; aster split 4 trays L1 / 2 trays L2 -> base 1 + mix
         shelves.append({"cart_id": c["id"], "shelf_position": 1, "sku_id": 1, "profile_id": "box17",
-                        "kit_type": "jute_kit" if i < 2 else "ceramic_kit", "tray_count": 1 if i < 2 else 2,
+                        "kit_type": "jute_kit", "tray_count": 1 if i < 2 else 2,
                         "unit_count": 3 if i < 2 else 6, "availability_line_id": "L1" if i < 2 else "L1"})
         if i < 2:
             shelves.append({"cart_id": c["id"], "shelf_position": 1, "sku_id": 1, "profile_id": "box17",
@@ -63,10 +63,24 @@ def _model():
                             for c in carts]}
 
 
-def test_config_label():
-    assert X.config_label("CC12") == ("CC12", False)
-    assert X.config_label("PC Collector cart") == ("Collector cart", True)
-    assert X.config_label(None) == ("CC?", False)
+def test_config_names_order_ties_and_permanent():
+    def cart(cid, store, sku, code="CC9"):
+        return {"id": cid, "order_id": "o", "store_id": store, "cart_number": 1, "config_code": code}
+    def shelf(cid, sku, trays=2):
+        return {"cart_id": cid, "shelf_position": 1, "sku_id": sku, "kit_type": None, "tray_count": trays}
+    m = {"carts": [cart("a", 500, 1), cart("b", 600, 1), cart("c", 300, 2), cart("d", 200, 3),
+                   cart("p", 100, 4, code="PC Collector cart")],
+         "shelves": [shelf("a", 1), shelf("b", 1), shelf("c", 2), shelf("d", 3), shelf("p", 4)]}
+    by_cart, names, new = X.assign_config_names(m)
+    assert by_cart == {"a": "CC 1", "b": "CC 1", "d": "CC 2", "c": "CC 3", "p": "Collector cart"}
+    # persisted names are kept; a new signature continues after the highest CC number
+    m["carts"].append(cart("e", 50, 5)); m["shelves"].append(shelf("e", 5))
+    by_cart2, _, new2 = X.assign_config_names(m, names)
+    assert by_cart2["a"] == "CC 1" and by_cart2["c"] == "CC 3" and by_cart2["e"] == "CC 4"
+    assert [r[1] for r in new2] == ["CC 4"]
+    # segments of one shelf (split across availability lines) aggregate to one signature
+    seg = [dict(shelf("a", 1, 1)), dict(shelf("a", 1, 1))]
+    assert X.cart_signature(cart("a", 1, 1), seg) == X.cart_signature(cart("a", 1, 1), [shelf("a", 1, 2)])
 
 
 def test_largest_remainder_conserves():
@@ -90,8 +104,8 @@ def test_stores_and_carts_layout():
     assert [c.value for c in ws[1]][:11] == X.SC_META_HEADERS
     row = [c.value for c in ws[2]]
     assert row[:11] == [903, "", "North", "0903-S PLAINFIELD", "NJ", "C", "Christine Sweeney", "", 3, 3, 0]
-    assert ws.cell(1, 12).value == "CC1" and ws.cell(2, 12).value == 3
-    assert rep["unmapped_configs"] == 1
+    assert ws.cell(1, 12).value == "CC 1" and ws.cell(2, 12).value == 3
+    assert rep["distinct_configs"] == 1
 
 
 def test_pack_plan_conserves_units_and_mixes():
@@ -117,6 +131,7 @@ def test_aster_kits_12_17cm_only_and_blocks():
     m["carts"].append({"id": "cx", "order_id": "o2", "store_id": 111, "cart_number": 1, "config_code": "CC2"})
     m["shelves"].append({"cart_id": "cx", "shelf_position": 1, "sku_id": 2, "profile_id": "littles",
                          "kit_type": None, "tray_count": 1, "unit_count": 12, "availability_line_id": "L3"})
+    m["shelves"][6]["kit_type"] = "ceramic_kit"   # cart 3's 17cm shelf goes ceramic
     text, rep = X.build_aster_csv(m, ref)
     lines = text.strip().splitlines()
     assert lines[0] == ",".join(X.ASTER_HEADERS)
