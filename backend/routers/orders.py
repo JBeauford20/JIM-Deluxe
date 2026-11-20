@@ -422,23 +422,28 @@ def finalize_run(run_id: str, user=Depends(require_role("manager", "admin", "ord
         if not cur.fetchone():
             from fastapi import HTTPException
             raise HTTPException(404, "Run not found")
+        from routers.concurrency import log_change
+        log_change(cur, run_id, "run", run_id, "released (finalized)", user.get("email"))
         return {"finalized": True}
 
 
 @router.post("/runs/{run_id}/reopen")
-def reopen_run(run_id: str, user=Depends(require_role("manager", "admin", "order_writer"))):
-    """Reopen a finalized run so orders can be edited and re-exported."""
+def reopen_run(run_id: str, user=Depends(require_role("manager", "admin"))):
+    """Reopen a finalized run so orders can be edited and re-exported. Undoing a release
+    is manager-only (matching the manager-only discard of a released run) and is logged."""
     with get_db() as conn:
         cur = cursor(conn)
         cur.execute("""
             UPDATE recommendation_runs
-            SET status = 'draft', finalized_at = NULL
+            SET status = 'draft', finalized_at = NULL, last_activity_at = now()
             WHERE id = %s AND status = 'exported'
             RETURNING id
         """, (run_id,))
         if not cur.fetchone():
             from fastapi import HTTPException
             raise HTTPException(404, "Run not found or not in exported status")
+        from routers.concurrency import log_change
+        log_change(cur, run_id, "run", run_id, "reopened (release undone)", user.get("email"))
         return {"reopened": True}
 
 
