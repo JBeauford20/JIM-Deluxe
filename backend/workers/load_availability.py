@@ -22,6 +22,7 @@ Usage:
   python load_availability.py "path/to/availability.xlsx" --week 2026-10-06 --preview
 """
 
+import re
 import sys
 from pathlib import Path
 from datetime import date, timedelta
@@ -121,6 +122,21 @@ def load_availability(filepath: str, shipping_week: date = None,
     qty_col    = find_col(header, QTY_KEYWORDS)
     desc_col   = find_col(header, DESC_KEYWORDS)
     origin_col = find_col(header, ORIGIN_KEYWORDS)
+
+    # A plain "SKU" column holding Home Depot SKUs (10 digits starting "10", e.g. 1012142347)
+    # IS the HD SKU. Without this, the WK48 file fell back to the Aster mapping (Mode B) and
+    # dropped or mis-routed ~94% of its units (2026-11-19 pre-Monday check).
+    if hdsku_col is None:
+        for i, h in enumerate(header):
+            if str(h or '').strip().lower() not in ('sku', 'item sku', 'sku #', 'sku#'):
+                continue
+            sample = [r[i] for r in ws.iter_rows(min_row=header_idx + 2, max_row=header_idx + 51,
+                                                  values_only=True) if i < len(r) and r[i] is not None]
+            looks_hd = [s for s in sample if re.fullmatch(r'10\d{8}', str(s).strip().split('.')[0])]
+            if sample and len(looks_hd) >= 0.9 * len(sample):
+                hdsku_col = i
+                log(f"  Column '{h}' holds Home Depot SKUs ({len(looks_hd)}/{len(sample)} sampled) — using it as HD SKU")
+                break
 
     mode = 'A' if hdsku_col is not None else 'B'
     log(f"  Routing mode: {'A — HD SKU column found, using directly' if mode == 'A' else 'B — Aster code only, using mapping table'}")
