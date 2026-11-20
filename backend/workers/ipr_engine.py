@@ -56,6 +56,41 @@ RELEASED_PIPELINE = ("Aster Exported", "Released", "Shipped", "Received or Estim
                      "Performance Matured", "Sent to Pin Routes", "Routing Response Received")
 
 
+# Delivery cadence by store grade (Josh 2026-11-19; §10 coverage varies by delivery frequency,
+# §19.1 release on service urgency). Defaults; ipr_settings rows override.
+DEFAULT_CADENCE_WEEKS = {"AA": 1, "A": 1, "B": 2, "C+": 3, "C": 3, "C-": 4, "D": 4}
+DEFAULT_CADENCE_BUFFER_WEEKS = 1
+DUE_SLACK_DAYS = 3
+
+
+def cadence_grade(volume_code, best_family_grade, cadence):
+    """Store cadence grade: store-master volume grade, else best family grade, else 'C'."""
+    if volume_code in cadence:
+        return volume_code
+    if best_family_grade in cadence:
+        return best_family_grade
+    return "C"
+
+
+def due_status(last_delivery, arrival, cadence_weeks, any_critical=False):
+    """(is_due, next_due_date). Due when there is no prior delivery, when the gap from the last
+    delivery to this arrival is >= cadence x 7 - 3 days, or when any line is Critical risk."""
+    if last_delivery is None:
+        return True, arrival
+    next_due = last_delivery + timedelta(days=cadence_weeks * 7 - DUE_SLACK_DAYS)
+    return (any_critical or arrival >= next_due), next_due
+
+
+def coverage_weeks(cadence_weeks, buffer_weeks, fresh_days):
+    """Coverage for a due store's lines = cadence + buffer, never past the freshness window."""
+    return min(float(cadence_weeks + buffer_weeks), fresh_days / 7.0)
+
+
+def shipping_efficiency(sold, delivered):
+    """Josh's KPI: 13-wk units sold / 13-wk units delivered (same window, no lag)."""
+    return round(sold / delivered, 4) if delivered else None
+
+
 def run(batch_id, shipping_week=None, preview=False, verbose=True, what_if_unlimited=False):
     """what_if_unlimited (preview only): every mapped, packable SKU treated as available in
     unlimited quantity — the spec's unconstrained-need view, for analysis. Never writes."""
@@ -95,7 +130,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # ── settings (every tunable is a DB row flagged with its spec status) ──
     cur.execute("SELECT key, value FROM ipr_settings")
     S = {r["key"]: r["value"] for r in cur.fetchall()}
-    cover_wk = float(S["coverage_weeks"])
+    cover_wk = float(S["coverage_weeks"])        # legacy flat coverage; cadence coverage below
+    cadence = {**DEFAULT_CADENCE_WEEKS, **(S.get("delivery_cadence_weeks") or {})}
+    _cb = S.get("cadence_buffer_weeks")
+    cad_buffer = float(DEFAULT_CADENCE_BUFFER_WEEKS if _cb is None else _cb)
+    econ_defer_due = str(S.get("economic_deferral_for_due_stores", False)).lower() in ("true", "1", "yes")
     fw = S["forecast_weights"]
     min_rate = float(S["min_weekly_rate_units"])
     conv_thr = S["conversion_thresholds"]
@@ -249,7 +288,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     # Stores
     cur.execute("""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
-                          region, merchant, state
+                          region, merchant, state, volume_code
                    FROM stores ORDER BY store_id""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
 
@@ -317,13 +356,44 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                SUM(units_delivered) FILTER (WHERE delivery_date > %s AND delivery_date <= %s) AS cohort,
                SUM(units_delivered) FILTER (WHERE delivery_date > %s::date - COALESCE(fw.days, %s)) AS recent8,
                SUM(units_delivered) FILTER (WHERE delivery_date > %s) AS d26,
-               COUNT(DISTINCT delivery_date) FILTER (WHERE delivery_date > %s) AS n_del
+               COUNT(DISTINCT delivery_date) FILTER (WHERE delivery_date > %s) AS n_del,
+               SUM(units_delivered) FILTER (WHERE delivery_date > %s AND delivery_date <= %s) AS d13
         FROM deliveries dl LEFT JOIN fw ON fw.sku_id = dl.sku_id
         WHERE delivery_date > %s
         GROUP BY dl.store_id, dl.sku_id
     """, (*fresh_arr, d(182), d(91 + lag_days), d(lag_days), anchor, fresh_days, d(182), d(182),
-          d(max(182, fresh_max))))
+          d(91), anchor, d(max(182, fresh_max))))
     dels = {(r["store_id"], r["sku_id"]): dict(r) for r in cur.fetchall()}
+
+    # Shipping efficiency (Josh's KPI): 13-wk units sold / 13-wk units delivered, same window,
+    # no lag, per store x family and network. Reported only; the §11 conversion gate is unchanged.
+    eff_sold, eff_del = defaultdict(float), defaultdict(float)
+    for (st_id, sk), sv in sales.items():
+        if sk in sku_info:
+            eff_sold[(st_id, sku_info[sk]["ipr_family"] or "Unmapped")] += sv["w13"]
+    for (st_id, sk), dv in dels.items():
+        if sk in sku_info:
+            eff_del[(st_id, sku_info[sk]["ipr_family"] or "Unmapped")] += float(dv.get("d13") or 0)
+    eff = {k: shipping_efficiency(eff_sold.get(k, 0.0), eff_del.get(k, 0.0))
+           for k in set(eff_sold) | set(eff_del)}
+    store_eff_s, store_eff_d = defaultdict(float), defaultdict(float)
+    for (st_id, _f), v in eff_sold.items():
+        store_eff_s[st_id] += v
+    for (st_id, _f), v in eff_del.items():
+        store_eff_d[st_id] += v
+
+    # Last delivery per store = latest of recorded deliveries and loaded in-transit arrivals.
+    store_last_del = {}
+    for (st_id, _sk), dv in dels.items():
+        if dv.get("last_del") and (store_last_del.get(st_id) is None or dv["last_del"] > store_last_del[st_id]):
+            store_last_del[st_id] = dv["last_del"]
+    cur.execute("SELECT to_regclass('public.in_transit_lines') IS NOT NULL AS ok")
+    if cur.fetchone()["ok"]:
+        cur.execute("SELECT store_id, MAX(delivery_date) AS mx FROM in_transit_lines GROUP BY store_id")
+        for r in cur.fetchall():
+            if r["mx"] and (store_last_del.get(r["store_id"]) is None or r["mx"] > store_last_del[r["store_id"]]):
+                store_last_del[r["store_id"]] = r["mx"]
+    store_best_grade = {}                       # filled after family grades (fallback cadence grade)
 
     # On-hand: DTS snapshot (MEDIUM) when fresh, else deliveries−sales estimate (LOW)
     cur.execute("""
@@ -364,6 +434,34 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"manifest stores without loaded lines: {len(in_transit_stores - it_stores)}")
 
     # ══ 3+4. PROJECTED INVENTORY AT ARRIVAL + UNCONSTRAINED NEED (§8–10) ════
+    def store_cadence(store_id):
+        g = cadence_grade((stores.get(store_id) or {}).get("volume_code"),
+                          store_best_grade.get(store_id), cadence)
+        return g, int(cadence[g])
+
+    def size_line(l):
+        """§10 need for one line: coverage = store cadence + buffer weeks (capped by the family
+        freshness window), then the §17 H2O/Terrarium cap and the §5 unreliable-inventory cap."""
+        cg, cw = store_cadence(l["store_id"])
+        cov = coverage_weeks(cw, cad_buffer, fresh_of.get(l["sku_id"], fresh_days))
+        need = max(0.0, l["fc"] * cov - l["projected"])
+        cap_note = None
+        if not l["plannable"]:
+            trays = 0                                                     # objective-only line
+        elif l["family"] in H2O_TERR_FAMILIES:                           # §17 tray control
+            win = float(S["h2o_terrarium_window_weeks"])
+            cap = max(0.0, l["fc"] * win - l["oh_adj"] - l["inbound"])
+            if need > cap:
+                need, cap_note = cap, f"capped at {int(win)}-wk demand ({cap:.0f}u)"
+            trays = int(need // l["upt"])                                 # never exceed: round down
+        else:
+            trays = int(math.floor(need / l["upt"] + 0.5))                # nearest valid tray
+        if l["conf"] == "UNUSABLE" and trays:
+            trays = min(trays, max(1, int((l["fc"] * 2) // l["upt"])))    # §5: cap / review
+            cap_note = (cap_note or "") + " inventory unreliable — capped at 2 wks"
+        l.update(need=need, trays=trays, cap_note=cap_note, cover_wk=cov,
+                 cadence_grade=cg, cadence_weeks=cw)
+
     lines = {}               # (store, sku) -> evaluation record
     # Every store x SKU with velocity is evaluated (the §2 objective covers the whole HD
     # program); only plannable SKUs (in this availability + packable + mapped) get trays.
@@ -448,34 +546,20 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         else:
             risk = "Low"
 
-        need = max(0.0, fc * cover_wk - projected)                       # §10
         fam = sku_info[sku_id]["ipr_family"] or "Unmapped"
         pk = pack.get(sku_id) or {}
         upt = int(pk.get("units_per_tray") or 1)
-        cap_note = None
-        if not is_plannable:
-            trays = 0                                                     # objective-only line
-        elif fam in H2O_TERR_FAMILIES:                                   # §17 tray control
-            win = float(S["h2o_terrarium_window_weeks"])
-            cap = max(0.0, fc * win - oh_adj - inbound)
-            if need > cap:
-                need, cap_note = cap, f"capped at {int(win)}-wk demand ({cap:.0f}u)"
-            trays = int(need // upt)                                      # never exceed: round down
-        else:
-            trays = int(math.floor(need / upt + 0.5))                     # nearest valid tray
-        if conf == "UNUSABLE" and trays:
-            trays = min(trays, max(1, int((fc * 2) // upt)))              # §5: cap / review
-            cap_note = (cap_note or "") + " inventory unreliable — capped at 2 wks"
         realized = (sv["d13"] / sv["w13d"]) if sv["w13d"] else None
         unit_price, price_src = price(sku_id, realized)
         lines[(store_id, sku_id)] = dict(
             store_id=store_id, sku_id=sku_id, family=fam, fc=fc, method=method,
             r2=r2, r4=r4, r10=r10, r13=r13, onhand=oh, conf=conf, oh_src=oh_src, oh_adj=oh_adj,
             inbound=inbound, inbound_src=inbound_src, before_arrival=before_arrival,
-            projected=projected, cover_days=cover_days, risk=risk, need=need, upt=upt,
-            trays=trays, cap_note=cap_note, price=unit_price, price_src=price_src,
+            projected=projected, cover_days=cover_days, risk=risk, need=0.0, upt=upt,
+            trays=0, cap_note=None, price=unit_price, price_src=price_src,
             last_del=last_del, sales13=sv["w13"], cohort=float(dv.get("cohort") or 0),
             plannable=is_plannable)
+        size_line(lines[(store_id, sku_id)])
     log(f"Store x SKU lines with velocity: {len(lines):,} (all SKUs, for the objective) · "
         f"plannable: {sum(1 for l in lines.values() if l['plannable']):,} · with need: "
         f"{sum(1 for l in lines.values() if l['trays'] > 0):,}")
@@ -500,6 +584,23 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         for i, (v, s) in enumerate(lst):
             pct = (i + 1) / n * 100
             grade[(s, f)] = next(g for g in GRADE_ORDER if pct <= float(cutoffs[g]))
+
+    for (s_, f_), g_ in grade.items():
+        if s_ not in store_best_grade or GRADE_ORDER.index(g_) < GRADE_ORDER.index(store_best_grade[s_]):
+            store_best_grade[s_] = g_
+    for l in lines.values():                    # cadence fallback: stores with no volume grade
+        if (stores.get(l["store_id"]) or {}).get("volume_code") not in cadence:
+            size_line(l)
+
+    # Delivery cadence (§10, §19.1 service urgency): a store is DUE when it has no prior
+    # delivery, the gap from its last delivery (incl. loaded in-transit) to this arrival is
+    # >= cadence x 7 - 3 days, or any line is Critical risk. Not due -> no order this week.
+    store_due = {}
+    crit_stores = {l["store_id"] for l in lines.values() if l["risk"] == "Critical"}
+    for st_id in {l["store_id"] for l in lines.values() if l["trays"] > 0}:
+        cg, cw = store_cadence(st_id)
+        due, nxt = due_status(store_last_del.get(st_id), arrival, cw, st_id in crit_stores)
+        store_due[st_id] = (due, cg, cw, nxt)
 
     service = {}            # (store, family) -> (status, conversion, confidence)
     for k in fam_vel:
@@ -530,7 +631,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # Gate every line (§24): store status, family 13-week result (§11.3). Autonomous — no
     # routine approvals. Below the 60% floor the family is stopped this week; between 60% and
     # the grade threshold it ships a grade-reduced quantity (never an identical shipment).
-    ship, held, held_kind = {}, {}, {}
+    ship, held, held_kind, not_due_lines = {}, {}, {}, {}
     blocked_units = stopped_units = reduced_units = 0.0
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
@@ -546,6 +647,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if not st.get("active") or status_s in BLOCK_STATUSES:
             held[key], held_kind[key] = "store inactive / do-not-ship", "block"
             blocked_units += l["trays"] * l["upt"]
+            continue
+        if not store_due[l["store_id"]][0]:
+            not_due_lines[key] = l
             continue
         if svc in ("BLOCKED", "REVIEW") and fk in react:
             r = react[fk]
@@ -578,6 +682,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             l["trays"], l["reduced_13wk"] = new_trays, pct
         ship[key] = l
 
+    nd_by_store = defaultdict(list)
+    for k, l in not_due_lines.items():
+        nd_by_store[k[0]].append(l)
+    for st_id, ls in sorted(nd_by_store.items()):
+        due, cg, cw, nxt = store_due[st_id]
+        last = store_last_del.get(st_id)
+        decide("not_due", f"Not due: cadence {cw} wk ({cg}); last delivery {last}; next due arrival "
+                          f"{nxt} — no order this week, need recalculated next week",
+               store_id=st_id, cadence_grade=cg, cadence_weeks=cw, last_delivery=last,
+               next_due=nxt, arrival=arrival, lines=len(ls),
+               need_units=sum(l["trays"] * l["upt"] for l in ls),
+               shipping_efficiency=shipping_efficiency(store_eff_s.get(st_id, 0), store_eff_d.get(st_id, 0)))
     for key, why in held.items():
         l = lines[key]
         decide(held_kind[key], why, store_id=l["store_id"], sku_id=l["sku_id"],
@@ -608,7 +724,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                          + sp_w["seasonal"] * 0.0 + sp_w["recency"] * rec[k])
         l["sku_fit"] = (sf_w["sku_velocity"] * (l["fc"] / store_max_fc[l["store_id"]])
                         + sf_w["mature_delivery_sales"] * conv01
-                        + sf_w["projected_need"] * min(1.0, l["need"] / max(1e-9, l["fc"] * cover_wk))
+                        + sf_w["projected_need"] * min(1.0, l["need"] / max(1e-9, l["fc"] * l["cover_wk"]))
                         + sf_w["seasonal"] * 0.0 + sf_w["comparable_fit"] * GRADE_SCORE[l["grade"]])
 
     by_sku = defaultdict(list)
@@ -808,8 +924,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     margin_proxy_wholesale=round(W, 2), critical_skus=critical,
                     units=sum(l["alloc_units"] for l in o["lines"]),
                     wholesale_missing_skus=sorted({x for c in o["carts"] for x in c["wholesale_incomplete"]}))
-        if lost >= C or critical:
-            why = ("Critical-risk line(s) " + ", ".join(critical)) if critical else                   f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}"
+        if lost >= C or critical or not econ_defer_due:
+            why = (("Critical-risk line(s) " + ", ".join(critical)) if critical else
+                   f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}" if lost >= C else
+                   f"store is due on its {store_due[store_id][2]}-wk cadence ({store_due[store_id][1]}) — "
+                   f"due stores release (economic_deferral_for_due_stores off)")
             decide("low_value_cart", f"Order RELEASED: {nums} — {why} (§19.1)", store_id=store_id,
                    severity="warning", action="release", **data)
             for c in o["carts"]:
@@ -893,7 +1012,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         verdict = "WARNING" if notes else "PASS"
         review[store_id] = (verdict, notes)
         decide("review", f"{verdict}: " + ("; ".join(notes) if notes else "evidence supports the order"),
-               store_id=store_id, verdict=verdict, units=units)
+               store_id=store_id, verdict=verdict, units=units,
+               shipping_efficiency=shipping_efficiency(store_eff_s.get(store_id, 0), store_eff_d.get(store_id, 0)),
+               shipping_efficiency_by_family={f: eff.get((store_id, f)) for f in sorted({l["family"] for l in o["lines"]})})
 
     # weekly retail: arrival week, with vs without this plan
     base_units_rev = with_rev = demand_rev = 0.0
@@ -905,11 +1026,48 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         base_units_rev += base * usd(l)
         with_rev += min(wk_dem, l["projected"] + add) * usd(l)
     incr_rev = with_rev - base_units_rev
-    lost_unavail = sum(l.get("short_units", 0) * usd(l) for l in ship.values()) / cover_wk
-    lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * usd(lines[k]) for k in held) / cover_wk
+    lost_unavail = sum(l.get("short_units", 0) * usd(l) / l["cover_wk"] for l in ship.values())
+    lost_held = sum(lines[k]["trays"] * lines[k]["upt"] * usd(lines[k]) / lines[k]["cover_wk"] for k in held)
     edi_risk = sum(l["fc"] * usd(l) for l in lines.values() if l["store_id"] in edi_gap)
     all_carts = [c for o in orders.values() for c in o["carts"]]
     tot_wh = sum(c["wholesale_value"] for c in all_carts)
+
+    # Delivery cadence readout: stores with need, due / not due / shipped by cadence grade
+    by_g = {g: {"cadence_weeks": int(cadence[g]), "due": 0, "not_due": 0, "shipped": 0}
+            for g in GRADE_ORDER if g in cadence}
+    for st_id, (due, cg, _cw, _n) in store_due.items():
+        by_g.setdefault(cg, {"cadence_weeks": int(cadence.get(cg, 0)), "due": 0, "not_due": 0, "shipped": 0})
+        by_g[cg]["due" if due else "not_due"] += 1
+        if st_id in orders:
+            by_g[cg]["shipped"] += 1
+    cadence_summary = {
+        "settings": {"delivery_cadence_weeks": cadence, "cadence_buffer_weeks": cad_buffer,
+                     "due_slack_days": DUE_SLACK_DAYS,
+                     "economic_deferral_for_due_stores": econ_defer_due},
+        "stores_due": sum(1 for v in store_due.values() if v[0]),
+        "stores_not_due": sum(1 for v in store_due.values() if not v[0]),
+        "stores_shipped": len(orders),
+        "units": int(sum(l["alloc_units"] for o in orders.values() for l in o["lines"])),
+        "carts": len(all_carts),
+        "avg_cart_wholesale": round(tot_wh / len(all_carts), 2) if all_carts else None,
+        "freight_pct": round(cart_cost * len(all_carts) / tot_wh, 4) if tot_wh else None,
+        "by_grade": by_g,
+    }
+    fam_s, fam_d = defaultdict(float), defaultdict(float)
+    for (_st, f), v in eff_sold.items():
+        fam_s[f] += v
+    for (_st, f), v in eff_del.items():
+        fam_d[f] += v
+    eff_summary = {
+        "definition": "13-wk units sold / 13-wk units delivered, same window, no lag (Josh's KPI); "
+                      "reported only — the §11 conversion gate is unchanged",
+        "network": shipping_efficiency(sum(fam_s.values()), sum(fam_d.values())),
+        "network_sold_13wk": round(sum(fam_s.values())),
+        "network_delivered_13wk": round(sum(fam_d.values())),
+        "by_family": {f: shipping_efficiency(fam_s.get(f, 0), fam_d.get(f, 0))
+                      for f in sorted(set(fam_s) | set(fam_d))},
+        "store_families_measured": len(eff),
+    }
     price_srcs = defaultdict(int)
     for l in ship.values():
         price_srcs[l["price_src"]] += l.get("alloc_units", 0)
@@ -935,6 +1093,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                             "price are never guessed: they ship on units and are excluded from $."),
         },
         "incomplete_price_units": int(price_srcs.get("missing", 0)),
+        "delivery_cadence": cadence_summary,
+        "shipping_efficiency": eff_summary,
         "gap_fill": {"fills": gap_fills, "trays": gap_fill_trays, "units": gap_fill_units,
                      "short_store_families": len(gaps)},
         "cart_economics": {
@@ -1219,7 +1379,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                risk=l["risk"], need_units=round(l["need"], 1), need_trays=l["trays"],
                alloc_trays=l["alloc_trays"], upt=l["upt"], cap_note=l["cap_note"],
                conversion=l["conversion"], priority=round(l["priority"], 4), sku_fit=round(l["sku_fit"], 4),
-               price=None if l["price"] is None else round(l["price"], 2), price_src=l["price_src"])
+               price=None if l["price"] is None else round(l["price"], 2), price_src=l["price_src"],
+               cadence_grade=l.get("cadence_grade"), cadence_weeks=l.get("cadence_weeks"),
+               coverage_weeks=round(l["cover_wk"], 2),
+               shipping_efficiency=eff.get((l["store_id"], l["family"])))
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO run_decisions (id, run_id, decision_type, store_id, sku_id, reason, data, created_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,now())

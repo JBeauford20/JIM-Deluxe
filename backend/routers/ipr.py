@@ -11,7 +11,7 @@ from routers.auth import get_current_user
 router = APIRouter()
 
 DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", "review", "line",
-                  "duplicate_run", "stopped_13wk", "reduced_13wk", "gap_fill", "low_value_cart", "deferred_economics",
+                  "duplicate_run", "stopped_13wk", "reduced_13wk", "gap_fill", "low_value_cart", "deferred_economics", "not_due",
                   "deferral", "reactivation")
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
