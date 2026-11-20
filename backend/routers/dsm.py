@@ -39,7 +39,7 @@ def _sales_asof(cur):
 
 # ── §26.2 store search ────────────────────────────────────────────────────────
 @router.get("/stores/search")
-def search_stores(q: str = Query(min_length=1, max_length=80), limit: int = Query(20, le=100),
+def search_stores(q: str = Query(min_length=1, max_length=80), limit: int = Query(20, ge=1, le=100),
                   user=Depends(get_current_user)):
     like = f"%{q.strip()}%"
     with get_db() as conn:
@@ -278,7 +278,8 @@ class AskStore(BaseModel):
 
 
 @router.post("/stores/{store_id}/ask")
-def ask_store(store_id: int, body: AskStore, user=Depends(get_current_user)):
+def ask_store(store_id: int, body: AskStore,
+              user=Depends(require_role("dsm", "sales_director", "manager", "admin", "order_writer"))):
     """Grounded AI answer about one store: profile + SKU performance + the engine's own
     decisions are assembled server-side so the model answers from data, not memory."""
     profile = store_profile(store_id, user)                 # grounded context, same auth
@@ -380,9 +381,13 @@ def alerts(mine: bool = False, user=Depends(get_current_user)):
             """, (run["id"], list(ALERT_TYPES), user.get("email")) if mine
                  else (run["id"], list(ALERT_TYPES)))
             rows = cur.fetchall()
-            # §11.4: an AA/A store stopped on conversion is an URGENT operational alert
+            # §11.4: an AA/A store stopped on conversion is an URGENT operational alert.
+            # dsm_email is staff contact data — only managers/admins see it in the feed.
+            show_email = user.get("role") in ("manager", "admin")
             for r in rows:
                 r = dict(r)
+                if not show_email:
+                    r.pop("dsm_email", None)
                 r["urgent"] = (r["decision_type"] == "stopped_13wk"
                                and (r.get("volume_code") or "") in ("AA", "A"))
                 out["alerts"].append(r)

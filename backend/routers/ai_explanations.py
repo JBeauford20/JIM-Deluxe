@@ -13,7 +13,7 @@ and cached by Anthropic for 5 minutes â€” all calls in a run audit share on
 """
 import os, json
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
@@ -648,7 +648,7 @@ class AskRequest(BaseModel):
     run_id:   str
     store_id: Optional[int] = None
     sku_id:   Optional[int] = None
-    question: str
+    question: str = Field(min_length=3, max_length=2000)
 
 
 def _ask_v2(cur, body: "AskRequest", user) -> dict:

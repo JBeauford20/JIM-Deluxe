@@ -30,18 +30,34 @@ def shelf(cart, store, code, pos, sku, kit, trays=8, units=96, profile="p9"):
 FAMS = {101: "9cm Standard", 102: "9cm Standard", 201: "12cm Standard"}
 
 
-def test_kit_only_difference_is_neutral():
-    rows = [
-        shelf("c1", 1, "CC1", 1, 101, "jute_kit"), shelf("c1", 1, "CC1", 2, 201, "ceramic_kit"),
-        shelf("c2", 2, "CC1", 1, 101, "jute_kit"), shelf("c2", 2, "CC1", 2, 201, "ceramic_kit"),
-        shelf("c3", 3, "CC2", 1, 101, "ceramic_kit"), shelf("c3", 3, "CC2", 2, 201, "ceramic_kit"),
-    ]
-    a = analyze_consolidation(FakeCur(rows), "run", FAMS)
+KIT_ROWS = [
+    shelf("c1", 1, "CC1", 1, 101, "jute_kit"), shelf("c1", 1, "CC1", 2, 201, "ceramic_kit"),
+    shelf("c2", 2, "CC1", 1, 101, "jute_kit"), shelf("c2", 2, "CC1", 2, 201, "ceramic_kit"),
+    shelf("c3", 3, "CC2", 1, 101, "ceramic_kit"), shelf("c3", 3, "CC2", 2, 201, "ceramic_kit"),
+]
+
+
+def test_kit_only_difference_is_neutral_when_kit_flexible():
+    a = analyze_consolidation(FakeCur(KIT_ROWS), "run", FAMS, kit_flexible={101, 201})
     assert len(a["neutral_merges"]) == 1
     m = a["neutral_merges"][0]
     assert m["type"] == "kit_alignment"
     assert m["survivor"] == "CC1" and m["absorbed"] == "CC2"      # bigger config survives
     assert not a["proposals"]
+
+
+def test_kit_difference_on_finished_product_is_proposal_only():
+    # SKU 101 is 3M-only (not kit-flexible): jute vs ceramic are different physical goods.
+    a = analyze_consolidation(FakeCur(KIT_ROWS), "run", FAMS, kit_flexible={201})
+    assert not a["neutral_merges"]
+    assert len(a["proposals"]) == 1
+    assert a["proposals"][0]["differs"]["kit_skus"] == [101]
+
+
+def test_kit_difference_with_unknown_flexibility_never_auto_merges():
+    a = analyze_consolidation(FakeCur(KIT_ROWS), "run", FAMS)   # kit_flexible unknown (None)
+    assert not a["neutral_merges"]
+    assert len(a["proposals"]) == 1
 
 
 def test_sku_swap_is_proposal_never_neutral():

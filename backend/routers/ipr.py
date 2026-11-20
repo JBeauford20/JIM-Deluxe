@@ -281,35 +281,37 @@ def reject_reactivation(rid: str, body: Rejection, user=Depends(get_current_user
 
 @router.post("/runs/{run_id}/ai-review")
 def ai_review(run_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
-    """Run the §25 LLM reviewer on this run's evidence and store the structured verdict."""
+    """Run the §25 LLM reviewer on this run's evidence and store the structured verdict.
+    The service manages its own transactions so no DB locks are held during the model call."""
     from routers.ai_explanations import _check_ai_budget
     from services.ipr_reviewer import run_ai_review
     with get_db() as conn:
-        cur = cursor(conn)
-        _check_ai_budget(cur, user, "audit")
-        report = run_ai_review(cur, run_id, user.get("email"))
-        log_change(cur, run_id, "run", run_id,
+        _check_ai_budget(cursor(conn), user, "audit")
+    report = run_ai_review(run_id, user.get("email"))
+    with get_db() as conn:
+        log_change(cursor(conn), run_id, "run", run_id,
                    f"AI review: {report.get('verdict')}", user.get("email"))
-        return report
+    return report
 
 
 @router.post("/runs/{run_id}/consolidate-configs")
 def consolidate_configs(run_id: str, apply: bool = False,
                         user=Depends(require_role("order_writer", "manager", "admin"))):
     """Cart-config consolidation (§20). apply=false previews; apply=true applies ONLY the
-    demand-neutral merges (kit alignment / shelf order — same SKUs, trays and units per
-    store). Merges that would change what a store receives are returned as proposals for
-    human approval, never applied. The AI integrity check runs either way."""
+    demand-neutral merges (kit alignment on kit-flexible 1M SKUs / shelf order — same SKUs,
+    trays and units per store). Anything else — including finished-product kit differences —
+    comes back as a proposal for human approval, never applied. The merge transaction holds
+    the run row FOR UPDATE so a concurrent release serializes against it."""
     from routers.ai_explanations import _check_ai_budget
     from services.ipr_reviewer import run_consolidation
     with get_db() as conn:
-        cur = cursor(conn)
-        _check_ai_budget(cur, user, "audit")
-        result = run_consolidation(cur, run_id, user.get("email"), apply)
-        if result.get("applied"):
-            log_change(cur, run_id, "run", run_id,
+        _check_ai_budget(cursor(conn), user, "audit")
+    result = run_consolidation(run_id, user.get("email"), apply)
+    if result.get("applied"):
+        with get_db() as conn:
+            log_change(cursor(conn), run_id, "run", run_id,
                        f"config consolidation applied: {result['verdict']}", user.get("email"))
-        return result
+    return result
 
 
 @router.get("/runs/{run_id}/ai-reviews")

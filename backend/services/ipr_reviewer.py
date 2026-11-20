@@ -19,6 +19,7 @@ from collections import defaultdict
 
 from fastapi import HTTPException
 
+from db import get_db, cursor as _cursor
 from services.ipr_ai import V2_SYSTEM, call_model
 
 RELEASED = ("exported", "released", "shipped")
@@ -70,8 +71,11 @@ def _review_context(cur, run_id: str) -> dict:
             "decision_samples": samples, "largest_orders": top_orders}
 
 
-def run_ai_review(cur, run_id: str, user_email: str | None) -> dict:
-    ctx = _review_context(cur, run_id)
+def run_ai_review(run_id: str, user_email: str | None) -> dict:
+    """Reads in one transaction, calls the model with NO transaction open, stores the
+    verdict in a third — the LLM call never holds database locks."""
+    with get_db() as conn:
+        ctx = _review_context(_cursor(conn), run_id)
     raw = call_model(
         V2_SYSTEM,
         "RUN EVIDENCE (JSON):\n" + json.dumps(ctx, default=str) + "\n\n" + REVIEW_QUESTIONS,
@@ -82,10 +86,12 @@ def run_ai_review(cur, run_id: str, user_email: str | None) -> dict:
         report = {"verdict": "WARNING", "confidence": "low",
                   "summary": raw[:2000], "findings": [],
                   "objective_assessment": "model returned unstructured output"}
-    cur.execute("""INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
-                   VALUES (%s, 'review', 'claude-opus-5-5', %s, %s::jsonb, %s) RETURNING id""",
-                (run_id, report.get("verdict"), json.dumps(report, default=str), user_email))
-    report["id"] = str(cur.fetchone()["id"])
+    with get_db() as conn:
+        cur = _cursor(conn)
+        cur.execute("""INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
+                       VALUES (%s, 'review', 'claude-opus-5-5', %s, %s::jsonb, %s) RETURNING id""",
+                    (run_id, report.get("verdict"), json.dumps(report, default=str), user_email))
+        report["id"] = str(cur.fetchone()["id"])
     return report
 
 
@@ -126,7 +132,20 @@ def _sig_nopos(c):     # multiset of (sku, trays, kit), shelf order ignored
     return tuple(sorted((s["sku_id"], s["trays"], s["kit"] or "") for s in c["shelves"]))
 
 
-def analyze_consolidation(cur, run_id: str, sku_families: dict) -> dict:
+def _kit_flexible_skus(cur, run_id: str) -> set:
+    """SKUs whose kit is decided at order time (a 1M / grower-pot availability line in the
+    run's batch). Only these may have kit_type realigned: a 3M line is a finished product
+    whose jute vs ceramic are physically different goods tied to different availability
+    lines — flipping those is NOT demand-neutral."""
+    cur.execute("""SELECT DISTINCT al.sku_id
+                   FROM recommendation_runs rr
+                   JOIN availability_lines al ON al.batch_id = rr.batch_id
+                   WHERE rr.id = %s AND COALESCE(al.code_level, '3M') <> '3M'""", (run_id,))
+    return {r["sku_id"] for r in cur.fetchall()}
+
+
+def analyze_consolidation(cur, run_id: str, sku_families: dict,
+                          kit_flexible: set | None = None) -> dict:
     """Group the run's carts into configs and find merges. Returns the analysis dict;
     nothing is written here."""
     carts = _load_carts(cur, run_id)
@@ -149,13 +168,22 @@ def analyze_consolidation(cur, run_id: str, sku_families: dict) -> dict:
                 continue
             A, B = configs[a], configs[b]
             if A["sig_nokit"] == B["sig_nokit"] and A["sig_full"] != B["sig_full"]:
-                # kit-only difference: realign the smaller config's kits to the survivor
-                flips = sum(1 for s1, s2 in zip(sorted(A["carts"][0]["shelves"], key=lambda s: (s["pos"], s["sku_id"])),
-                                                sorted(B["carts"][0]["shelves"], key=lambda s: (s["pos"], s["sku_id"])))
-                            if (s1["kit"] or "") != (s2["kit"] or ""))
-                neutral.append({"type": "kit_alignment", "survivor": a, "absorbed": b,
-                                "carts_moved": B["n"], "kit_flips_per_cart": flips})
-                merged.add(b)
+                # kit-only difference. Neutral ONLY when every differing SKU is kit-flexible
+                # (1M grower-pot line in this batch): a 3M jute vs ceramic kit is a different
+                # physical product on a different availability line — that goes to proposals.
+                pairs = list(zip(sorted(A["carts"][0]["shelves"], key=lambda s: (s["pos"], s["sku_id"])),
+                                 sorted(B["carts"][0]["shelves"], key=lambda s: (s["pos"], s["sku_id"]))))
+                diff_skus = {s2["sku_id"] for s1, s2 in pairs if (s1["kit"] or "") != (s2["kit"] or "")}
+                if kit_flexible is not None and diff_skus <= kit_flexible:
+                    neutral.append({"type": "kit_alignment", "survivor": a, "absorbed": b,
+                                    "carts_moved": B["n"], "kit_flips_per_cart": len(diff_skus)})
+                    merged.add(b)
+                else:
+                    proposals.append({
+                        "config_a": a, "config_b": b, "carts_a": A["n"], "carts_b": B["n"],
+                        "differs": {"kit_skus": sorted(diff_skus)},
+                        "note": "kit differs on finished (3M) product — jute and ceramic are "
+                                "different goods here; merging needs a human call"})
             elif A["sig_nopos"] == B["sig_nopos"] and A["sig_nokit"] != B["sig_nokit"]:
                 neutral.append({"type": "shelf_order", "survivor": a, "absorbed": b,
                                 "carts_moved": B["n"]})
@@ -236,19 +264,24 @@ def apply_neutral_merges(cur, run_id: str, analysis: dict) -> dict:
     return {"applied": applied, "templates_removed": [t["config_code"] for t in emptied]}
 
 
-def run_consolidation(cur, run_id: str, user_email: str | None, apply: bool) -> dict:
-    cur.execute("SELECT status FROM recommendation_runs WHERE id = %s", (run_id,))
-    r = cur.fetchone()
-    if not r:
-        raise HTTPException(404, "Run not found")
-    if apply and (r["status"] or "") in RELEASED:
-        raise HTTPException(409, "Run is already released — consolidation must happen before export")
-    cur.execute("SELECT fm.sku_id, fm.ipr_family FROM ipr_family_map fm")
-    fams = {x["sku_id"]: x["ipr_family"] for x in cur.fetchall()}
-    analysis = analyze_consolidation(cur, run_id, fams)
-    result = {"analysis": analysis, "applied": None}
-    if apply and analysis["neutral_merges"]:
-        result["applied"] = apply_neutral_merges(cur, run_id, analysis)
+def run_consolidation(run_id: str, user_email: str | None, apply: bool) -> dict:
+    """Analysis + apply run in ONE short transaction holding the run row FOR UPDATE (so a
+    concurrent release/export serializes against the merge). The AI assessment runs with no
+    transaction open; the report insert is its own transaction."""
+    with get_db() as conn:
+        cur = _cursor(conn)
+        cur.execute("SELECT status FROM recommendation_runs WHERE id = %s FOR UPDATE", (run_id,))
+        r = cur.fetchone()
+        if not r:
+            raise HTTPException(404, "Run not found")
+        if apply and (r["status"] or "") in RELEASED:
+            raise HTTPException(409, "Run is already released — consolidation must happen before export")
+        cur.execute("SELECT fm.sku_id, fm.ipr_family FROM ipr_family_map fm")
+        fams = {x["sku_id"]: x["ipr_family"] for x in cur.fetchall()}
+        analysis = analyze_consolidation(cur, run_id, fams, _kit_flexible_skus(cur, run_id))
+        result = {"analysis": analysis, "applied": None}
+        if apply and analysis["neutral_merges"]:
+            result["applied"] = apply_neutral_merges(cur, run_id, analysis)
 
     # AI integrity check (§25 lens on §20): does any merge or proposal threaten order
     # integrity, and are the remaining proposals commercially worth a human look?
@@ -268,8 +301,10 @@ def run_consolidation(cur, run_id: str, user_email: str | None, apply: bool) -> 
     verdict = (f"{len(analysis['neutral_merges'])} neutral merge(s)"
                f"{' applied' if result['applied'] else ' found'}, "
                f"{len(analysis['proposals'])} proposal(s) for approval")
-    cur.execute("""INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
-                   VALUES (%s, 'consolidation', 'claude-opus-5-5', %s, %s::jsonb, %s) RETURNING id""",
-                (run_id, verdict, json.dumps(result, default=str), user_email))
-    result["id"], result["verdict"] = str(cur.fetchone()["id"]), verdict
+    with get_db() as conn:
+        cur = _cursor(conn)
+        cur.execute("""INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
+                       VALUES (%s, 'consolidation', 'claude-opus-5-5', %s, %s::jsonb, %s) RETURNING id""",
+                    (run_id, verdict, json.dumps(result, default=str), user_email))
+        result["id"], result["verdict"] = str(cur.fetchone()["id"]), verdict
     return result

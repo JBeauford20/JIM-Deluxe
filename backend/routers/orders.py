@@ -395,6 +395,11 @@ def finalize_run(run_id: str, user=Depends(require_role("manager", "admin", "ord
     """
     with get_db() as conn:
         cur = cursor(conn)
+        # Lock the run row first: a release serializes against any in-flight cart-config
+        # consolidation (services/ipr_reviewer.py takes the same lock before mutating carts).
+        cur.execute("SELECT status FROM recommendation_runs WHERE id = %s FOR UPDATE", (run_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, "Run not found")
         # Approve all draft orders in one shot
         cur.execute("""
             UPDATE orders SET status = 'approved', version = version + 1

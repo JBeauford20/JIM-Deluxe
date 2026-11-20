@@ -13,13 +13,15 @@
 - Data shown: stores, ipr_store_family grades, 13-wk weekly sales, YTD, ranks, last delivery,
   inbound, stockout risks, engine run_decisions, pending reactivations, visits (API /api/dsm/*).
 - Filters/actions: store search (number/name/city/state/merchant/region); alerts feed with
-  "my stores" filter; AI question box; visit form; manager-only: email digests, outbox.
+  "my stores" filter; AI question box; visit form; manager-only card on the Alerts tab:
+  email digests to DSMs, outbox view, retry queued emails (hidden for other roles).
 - Destructive operations: none (visit records are append-only).
 - Validation states: visit form requires at least one field; AI box requires a question;
   inline error text under the control.
 - Empty states: every panel states "No X on file" rather than a blank panel.
 - Loading states: inline "Loading…" rows per panel.
-- Error states: red banner with the API error and a Retry link.
+- Error states: red banner with the API error and a Retry link; failed panels also say so
+  in place in plain language.
 - Success state: visit saved → green toast + appears in Recent visits; AI answer rendered inline.
 - Audit trail: visits record user/date/source (dsm_store_visits); AI usage budgeted per user.
 - Permissions: any signed-in user can read; recording visits needs dsm/sales_director/manager/
@@ -61,7 +63,11 @@ td{padding:6px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:0}
 details{border-top:1px solid var(--line);padding:6px 0}
 details summary{cursor:pointer;font-weight:600;font-size:13.5px;padding:4px 0}
-textarea,select,input[type=text],input[type=number],input[type=date]{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:14px;font-family:inherit;background:#fff}
+textarea,select,input[type=text],input[type=number],input[type=date]{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:16px;font-family:inherit;background:#fff}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.twrap{overflow-x:auto}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,.hit:focus-visible{outline:2px solid var(--fl);outline-offset:1px}
+.ferr{color:#8a2f17;font-size:12.5px;margin-top:4px}
 label{font-size:12px;color:var(--is);display:block;margin:8px 0 3px}
 .ai-a{background:var(--mp);border-radius:8px;padding:10px 12px;margin-top:8px;white-space:pre-wrap;font-size:14px}
 .urgent{border-left:4px solid var(--ora);padding-left:8px}
@@ -89,7 +95,8 @@ label{font-size:12px;color:var(--is);display:block;margin:8px 0 3px}
   <section id="pane-store">
     <div class="card">
       <div class="search">
-        <input id="q" inputmode="search" placeholder="Store # or name, city, state, merchant…"
+        <input id="q" inputmode="search" aria-label="Find a store by number, name, city, state or merchant"
+               placeholder="Store # or name, city, state, merchant…"
                onkeydown="if(event.key==='Enter')doSearch()">
         <button onclick="doSearch()">Search</button>
       </div>
@@ -106,6 +113,7 @@ label{font-size:12px;color:var(--is);display:block;margin:8px 0 3px}
       </label>
       <div id="alerts" class="muted">Loading…</div>
     </div>
+    <div class="card" id="mgr" style="display:none"></div>
   </section>
 </main>
 
@@ -124,9 +132,9 @@ label{font-size:12px;color:var(--is);display:block;margin:8px 0 3px}
 /* AUTH — same Supabase email login as the main app (anon key is public/client-safe) */
 var SB_URL='https://ocfmqxtkhpjkkstylypk.supabase.co';
 var SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jZm1xeHRraHBqa2tzdHlseXBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4OTczNjgsImV4cCI6MjEwNjQ3MzM2OH0.vjCWPM9os4YFppHuHeFyGi8_Q4RW3-eSK4SO5pdnl1o';
-function tokGet(){try{return JSON.parse(localStorage.getItem('jim_tok')||'null')}catch(e){return null}}
-function tokSet(t){try{localStorage.setItem('jim_tok',JSON.stringify(t))}catch(e){}}
-function tokClear(){try{localStorage.removeItem('jim_tok')}catch(e){}}
+function tokGet(){try{return JSON.parse(localStorage.getItem('jim_auth')||'null')}catch(e){return null}}
+function tokSet(t){try{localStorage.setItem('jim_auth',JSON.stringify(t))}catch(e){}}
+function tokClear(){try{localStorage.removeItem('jim_auth')}catch(e){}}
 function authHdr(){var t=tokGet();return t&&t.access_token?{'Authorization':'Bearer '+t.access_token}:{}}
 function showLogin(){document.getElementById('loginOverlay').style.display='flex'}
 function logout(){tokClear();location.reload()}
@@ -148,7 +156,26 @@ async function api(path,opts){
   if(!r.ok){var e=await r.json().catch(function(){return{}});throw new Error(e.detail||('Request failed ('+r.status+')'))}
   return r.json();
 }
-function err(msg){var el=document.getElementById('err');el.textContent=msg;el.style.display=msg?'block':'none'}
+var _retry=null;
+function err(msg,retryFn){var el=document.getElementById('err');
+  if(!msg){el.innerHTML='';el.style.display='none';_retry=null;return}
+  _retry=retryFn||null;
+  el.innerHTML=esc(msg)+(retryFn?' &middot; <a href="#" onclick="if(_retry)_retry();return false" style="color:inherit;font-weight:700">Retry</a>':'');
+  el.style.display='block'}
+/* Business-language labels — no internal codes shown to a DSM */
+var DT_LABEL={stopped_13wk:'Stopped — under 60% sold after 13 weeks',
+  min_cart_service_review:'Pushed repeatedly — needs your review',
+  capacity_cap:'Order cut to store capacity',pushed_min_cart:'Order under one cart — waiting a week',
+  reduced_13wk:'Quantity reduced — 13-week review band',not_due:'Not due this week',
+  gap_fill:'Substituted within the family',low_value_cart:'Light-order decision',
+  deferred_economics:'Order waiting a week',assortment_block:'Family not in approved assortment',
+  validation:'Data check',review:'Engine review',allocation_shortfall:'Not enough supply',
+  duplicate_run:'Earlier run this week',reactivation:'Approved test shipment',line:'Shipping line'};
+var ST_LABEL={pending_dsm:'Awaiting DSM approval',pending_director:'Awaiting Sales Director approval',
+  do_not_ship:'Do not ship',paused:'Paused',inactive:'Inactive',hold:'On hold',active:'Active'};
+function dtL(k){return DT_LABEL[k]||k}
+function stL(k){return ST_LABEL[k]||k}
+function place(city,state){return [city,state].filter(Boolean).join(', ')}
 function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.style.display='block';
   setTimeout(function(){t.style.display='none'},2500)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
@@ -167,9 +194,9 @@ async function doSearch(){
     if(!hits.length){box.innerHTML='<div class="muted">No store matches "'+esc(q)+'". Try the store number or city.</div>';return}
     if(hits.length===1){box.innerHTML='';openStore(hits[0].store_id);return}
     box.innerHTML=hits.map(function(h){return '<div class="hit" onclick="openStore('+h.store_id+')">'+
-      '<div><strong>'+h.store_id+'</strong> '+esc(h.store_name)+'<div class="muted">'+esc(h.city||'')+', '+esc(h.state||'')+' · '+esc(h.merchant||'')+'</div></div>'+
+      '<div><strong>'+h.store_id+'</strong> '+esc(h.store_name)+'<div class="muted">'+esc(place(h.city,h.state))+' · '+esc(h.merchant||'')+'</div></div>'+
       '<div class="muted">'+esc(h.volume_code||'')+(h.dsm?(' · '+esc(h.dsm)):'')+'</div></div>'}).join('');
-  }catch(e){box.innerHTML='';err(e.message)}
+  }catch(e){box.innerHTML='';err(e.message,doSearch)}
 }
 
 /* ── Store profile ── */
@@ -186,25 +213,26 @@ async function openStore(id){
       return '<span class="chip '+cls+'" title="'+esc(f.service_status)+'">'+esc(f.ipr_family)+' '+esc(f.grade||'')+
         (f.conversion_13wk!=null?(' · '+Math.round(f.conversion_13wk*100)+'%'):'')+'</span>'}).join('');
     var risks=(p.stockout_risks||[]).map(function(r){
-      return '<tr><td>'+r.sku_id+'</td><td><span class="chip '+(r.risk==='Critical'?'r':'y')+'">'+r.risk+'</span></td>'+
-        '<td>'+n(r.projected)+'u at arrival</td><td>'+(r.forecast_wk!=null?r.forecast_wk+'/wk':'—')+'</td></tr>'}).join('');
+      var rc=r.risk==='Critical'?'r':'y';   // class from comparison, raw value escaped
+      return '<tr><td>'+esc(r.sku_id)+'</td><td><span class="chip '+rc+'">'+esc(r.risk)+'</span></td>'+
+        '<td class="num">'+n(r.projected)+'u at arrival</td><td class="num">'+(r.forecast_wk!=null?esc(r.forecast_wk)+'/wk':'—')+'</td></tr>'}).join('');
     var decs=(p.engine_decisions||[]).map(function(d){
-      return '<tr><td class="muted">'+esc(d.decision_type)+'</td><td>'+esc(d.reason)+'</td></tr>'}).join('');
+      return '<tr><td class="muted">'+esc(dtL(d.decision_type))+'</td><td>'+esc(d.reason)+'</td></tr>'}).join('');
     var pend=(p.pending_approvals||[]).map(function(r){
-      return '<li>'+esc(r.ipr_family)+' — '+esc(r.status)+' ('+n(r.test_units)+'u test)</li>'}).join('');
+      return '<li>'+esc(r.ipr_family)+' — '+esc(stL(r.status))+' ('+n(r.test_units)+'u test)</li>'}).join('');
     var visits=(p.recent_visits||[]).map(function(v){
       return '<tr><td>'+esc(v.visited_at)+'</td><td>'+esc(v.recorded_by)+'</td><td>'+esc(v.merchandising_status||'—')+'</td><td>'+esc(v.comments||'')+'</td></tr>'}).join('');
     box.innerHTML=
       '<div class="card"><h2>Store facts <span class="muted" style="float:right">data as of '+esc(p.data_as_of||'?')+'</span></h2>'+
       '<div style="font-size:17px;font-weight:700">'+s.store_id+' — '+esc(s.store_name)+'</div>'+
-      '<div class="muted">'+esc(s.city||'')+', '+esc(s.state||'')+' · '+esc(s.merchant||'—')+' · '+esc(s.region||'—')+
+      '<div class="muted">'+esc(place(s.city,s.state))+' · '+esc(s.merchant||'—')+' · '+esc(s.region||'—')+
       (s.dsm?(' · DSM: '+esc(s.dsm)):' · DSM: not assigned')+'</div>'+
-      ((s.active===false||['do_not_ship','paused','inactive','hold'].indexOf(s.store_status)>=0)?'<div class="chip r" style="margin-top:6px">'+esc(s.store_status||'inactive')+'</div>':'')+
-      (p.edi&&p.edi.suspected_gap?'<div class="chip y" style="margin-top:6px">Suspected EDI gap — no scans since '+esc(p.edi.last_sale)+'</div>':'')+
+      ((s.active===false||['do_not_ship','paused','inactive','hold'].indexOf(s.store_status)>=0)?'<div class="chip r" style="margin-top:6px">'+esc(stL(s.store_status||'inactive'))+'</div>':'')+
+      (p.edi&&p.edi.suspected_gap?'<div class="chip y" style="margin-top:6px">No register scans since '+esc(p.edi.last_sale)+' — possible data-feed gap</div>':'')+
       '<div class="grid" style="margin-top:10px">'+
         '<div class="tile"><div class="v">'+(p.ranks?('#'+n(p.ranks.national_rank)):'—')+'</div><div class="l">national of '+(p.ranks?n(p.ranks.national_of):'—')+'</div></div>'+
         '<div class="tile"><div class="v">'+(p.ranks?('#'+n(p.ranks.region_rank)):'—')+'</div><div class="l">region of '+(p.ranks?n(p.ranks.region_of):'—')+'</div></div>'+
-        '<div class="tile"><div class="v">$'+n(p.ytd&&p.ytd.dollars)+'</div><div class="l">YTD sales</div></div>'+
+        '<div class="tile"><div class="v">'+(p.ytd&&p.ytd.dollars!=null?('$'+n(p.ytd.dollars)):'—')+'</div><div class="l">YTD sales</div></div>'+
         '<div class="tile"><div class="v">'+n(p.ytd&&p.ytd.units)+'</div><div class="l">YTD units</div></div>'+
         '<div class="tile"><div class="v">'+esc(p.last_delivery||'none')+'</div><div class="l">last delivery</div></div>'+
         '<div class="tile"><div class="v">'+n(p.inbound&&p.inbound.loaded_units)+'u</div><div class="l">inbound loaded</div></div>'+
@@ -212,25 +240,27 @@ async function openStore(id){
       '<div style="margin-top:10px"><div class="muted">Weekly units, last 13 weeks</div><div class="bars">'+
         (p.weekly_sales_13wk||[]).map(function(w){return '<div title="'+w.week+': '+n(w.units)+'u" style="height:'+(mx?Math.max(3,Math.round(w.units/mx*100)):3)+'%"></div>'}).join('')+
       '</div></div>'+
-      '<div style="margin-top:10px">'+(famChips||'<span class="muted">No family grades yet — run the engine first.</span>')+'</div>'+
+      '<div style="margin-top:10px">'+(famChips||'<span class="muted">No family grades on file yet — they appear after the next weekly run.</span>')+'</div>'+
       (pend?'<div style="margin-top:8px"><strong style="font-size:13px">Pending approvals</strong><ul style="margin:4px 0">'+pend+'</ul></div>':'')+
       '</div>'+
 
       '<div class="card"><h2>Ask about this store</h2>'+
       '<textarea id="ai-q" rows="2" placeholder="e.g. Why didn’t this store get an order this week? What should I verify on my visit?"></textarea>'+
-      '<div style="margin-top:8px;display:flex;gap:8px"><button class="btn" onclick="askAI()">Ask</button><span class="muted" id="ai-busy"></span></div>'+
+      '<div class="ferr" id="ai-err"></div>'+
+      '<div style="margin-top:8px;display:flex;gap:8px"><button class="btn" id="ai-go" onclick="askAI()">Ask</button><span class="muted" id="ai-busy"></span></div>'+
       '<div id="ai-a"></div></div>'+
 
       '<div class="card"><h2>Stockout risks (latest run)</h2>'+
-      (risks?('<table><tr><th>SKU</th><th>Risk</th><th>Projected</th><th>Forecast</th></tr>'+risks+'</table>')
+      (risks?('<div class="twrap"><table><tr><th>SKU</th><th>Risk</th><th class="num">Projected</th><th class="num">Forecast</th></tr>'+risks+'</table></div>')
             :'<div class="muted">No Critical/High stockout risks on file for this store.</div>')+'</div>'+
 
       '<div class="card"><h2>SKU performance</h2><div id="skus" class="muted">Loading…</div></div>'+
 
-      '<div class="card"><h2>Engine decisions (latest run)</h2>'+
-      (decs?('<table>'+decs+'</table>'):'<div class="muted">No decisions recorded for this store in the latest run.</div>')+'</div>'+
+      '<div class="card"><h2>What the engine decided (latest run)</h2>'+
+      (decs?('<div class="twrap"><table>'+decs+'</table></div>'):'<div class="muted">No decisions recorded for this store in the latest run.</div>')+'</div>'+
 
       '<div class="card"><h2>Record a store visit</h2>'+
+      '<div class="muted" style="margin-bottom:4px">Fill in at least one field below, then save.</div>'+
       '<label>Visit date</label><input type="date" id="v-date">'+
       '<label>Merchandising status</label><select id="v-merch"><option value="">—</option><option>merchandised</option><option>partially merchandised</option><option>not merchandised</option><option>unknown</option></select>'+
       '<label>Product condition</label><input type="text" id="v-cond" maxlength="500" placeholder="e.g. healthy, some dry 9cm on endcap">'+
@@ -239,15 +269,15 @@ async function openStore(id){
       '<label>Comments</label><textarea id="v-com" rows="2" maxlength="4000"></textarea>'+
       '<label>Recommended assortment changes</label><input type="text" id="v-rec" maxlength="2000">'+
       '<label>Follow-up</label><input type="text" id="v-fu" maxlength="2000">'+
-      '<div class="muted" id="v-err" style="color:#8a2f17;margin-top:4px"></div>'+
-      '<div style="margin-top:10px"><button class="btn" onclick="saveVisit()">Save visit</button></div></div>'+
+      '<div class="ferr" id="v-err"></div>'+
+      '<div style="margin-top:10px"><button class="btn" id="v-save" onclick="saveVisit()">Save visit</button></div></div>'+
 
       '<div class="card"><h2>Recent visits</h2>'+
-      (visits?('<table><tr><th>Date</th><th>By</th><th>Merch</th><th>Comments</th></tr>'+visits+'</table>')
+      (visits?('<div class="twrap"><table><tr><th>Date</th><th>By</th><th>Merchandising</th><th>Comments</th></tr>'+visits+'</table></div>')
              :'<div class="muted">No visits recorded for this store yet.</div>')+'</div>';
     loadSkus(id);
     window.scrollTo({top:0});
-  }catch(e){box.innerHTML='';err(e.message)}
+  }catch(e){box.innerHTML='';err(e.message,function(){openStore(id)})}
 }
 
 async function loadSkus(id){
@@ -256,10 +286,11 @@ async function loadSkus(id){
     var k=await api('/stores/'+id+'/skus');
     function tbl(rows,cols){
       if(!rows||!rows.length)return '<div class="muted">None on file.</div>';
-      return '<div style="overflow-x:auto"><table><tr>'+cols.map(function(c){return '<th>'+c[1]+'</th>'}).join('')+'</tr>'+
+      var NUM={u13:1,u4:1,d13:1,trend:1,projected:1,del13:1};
+      return '<div class="twrap"><table><tr>'+cols.map(function(c){return '<th'+(NUM[c[0]]?' class="num"':'')+'>'+c[1]+'</th>'}).join('')+'</tr>'+
         rows.map(function(r){return '<tr>'+cols.map(function(c){
           var v=r[c[0]];if(c[0]==='trend'&&v!=null)v=(v>=1?'+':'')+Math.round((v-1)*100)+'%';
-          return '<td>'+esc(v==null?'—':(typeof v==='number'?Number(v).toLocaleString():v))+'</td>'}).join('')+'</tr>'}).join('')+'</table></div>';
+          return '<td'+(NUM[c[0]]?' class="num"':'')+'>'+esc(v==null?'—':(typeof v==='number'?Number(v).toLocaleString():v))+'</td>'}).join('')+'</tr>'}).join('')+'</table></div>';
     }
     var C=[['sku_id','SKU'],['description','Product'],['u13','13wk u'],['u4','4wk u'],['trend','Trend']];
     var CB=[['sku_id','SKU'],['description','Product'],['u13','13wk u'],['del13','Del 13wk'],['cause','Why']];
@@ -275,19 +306,24 @@ async function loadSkus(id){
       '<details><summary>Best / weakest families</summary>'+
         tbl(k.best_families,[['family','Family'],['u13','13wk u'],['d13','13wk $']])+
         tbl(k.weakest_families,[['family','Family'],['u13','13wk u'],['d13','13wk $']])+'</details>';
-  }catch(e){box.textContent='Could not load SKU performance: '+e.message}
+  }catch(e){box.className='muted';box.textContent='SKU performance did not load.';
+    err('Could not load SKU performance: '+e.message,function(){loadSkus(id)})}
 }
 
 async function askAI(){
   var q=document.getElementById('ai-q').value.trim();
   var busy=document.getElementById('ai-busy'),out=document.getElementById('ai-a');
-  if(!q){busy.textContent='Type a question first.';return}
-  busy.textContent='Thinking…';out.innerHTML='';
+  var btn=document.getElementById('ai-go'),verr=document.getElementById('ai-err');
+  verr.textContent='';
+  if(!q){verr.textContent='Type a question first.';return}
+  if(btn.disabled)return;                           // double-tap guard (AI budget)
+  btn.disabled=true;busy.textContent='Thinking…';out.innerHTML='';
   try{
     var r=await api('/stores/'+CUR+'/ask',{method:'POST',body:JSON.stringify({question:q})});
     out.innerHTML='<div class="ai-a">'+esc(r.answer)+'</div><div class="muted" style="margin-top:4px">Grounded in store data as of '+esc(r.data_as_of)+'. AI answers distinguish facts from inference — verify in-store.</div>';
     busy.textContent='';
   }catch(e){busy.textContent='';out.innerHTML='<div class="ai-a" style="background:#F7E4DF">'+esc(e.message)+'</div>'}
+  btn.disabled=false;
 }
 
 async function saveVisit(){
@@ -302,9 +338,12 @@ async function saveVisit(){
     follow_up:document.getElementById('v-fu').value||null};
   if(!b.merchandising_status&&!b.comments&&!b.product_condition&&b.discarded_units==null&&!b.display_issues&&!b.recommended_changes&&!b.follow_up){
     verr.textContent='Record at least one observation before saving.';return}
+  var btn=document.getElementById('v-save');
+  if(btn.disabled)return;                           // double-tap guard (duplicate visit rows)
+  btn.disabled=true;btn.textContent='Saving…';
   try{await api('/stores/'+CUR+'/visits',{method:'POST',body:JSON.stringify(b)});
     toast('Visit saved');openStore(CUR);
-  }catch(e){verr.textContent=e.message}
+  }catch(e){verr.textContent=e.message;btn.disabled=false;btn.textContent='Save visit'}
 }
 
 /* ── Alerts ── */
@@ -315,18 +354,57 @@ async function loadAlerts(){
     var a=await api('/alerts?mine='+mine);
     var rows=(a.alerts||[]).map(function(r){
       return '<div class="hit'+(r.urgent?' urgent':'')+'" onclick="showTab(\'store\');openStore('+r.store_id+')">'+
-        '<div><strong>'+r.store_id+'</strong> '+esc(r.store_name)+', '+esc(r.state||'')+
+        '<div><strong>'+r.store_id+'</strong> '+esc(r.store_name)+(r.state?(', '+esc(r.state)):'')+
         (r.urgent?' <span class="chip r">URGENT</span>':'')+
-        ' <span class="chip b">'+esc(r.decision_type)+'</span>'+
+        ' <span class="chip b">'+esc(dtL(r.decision_type))+'</span>'+
         '<div class="muted">'+esc(r.reason)+'</div></div></div>'}).join('');
     var pend=(a.pending_reactivations||[]).map(function(r){
       return '<div class="hit" onclick="showTab(\'store\');openStore('+r.store_id+')"><div><strong>'+r.store_id+'</strong> '+esc(r.store_name)+
-        ' — '+esc(r.ipr_family)+' <span class="chip y">'+esc(r.status)+'</span></div></div>'}).join('');
+        ' — '+esc(r.ipr_family)+' <span class="chip y">'+esc(stL(r.status))+'</span></div></div>'}).join('');
     box.className='';
     box.innerHTML=(a.run?('<div class="muted">Ship week '+esc(a.run.shipping_week)+'</div>'):'')+
       (rows||'<div class="muted">No alerts in the latest run'+(mine?' for your stores':'')+'.</div>')+
       (pend?('<h2 style="font-size:13px;color:var(--is);text-transform:uppercase;margin:12px 0 4px">Pending reactivations</h2>'+pend):'');
-  }catch(e){box.textContent=e.message}
+  }catch(e){box.className='muted';box.textContent='Alerts did not load.';
+    err('Could not load alerts: '+e.message,loadAlerts)}
+  loadManager();
+}
+
+/* ── Manager tools (email digests + outbox) — shown only when the role allows ── */
+var ME=null;
+async function loadManager(){
+  var card=document.getElementById('mgr');if(!card)return;
+  try{
+    if(!ME){var r=await fetch('/api/auth/me',{headers:authHdr()});if(!r.ok)return;ME=await r.json()}
+    if(['manager','admin'].indexOf(ME.role)<0)return;
+    var o=await api('/outbox');
+    var rows=(o.messages||[]).slice(0,20).map(function(m){
+      var c=m.status==='sent'?'g':(m.status==='failed'?'r':'y');
+      return '<tr><td>'+esc(m.to_email)+'</td><td>'+esc(m.subject)+'</td>'+
+        '<td><span class="chip '+c+'">'+esc(m.status)+'</span>'+(m.error?('<div class="muted">'+esc(m.error)+'</div>'):'')+'</td></tr>'}).join('');
+    card.style.display='';
+    card.innerHTML='<h2>Manager tools</h2>'+
+      '<div class="muted" style="margin-bottom:6px">'+(o.smtp_configured?'Email sending is configured.':'Email sending is not configured yet — digests queue below until it is.')+'</div>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">'+
+      '<button class="btn" id="mgr-send" onclick="sendDigests()">Email digests to DSMs</button>'+
+      (o.smtp_configured?'<button class="btn sec" onclick="flushOutbox()">Retry queued emails</button>':'')+'</div>'+
+      (rows?('<div class="twrap"><table><tr><th>To</th><th>Subject</th><th>Status</th></tr>'+rows+'</table></div>')
+           :'<div class="muted">No digest emails yet.</div>');
+  }catch(e){/* non-managers and load errors: card stays hidden */}
+}
+async function sendDigests(){
+  var b=document.getElementById('mgr-send');if(b.disabled)return;
+  b.disabled=true;b.textContent='Sending…';
+  try{var r=await api('/alerts/notify',{method:'POST'});
+    toast(r.note?r.note:'Digests '+(Object.values(r.recipients||{}).indexOf('sent')>=0?'sent':'queued'));
+    loadManager();
+  }catch(e){err('Could not send digests: '+e.message,sendDigests)}
+  b.disabled=false;b.textContent='Email digests to DSMs';
+}
+async function flushOutbox(){
+  try{var r=await api('/outbox/flush',{method:'POST'});
+    toast('Retried: '+(r.sent||0)+' sent, '+(r.failed||0)+' failed');loadManager();
+  }catch(e){err('Could not retry queued emails: '+e.message,flushOutbox)}
 }
 
 /* boot */
