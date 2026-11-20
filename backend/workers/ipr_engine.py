@@ -130,11 +130,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # order duplicates covered inbound supply"). A released/exported run for this ship week
     # refuses outright; earlier live runs for the same week are counted as inbound below so a
     # rerun ships only the residual need, never the same order twice.
-    cur.execute("""SELECT id, status, pipeline_status FROM recommendation_runs
+    # Live = v2 runs (any non-cancelled status) plus exported/released runs of any engine;
+    # leftover v1 drafts are not live orders and are ignored.
+    cur.execute("""SELECT id, status, pipeline_status, engine_version FROM recommendation_runs
                    WHERE shipping_week = %s
                      AND COALESCE(status, '') NOT IN %s""",
                 (shipping_week, CANCELLED_RUN_STATUSES))
-    prior_runs = cur.fetchall()
+    prior_runs = [r for r in cur.fetchall()
+                  if r["engine_version"] == ENGINE_VERSION or r["status"] in RELEASED_RUN_STATUSES
+                  or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
     released = [r for r in prior_runs
                 if r["status"] in RELEASED_RUN_STATUSES or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
     if released:
@@ -631,8 +635,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # ══ 7. TRAYS -> CART-LOADING PLAN (§17–19): physical fit only ═══════════
     # §19.1 cart economics — editable assumptions, not rules: delivered cart cost is roughly
     # $180–$300 (default $240); normal wholesale value per cart is roughly $1,700–$3,000.
-    cart_cost = float(S.get("delivered_cart_cost", 240) or 240)
-    low_value_wh = float(S.get("low_value_cart_wholesale", 1700) or 1700)
+    cart_cost = float(S.get("cart_delivered_cost", 240) or 240)
+    low_value_wh = float(S.get("cart_wholesale_low", 1700) or 1700)
     orders = {}
     store_kit = defaultdict(lambda: defaultdict(int))
     for l in ship.values():
@@ -700,16 +704,6 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                         "delivered_cost": cart_cost,
                         "freight_pct": None if freight_pct is None else round(freight_pct, 4),
                         "low_value": low_value})
-            if low_value:
-                decide("low_value_cart",
-                       f"Cart {ci}: wholesale ${wh_value:,.0f} < ${low_value_wh:,.0f} "
-                       f"(freight {'n/a' if freight_pct is None else f'{freight_pct:.0%}'} of wholesale at "
-                       f"${cart_cost:,.0f}/cart) — ships as built; never padded (§19.1)",
-                       store_id=store_id, severity="warning", cart_number=ci,
-                       wholesale_value=round(wh_value, 2), delivered_cost=cart_cost,
-                       freight_pct=None if freight_pct is None else round(freight_pct, 4),
-                       units=sum(x[3] for x in contents), shelves=len(ordered),
-                       wholesale_missing_skus=wh_missing)
         grade_framework = {"AA": 3, "A": 3, "B": 2, "C+": 2, "C": 1, "C-": 1, "D": 1}
         top_grade = min((l["grade"] for l in olines), key=GRADE_ORDER.index)
         if len(out) > grade_framework[top_grade]:
@@ -717,6 +711,74 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                              f"for best family grade {top_grade}) — demand-driven, shipped (cart caps off)",
                    store_id=store_id, severity="info", carts=len(out))
         orders[store_id] = {"lines": olines, "carts": out}
+
+    # §19.1 low-value cart decision (economic, not a size floor; §23 deferral). A cart whose
+    # wholesale is under cart_wholesale_low is RELEASED when one more week of waiting would lose
+    # at least its delivered cost in retail sales — lost = Σ min(fc, max(0, fc − projected stock
+    # at arrival)) × price over the lines on it (pro-rata by units) — or when any of those lines
+    # is Critical risk. Otherwise it is DEFERRED: its need is recalculated next week, never padded.
+    # Consolidation across stores is not possible (one cart = one store), so it is not attempted.
+    econ = {"released_low_value": 0, "deferred_carts": 0, "deferred_units": 0,
+            "deferred_wholesale": 0.0, "deferred_retail_one_week_at_risk": 0.0}
+    deferred_stores = []
+    for store_id in sorted(orders):
+        o = orders[store_id]
+        by_sku_line = {l["sku_id"]: l for l in o["lines"]}
+        keep = []
+        for c in o["carts"]:
+            if not c["low_value"]:
+                keep.append(c)
+                continue
+            cu = defaultdict(int)
+            for x in c["contents"]:
+                cu[x[1]] += x[3]
+            lost, critical = 0.0, []
+            for sk, u in cu.items():
+                l = by_sku_line[sk]
+                wk_loss = min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l)
+                lost += wk_loss * (u / l["alloc_units"] if l["alloc_units"] else 0)
+                if l["risk"] == "Critical":
+                    critical.append(sk)
+            fp = c["freight_pct"]
+            nums = (f"wholesale ${c['wholesale_value']:,.0f} < ${low_value_wh:,.0f}; delivered cost "
+                    f"${cart_cost:,.0f} (freight {'n/a' if fp is None else f'{fp:.0%}'}); one-week lost "
+                    f"sales if it waits ${lost:,.0f}")
+            data = dict(store_id=store_id, cart_number=c["cart_number"], wholesale_value=c["wholesale_value"],
+                        margin_proxy_wholesale=c["wholesale_value"], delivered_cost=cart_cost, freight_pct=fp,
+                        lost_sales_one_week=round(lost, 2), critical_skus=critical,
+                        units=c["total_units"], shelves=c["shelves_used"],
+                        wholesale_missing_skus=c["wholesale_incomplete"])
+            if lost >= cart_cost or critical:
+                why = ("Critical-risk line(s) " + ", ".join(critical)) if critical else                       f"lost sales ${lost:,.0f} >= cart cost ${cart_cost:,.0f}"
+                decide("low_value_cart", f"Cart {c['cart_number']} RELEASED: {nums} — {why} (§19.1)",
+                       severity="warning", action="release", **data)
+                c["econ_action"] = "release"
+                econ["released_low_value"] += 1
+                keep.append(c)
+                continue
+            decide("deferred_economics", f"Cart {c['cart_number']} DEFERRED: {nums} < cart cost — waiting a "
+                                         f"week costs less than delivering now; need recalculated next week, "
+                                         f"never padded (§19.1, §23)", action="defer", **data)
+            econ["deferred_carts"] += 1
+            econ["deferred_units"] += c["total_units"]
+            econ["deferred_wholesale"] += c["wholesale_value"]
+            econ["deferred_retail_one_week_at_risk"] += lost
+            for sk, u in cu.items():
+                l = by_sku_line[sk]
+                l["alloc_units"] -= u
+                l["alloc_trays"] = l["alloc_units"] // l["upt"]
+                l["deferred_units"] = l.get("deferred_units", 0) + u
+        alloc_units_total -= sum(l.get("deferred_units", 0) for l in o["lines"])
+        o["lines"] = [l for l in o["lines"] if l["alloc_units"] > 0]
+        for n, c in enumerate(keep, 1):
+            c["cart_number"] = n
+        o["carts"] = keep
+        if not keep:
+            deferred_stores.append(store_id)
+            del orders[store_id]
+    log(f"Cart economics: {econ['released_low_value']:,} low-value carts released · {econ['deferred_carts']:,} "
+        f"deferred ({econ['deferred_units']:,}u, ${econ['deferred_wholesale']:,.0f} wholesale) · "
+        f"{len(deferred_stores):,} stores fully deferred")
 
     # ══ 8. REVIEW (§24–25) + $900K OBJECTIVE (§2) + ALLOCATION OUTPUTS (§15) ══
     review = {}
@@ -768,6 +830,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "unconstrained_weekly_demand_retail": round(demand_rev),
             "lost_unavailable_inventory": round(lost_unavail),
             "lost_blocks_and_holds": round(lost_held),
+            "lost_deferrals_one_week": round(econ["deferred_retail_one_week_at_risk"]),
             "edi_uncertainty_at_risk": round(edi_risk),
             "price_basis_units": dict(price_srcs),
             "method_note": ("Arrival-week retail across every store x SKU with velocity: "
@@ -785,11 +848,21 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "freight_pct": round(cart_cost * len(all_carts) / tot_wh, 4) if tot_wh else None,
             "avg_wholesale_per_cart": round(tot_wh / len(all_carts), 2) if all_carts else None,
             "low_value_carts": sum(1 for c in all_carts if c["low_value"]),
+            "carts_released_low_value": econ["released_low_value"],
+            "carts_deferred": econ["deferred_carts"],
+            "deferred_units": econ["deferred_units"],
+            "deferred_wholesale": round(econ["deferred_wholesale"], 2),
+            "deferred_retail_one_week_at_risk": round(econ["deferred_retail_one_week_at_risk"], 2),
+            "stores_deferred": len(deferred_stores),
+            "avg_freight_pct_released": (round(sum(c["freight_pct"] for c in all_carts if c["freight_pct"])
+                                               / max(1, sum(1 for c in all_carts if c["freight_pct"])), 4)
+                                         if all_carts else None),
             "carts_missing_wholesale_price": sum(1 for c in all_carts if c["wholesale_incomplete"]),
-            "assumptions": {"delivered_cart_cost": cart_cost, "delivered_cart_cost_range": [180, 300],
-                            "low_value_cart_wholesale": low_value_wh,
+            "assumptions": {"cart_delivered_cost": cart_cost, "delivered_cart_cost_range": [180, 300],
+                            "cart_wholesale_low": low_value_wh,
                             "normal_wholesale_range": [1700, 3000],
-                            "note": "editable assumptions (§19.1); low-value carts warn, still ship, never padded"},
+                            "note": "editable assumptions (§19.1); a low-value cart is released when one week of "
+                                    "lost sales >= cart cost or a line is Critical, else deferred; never padded"},
         },
         "allocation": {
             "available_units": total_supply,
@@ -803,6 +876,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "reduced_13wk_units_removed": int(reduced_units), "review_held_units": 0,
         },
         "counts": {
+            "stores_deferred_economics": len(deferred_stores),
+            "carts_deferred_economics": econ["deferred_carts"],
             "stores_with_velocity": len({l["store_id"] for l in lines.values()}),
             "stores_shipped": len(orders),
             "carts": sum(len(o["carts"]) for o in orders.values()),
@@ -844,7 +919,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         ("Inventory Allocated", f"{int(alloc_units_total):,}u allocated ({gap_fill_units:,}u gap fill); "
                                 f"{int(sum(unfilled.values())):,}u unfilled"),
         ("Cart Built", f"{len(all_carts):,} carts for {len(orders):,} stores; "
-                       f"{summary['cart_economics']['low_value_carts']:,} low-value warnings"),
+                       f"{econ['released_low_value']:,} low-value released, {econ['deferred_carts']:,} deferred"),
         ("Independent AI Review", f"deterministic reviewer: {len(review) - n_warn:,} PASS, {n_warn:,} WARNING "
                                   f"(LLM reviewer not yet implemented)"),
         ("Final Validated", "routine final validation by the agent (§28); no manual approval"
