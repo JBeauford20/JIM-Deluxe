@@ -43,6 +43,9 @@ STALE_SALES_WARN_DAYS = 9
 H2O_TERR_FAMILIES = {"H2O", "Terrarium"}
 GRADE_ORDER = ["AA", "A", "B", "C+", "C", "C-", "D"]
 GRADE_SCORE = {"AA": 1.0, "A": .85, "B": .7, "C+": .55, "C": .4, "C-": .25, "D": .1}
+# §11.3 reduce-quantity band (conversion between the 60% floor and the grade threshold):
+# share of need trays shipped, by store-family grade. Round down, minimum 1 tray.
+REVIEW_BAND_SHIP_PCT = {"AA": 1.0, "A": 1.0, "B": .75, "C+": .75, "C": .5, "C-": .5, "D": .5}
 RISK_SCORE = {"Critical": 1.0, "High": .75, "Moderate": .4, "Low": .1, "Unknown": .3}
 BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
 # Duplicate-run control (§1, §24, §28): run statuses that no longer represent live orders,
@@ -452,16 +455,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             status = "ELIGIBLE"
         service[k] = (status, round(conv, 3), confd)
 
-    # Approved, unexpired reactivations (§11.5, §27): DSM + Sales Director signed off; the
-    # family ships as a controlled test quantity instead of being blocked/held.
+    # Approved, unexpired reactivations (§11.3, §27): a manager-approved override that sits
+    # outside the normal autonomous flow; the family ships as a controlled test quantity.
     cur.execute("""SELECT id, store_id, ipr_family, test_units FROM ipr_reactivations
                    WHERE status = 'approved' AND expires_at >= %s""", (today,))
     react = {(r["store_id"], r["ipr_family"]): {"id": str(r["id"]), "left": int(r["test_units"])}
              for r in cur.fetchall()}
 
-    # Gate every line (§24): store status, family service status
-    ship, held = {}, {}
-    blocked_units = held_units = 0.0
+    # Gate every line (§24): store status, family 13-week result (§11.3). Autonomous — no
+    # routine approvals. Below the 60% floor the family is stopped this week; between 60% and
+    # the grade threshold it ships a grade-reduced quantity (never an identical shipment).
+    ship, held, held_kind = {}, {}, {}
+    blocked_units = stopped_units = reduced_units = 0.0
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
         if l["trays"] <= 0:
@@ -471,9 +476,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         fk = (l["store_id"], l["family"])
         g = grade[fk]
         svc, conv, confd = service[fk]
-        l.update(grade=g, service=svc, conversion=conv, conv_conf=confd, reactivation=None)
+        l.update(grade=g, service=svc, conversion=conv, conv_conf=confd, reactivation=None,
+                 trays_unreduced=l["trays"])
         if not st.get("active") or status_s in BLOCK_STATUSES:
-            held[key] = "store inactive / do-not-ship"
+            held[key], held_kind[key] = "store inactive / do-not-ship", "block"
             blocked_units += l["trays"] * l["upt"]
             continue
         if svc in ("BLOCKED", "REVIEW") and fk in react:
@@ -482,34 +488,41 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if allowed > 0:
                 r["left"] -= allowed * l["upt"]
                 l["trays"], l["reactivation"] = allowed, r["id"]
-                decide("reactivation", f"{l['family']} reactivated (approved test) — {allowed} trays "
-                                       f"within the approved test quantity", store_id=l["store_id"],
+                decide("reactivation", f"{l['family']} reactivated (approved override test) — {allowed} "
+                                       f"trays within the approved test quantity", store_id=l["store_id"],
                        sku_id=l["sku_id"], reactivation_id=r["id"], conversion=conv, grade=g)
                 ship[key] = l
                 continue
         if svc == "BLOCKED":
-            held[key] = f"{l['family']} conversion {conv:.0%} < {hard_block:.0%} after 13 wks — hard block"
-            blocked_units += l["trays"] * l["upt"]
+            held[key] = (f"{l['family']} conversion {conv:.0%} < {hard_block:.0%} after 13 wks — "
+                         f"service stopped this week (§11.3); need recalculated next week")
+            held_kind[key] = "stopped_13wk"
+            stopped_units += l["trays"] * l["upt"]
             continue
         if svc == "REVIEW":
-            band = ("AA/A operational alert — DSM must investigate" if g in ("AA", "A")
-                    else "DSM review + valid demand required" if g in ("B", "C+")
-                    else "default no service for this family")
-            held[key] = f"{l['family']} conversion {conv:.0%} below {g} threshold — {band}"
-            held_units += l["trays"] * l["upt"]
-            continue
+            pct = REVIEW_BAND_SHIP_PCT[g]
+            new_trays = max(1, int(math.floor(l["trays"] * pct)))
+            removed = l["trays"] - new_trays
+            reduced_units += removed * l["upt"]
+            decide("reduced_13wk", f"{l['family']} conversion {conv:.0%} below {g} threshold "
+                                   f"{float(conv_thr[g]):.0%} (>= {hard_block:.0%}) — ships {pct:.0%} of "
+                                   f"need: {new_trays} of {l['trays']} trays (§11.3 reduce quantity)",
+                   store_id=l["store_id"], sku_id=l["sku_id"], family=l["family"], grade=g,
+                   conversion=conv, threshold=float(conv_thr[g]), ship_pct=pct,
+                   need_trays=l["trays"], ship_trays=new_trays, upt=l["upt"])
+            l["trays"], l["reduced_13wk"] = new_trays, pct
         ship[key] = l
 
     for key, why in held.items():
         l = lines[key]
-        kind = "block" if ("hard block" in why or "inactive" in why) else "review_hold"
-        decide(kind, why, store_id=l["store_id"], sku_id=l["sku_id"],
+        decide(held_kind[key], why, store_id=l["store_id"], sku_id=l["sku_id"],
                family=l["family"], grade=l.get("grade"), conversion=l.get("conversion"),
-               proposed_trays=l["trays"], proposed_units=l["trays"] * l["upt"],
-               required_approval=("DSM + HD Sales Director" if kind == "block" and "conversion" in why
-                                  else "DSM" if kind == "review_hold" else None))
-    log(f"Gates: {len(ship):,} lines eligible · {sum(1 for w in held.values() if 'hard block' in w or 'inactive' in w):,} "
-        f"blocked · {sum(1 for w in held.values() if 'hard block' not in w and 'inactive' not in w):,} held for review")
+               proposed_trays=l["trays"], proposed_units=l["trays"] * l["upt"])
+    n_block = sum(1 for k in held_kind.values() if k == "block")
+    n_stop = sum(1 for k in held_kind.values() if k == "stopped_13wk")
+    n_reduced = sum(1 for l in ship.values() if l.get("reduced_13wk") is not None)
+    log(f"Gates: {len(ship):,} lines eligible ({n_reduced:,} reduced, 13-wk band) · {n_block:,} blocked "
+        f"(store status) · {n_stop:,} stopped (13-wk < {hard_block:.0%})")
 
     # Deferral (§23, Josh decision 1A): a store whose eligible need is below one full shelf
     # does not ship this week — its need is recalculated next week. Carts are never padded.
@@ -706,12 +719,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "incomplete_price_units": int(price_srcs.get("missing", 0)),
         "allocation": {
             "available_units": total_supply,
-            "unconstrained_need_units": int(sum(l["trays"] * l["upt"] for l in lines.values())),
+            "unconstrained_need_units": int(sum(l.get("trays_unreduced", l["trays"]) * l["upt"]
+                                                for l in lines.values())),
             "eligible_need_units": int(sum(l["trays"] * l["upt"] for l in ship.values())),
             "allocated_units": int(alloc_units_total),
             "unfilled_demand_units": int(sum(unfilled.values())),
             "unallocated_supply_units": int(total_supply - alloc_units_total),
-            "blocked_units": int(blocked_units), "review_held_units": int(held_units),
+            "blocked_units": int(blocked_units), "stopped_13wk_units": int(stopped_units),
+            "reduced_13wk_units_removed": int(reduced_units), "review_held_units": 0,
             "deferred_units": int(sum(l["trays"] * l["upt"] for l in deferred.values())),
         },
         "counts": {
@@ -719,8 +734,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "stores_shipped": len(orders),
             "carts": sum(len(o["carts"]) for o in orders.values()),
             "lines_shipped": sum(len(o["lines"]) for o in orders.values()),
-            "lines_blocked": sum(1 for w in held.values() if "hard block" in w or "inactive" in w),
-            "lines_review_held": sum(1 for w in held.values() if "hard block" not in w and "inactive" not in w),
+            "lines_blocked": n_block,
+            "lines_stopped_13wk": n_stop,
+            "lines_reduced_13wk": n_reduced,
+            "lines_review_held": 0,                 # no routine holds in v2 (§1, §24)
             "stores_edi_gap": len(edi_gap),
             "stores_deferred": len({k[0] for k in deferred}),
             "lines_reactivated": sum(1 for l in ship.values() if l.get("reactivation")),
@@ -737,7 +754,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         },
         "not_yet_implemented": [
             "§14 seasonal/ad 13-week protection (needs event records: target in-store date, eligible stores)",
-            "§26 DSM portal (two-step reactivation approvals ARE live via /api/ipr/reactivations)",
+            "§26 DSM information portal (manager-override reactivations are read via ipr_reactivations)",
             "§29 post-delivery measurement, §30 back-testing harness",
             "§25 LLM reviewer (deterministic reviewer runs now; the AI /audit endpoint can layer on)",
         ],
@@ -751,7 +768,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"unallocated supply {a['unallocated_supply_units']:,}u (acceptable, §15)")
     c = summary["counts"]
     log(f"Plan: {c['stores_shipped']} stores · {c['carts']} carts · {c['lines_shipped']} lines · "
-        f"blocked {c['lines_blocked']} · held {c['lines_review_held']} · review PASS {c['review_pass']} / "
+        f"blocked {c['lines_blocked']} · stopped {c['lines_stopped_13wk']} · reduced {c['lines_reduced_13wk']} · review PASS {c['review_pass']} / "
         f"WARNING {c['review_warning']}")
 
     if preview:
