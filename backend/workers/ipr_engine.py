@@ -374,11 +374,25 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # it is excluded from every $ total and counted in summary.incomplete_price_units.
         return None, "missing"
 
-    # Stores
-    cur.execute("""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
-                          region, merchant, state, volume_code
-                   FROM stores ORDER BY store_id""")
+    # Stores. §1/§4.1 hard-block fields (store capacity, approved assortment, receiving
+    # restrictions, DSM assignment) ship in the dsm_portal_2026_11_20 migration; read them
+    # when present so the engine works against a database that predates it.
+    cur.execute("""SELECT array_agg(column_name) AS cols FROM information_schema.columns
+                   WHERE table_name = 'stores' AND column_name IN
+                         ('capacity_carts', 'approved_assortment', 'receiving_restrictions',
+                          'dsm', 'dsm_email')""")
+    _hb_cols = sorted(set(cur.fetchone()["cols"] or []))
+    cur.execute(f"""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
+                           region, merchant, state, volume_code{''.join(', ' + c for c in _hb_cols)}
+                    FROM stores ORDER BY store_id""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
+    hard_block_data = {
+        "columns_present": _hb_cols,
+        "capacity_carts_set": sum(1 for s in stores.values() if s.get("capacity_carts")),
+        "approved_assortment_set": sum(1 for s in stores.values() if s.get("approved_assortment")),
+        "receiving_restrictions_set": sum(1 for s in stores.values() if s.get("receiving_restrictions")),
+        "note": "§1/§4.1 hard blocks are inert for stores where the field is NULL",
+    }
 
     # Freshness window by family (§4.5, Josh's dump cycle 2026-11-19): ipr_settings
     # freshness_days_by_family {family: days, "_default": 90} + freshness_days_by_sku overrides.
@@ -413,6 +427,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     pk_win = S.get("peak_window") or ["2026-04-01", "2026-07-31"]
     pk_idx = {int(k): float(v) for k, v in (S.get("peak_seasonal_index") or {"10": 0.65, "11": 0.65}).items()}
     pk_share = float(S.get("peak_floor_share", 0.5) or 0.5)
+    pk_starve = str(S.get("peak_floor_require_starvation", False)).lower() in ("true", "1", "yes")
     pk_month = (shipping_week or anchor).month
     peak_rate = {}
     if pk_month in pk_idx:
@@ -721,7 +736,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if store_id in edi_gap:
             fc, method = r13, "13-wk baseline (EDI gap)"
         pf = peak_rate.get((store_id, sku_id), 0.0) * peak_mult
-        if pf > fc:
+        # Starvation evidence option (§7: the exception is for stores that LIKELY LACKED
+        # INVENTORY): with peak_floor_require_starvation=true the floor binds only when 13-wk
+        # deliveries could not have stocked floor-rate demand. Default false = 11/20 calibration.
+        if pf > fc and (not pk_starve or float(dv.get("d13") or 0) < pf * 13):
             fc, method = pf, (f"Apr-Jul peak floor ({peak_rate[(store_id, sku_id)]:.1f}u/wk x "
                               f"{peak_mult:.2f}) — recent sales held down by short supply")
         if fc < min_rate:
@@ -948,6 +966,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                  trays_unreduced=l["trays"])
         if not st.get("active") or status_s in BLOCK_STATUSES:
             held[key], held_kind[key] = "store inactive / do-not-ship", "block"
+            blocked_units += l["trays"] * l["upt"]
+            continue
+        # Approved assortment (§1 hard block, §4.1, §24): when the store master lists approved
+        # families, a family outside the list never ships. NULL/empty = no restriction on file.
+        asst = st.get("approved_assortment")
+        if isinstance(asst, (list, tuple)) and asst and l["family"] not in asst:
+            held[key] = f"{l['family']} is not in the store's approved assortment (§4.1, §24)"
+            held_kind[key] = "assortment_block"
             blocked_units += l["trays"] * l["upt"]
             continue
         if not store_due[l["store_id"]][0]:
@@ -1209,6 +1235,45 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    store_id=store_id, severity="info", carts=len(out))
         orders[store_id] = {"lines": olines, "carts": out}
 
+    # STORE CAPACITY (§1 "AI may not override store-capacity limits", §4.1): when the store
+    # master carries capacity_carts, the order never exceeds it. The lowest-wholesale carts are
+    # cut, their trays returned to need (recalculated next run), and the cut is logged. Inert
+    # (NULL) until the business loads capacities — reported in data_quality.store_hard_block_data.
+    cap_cut = {"stores": 0, "carts": 0, "units": 0}
+    for store_id in sorted(orders):
+        _cap = (stores.get(store_id) or {}).get("capacity_carts")
+        o = orders[store_id]
+        if not _cap or len(o["carts"]) <= int(_cap):
+            continue
+        keep_n = max(1, int(_cap))
+        ranked = sorted(o["carts"], key=lambda c: (-c["wholesale_value"], c["cart_number"]))
+        keep = sorted(ranked[:keep_n], key=lambda c: c["cart_number"])
+        drop = ranked[keep_n:]
+        by_sku = {l["sku_id"]: l for l in o["lines"]}
+        cut_units = 0
+        for c in drop:
+            for (_pos, sk, tr, u, _k, _pid) in c["contents"]:
+                l = by_sku.get(sk)
+                if l:
+                    l["alloc_trays"] = max(0, l["alloc_trays"] - tr)
+                    l["alloc_units"] = max(0, l["alloc_units"] - u)
+                cut_units += u
+        for i, c in enumerate(keep, 1):
+            c["cart_number"] = i
+        o["carts"] = keep
+        alloc_units_total -= cut_units
+        cap_cut["stores"] += 1
+        cap_cut["carts"] += len(drop)
+        cap_cut["units"] += cut_units
+        decide("capacity_cap",
+               f"Order cut to the store's capacity: {len(drop)} cart(s) / {cut_units:,}u removed "
+               f"(capacity {int(_cap)} carts, §1 hard block); the cut need is recalculated next run",
+               store_id=store_id, severity="warning", capacity_carts=int(_cap),
+               carts_cut=len(drop), units_cut=cut_units)
+    if cap_cut["stores"]:
+        log(f"Store capacity: {cap_cut['stores']} stores cut to capacity "
+            f"({cap_cut['carts']} carts, {cap_cut['units']:,}u)")
+
     # MINIMUM ORDER = ONE FULL CC CART (leadership decision, 2026-11-20 meeting; supersedes the
     # "warning only" treatment of light orders in §19.1). HARD STOP: a store whose order does not
     # fill at least `min_order_full_carts` physically full cart(s) is pushed to next week — no
@@ -1216,7 +1281,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # is recalculated next week with coverage extended one week per consecutive push. Orders
     # that pass ship whole (a trailing partial cart rides on the same stop).
     pushed = {"stores": 0, "carts": 0, "units": 0, "wholesale": 0.0, "lost_one_week": 0.0,
-              "repeat_stores": 0}
+              "repeat_stores": 0, "review_stores": 0}
+    # Escalation (audit F2, 2026-11-20): a store pushed this many consecutive due cycles has its
+    # coverage pinned at the freshness / sell-through cap and will likely never fill a cart — a
+    # de-facto service stop. Surface it for DSM review instead of looping silently.
+    min_push_review = int(S.get("min_cart_review_after_pushes", 4) or 4)
     for store_id in sorted(orders):
         if min_full_carts <= 0:
             break
@@ -1243,6 +1312,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         pushed["wholesale"] += W
         pushed["lost_one_week"] += lost
         pushed["repeat_stores"] += 1 if streak else 0
+        if streak + 1 >= min_push_review:
+            pushed["review_stores"] += 1
+            decide("min_cart_service_review",
+                   f"Pushed {streak + 1} consecutive due cycles under the one-full-cart minimum — "
+                   f"coverage is already at its freshness/sell-through cap, so this is an effective "
+                   f"service stop. Needs DSM review: verify demand, then either a leadership release "
+                   f"below the minimum or a recorded stop (§11.3/§27 reserve service stops for the "
+                   f"approval chain). One-week sales at risk ${lost:,.0f}.",
+                   store_id=store_id, severity="warning", consecutive_pushes=streak + 1,
+                   lost_sales_one_week=round(lost, 2), order_wholesale=round(W, 2))
         alloc_units_total -= units
         for l in o["lines"]:
             l["deferred_units"] = l["alloc_units"]
@@ -1478,12 +1557,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "lost_unavailable_inventory": round(lost_unavail),
             "lost_blocks_and_holds": round(lost_held),
             "lost_deferrals_one_week": round(econ["deferred_retail_one_week_at_risk"]),
+            "lost_minimum_cart_pushes_one_week": round(pushed["lost_one_week"]),
             "edi_uncertainty_at_risk": round(edi_risk),
+            "dollar_basis": "wholesale",
             "price_basis_units": dict(price_srcs),
-            "method_note": ("Arrival-week retail across every store x SKU with velocity: "
-                            "min(weekly forecast, projected stock) x price. Prices are SKU wholesale "
-                            "(skus.wholesale_price_whl), else realized DTS wholesale $/unit, else "
-                            "pricebook retail (flagged). SKUs with no "
+            "method_note": ("Arrival-week dollars across every store x SKU with velocity: "
+                            "min(weekly forecast, projected stock) x price. BASIS IS WHOLESALE "
+                            "(leadership 2026-11-20): SKU wholesale (skus.wholesale_price_whl), else "
+                            "realized DTS wholesale $/unit, else pricebook retail (flagged). The "
+                            "*_retail key names are legacy — see dollar_basis. SKUs with no "
                             "price are never guessed: they ship on units and are excluded from $."),
         },
         "incomplete_price_units": int(price_srcs.get("missing", 0)),
@@ -1514,7 +1596,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "pushed_min_cart": {"stores": pushed["stores"], "carts": pushed["carts"], "units": pushed["units"],
                                 "wholesale": round(pushed["wholesale"], 2),
                                 "lost_one_week": round(pushed["lost_one_week"], 2),
-                                "repeat_stores": pushed["repeat_stores"]},
+                                "repeat_stores": pushed["repeat_stores"],
+                                "service_review_stores": pushed["review_stores"],
+                                "review_after_pushes": min_push_review},
+            "capacity_cap": cap_cut,
             "kpi_scope": "carts, wholesale, $/cart and freight cover carts SHIPPING this week only; "
                          "pushed and deferred carts are reported separately",
             "avg_freight_pct_released": (round(sum(c["freight_pct"] for c in all_carts if c["freight_pct"])
@@ -1547,6 +1632,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "carts": sum(len(o["carts"]) for o in orders.values()),
             "lines_shipped": sum(len(o["lines"]) for o in orders.values()),
             "lines_blocked": n_block,
+            "lines_assortment_blocked": sum(1 for k in held_kind.values() if k == "assortment_block"),
             "lines_stopped_13wk": n_stop,
             "lines_reduced_13wk": n_reduced,
             "lines_review_held": 0,                 # no routine holds in v2 (§1, §24)
@@ -1561,6 +1647,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                               f"{fresh_wk}-wk fresh deliveries − sales); DTS dumps are batch-recorded"
                               if snap else f"estimate only: {fresh_wk}-wk deliveries − sales (LOW confidence)"),
             "family_mappings_unapproved": unapproved_map,
+            "store_hard_block_data": hard_block_data,
             "settings_pending_backtest": [k for k in S],
         },
         "not_yet_implemented": [
