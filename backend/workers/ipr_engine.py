@@ -86,6 +86,36 @@ def coverage_weeks(cadence_weeks, buffer_weeks, fresh_days):
     return min(float(cadence_weeks + buffer_weeks), fresh_days / 7.0)
 
 
+def prior_economic_deferrals(history):
+    """Consecutive economic deferrals in the store's most recent DUE cycles.
+    history: decision-kind sets for this store, one per earlier v2 run (latest run per ship
+    week), newest first. A not-due week is not a due cycle and is skipped; any other due cycle
+    (shipped, released, absent) ends the streak."""
+    n = 0
+    for kinds in history:
+        if "deferred_economics" in kinds:
+            n += 1
+        elif "not_due" in kinds:
+            continue
+        else:
+            break
+    return n
+
+
+def economic_action(wholesale, carts, lost_one_week, cart_cost, wholesale_low, any_critical,
+                    prior_deferrals, max_deferrals):
+    """§19.1 economic test on a due store's whole order (Josh option B, 2026-11-19).
+    Returns 'pass' (not low value), 'release' (passes on lost sales / Critical), 'defer'
+    (first time), or 'release_after_deferral' (already deferred max_deferrals due cycles)."""
+    if carts and wholesale / carts >= wholesale_low:
+        return "pass"
+    if lost_one_week >= carts * cart_cost or any_critical:
+        return "release"
+    if prior_deferrals >= max_deferrals:
+        return "release_after_deferral"
+    return "defer"
+
+
 def shipping_efficiency(sold, delivered):
     """Josh's KPI: 13-wk units sold / 13-wk units delivered (same window, no lag)."""
     return round(sold / delivered, 4) if delivered else None
@@ -135,6 +165,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     _cb = S.get("cadence_buffer_weeks")
     cad_buffer = float(DEFAULT_CADENCE_BUFFER_WEEKS if _cb is None else _cb)
     econ_defer_due = str(S.get("economic_deferral_for_due_stores", False)).lower() in ("true", "1", "yes")
+    # Josh option B (2026-11-19): a due store failing the §19.1 test is deferred at most this many
+    # consecutive due cycles, then ships regardless. economic_deferral_for_due_stores=true means
+    # no limit (always defer when the test fails).
+    _md = S.get("max_economic_deferrals")
+    max_econ_def = 10 ** 6 if econ_defer_due else int(1 if _md is None else _md)
     fw = S["forecast_weights"]
     min_rate = float(S["min_weekly_rate_units"])
     conv_thr = S["conversion_thresholds"]
@@ -902,6 +937,24 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # C in retail sales — lost = Σ min(fc, max(0, fc − projected stock at arrival)) × price over
     # its lines — or any line is Critical risk. Otherwise DEFER the whole order (no partial-store
     # deferral): need is recalculated next week, never padded. No cross-store consolidation.
+    # Deferral history is durable: earlier v2 runs' run_decisions (latest run per earlier ship
+    # week, newest first, up to 8 weeks). A preview with no history treats everyone as first-time.
+    cur.execute("""
+        SELECT DISTINCT ON (shipping_week) id, shipping_week FROM recommendation_runs
+        WHERE engine_version = %s AND shipping_week < %s AND COALESCE(status, '') NOT IN %s
+        ORDER BY shipping_week DESC, run_at DESC
+    """, (ENGINE_VERSION, shipping_week, CANCELLED_RUN_STATUSES))
+    hist_runs = sorted(cur.fetchall(), key=lambda r: r["shipping_week"], reverse=True)[:8]
+    hist = defaultdict(lambda: [set() for _ in hist_runs])
+    if hist_runs:
+        idx = {str(r["id"]): i for i, r in enumerate(hist_runs)}
+        cur.execute("""SELECT run_id, store_id, decision_type FROM run_decisions
+                       WHERE run_id = ANY(%s::uuid[]) AND store_id IS NOT NULL
+                         AND decision_type IN ('deferred_economics', 'not_due', 'low_value_cart', 'review')""",
+                    (list(idx),))
+        for r in cur.fetchall():
+            hist[r["store_id"]][idx[str(r["run_id"])]].add(r["decision_type"])
+    econ_second = 0
     econ = {"released_low_value": 0, "stores_released_low_value": 0, "deferred_carts": 0,
             "deferred_units": 0, "deferred_wholesale": 0.0, "deferred_retail_one_week_at_risk": 0.0,
             "deferred_single_cart": 0, "deferred_multi_cart": 0}
@@ -911,10 +964,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         n = len(o["carts"])
         W = sum(c["wholesale_value"] for c in o["carts"])
         C = n * cart_cost
-        if n and W / n >= low_value_wh:
-            continue
         lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
         critical = sorted(l["sku_id"] for l in o["lines"] if l["risk"] == "Critical")
+        prior_def = prior_economic_deferrals(hist.get(store_id, []))
+        action = economic_action(W, n, lost, cart_cost, low_value_wh, bool(critical), prior_def, max_econ_def)
+        if action == "pass":
+            continue
         fp = (C / W) if W else None
         nums = (f"order wholesale ${W:,.0f} on {n} cart(s) (${W / n:,.0f}/cart < ${low_value_wh:,.0f}); "
                 f"delivered cost ${C:,.0f} (freight {'n/a' if fp is None else f'{fp:.0%}'}); "
@@ -924,11 +979,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     margin_proxy_wholesale=round(W, 2), critical_skus=critical,
                     units=sum(l["alloc_units"] for l in o["lines"]),
                     wholesale_missing_skus=sorted({x for c in o["carts"] for x in c["wholesale_incomplete"]}))
-        if lost >= C or critical or not econ_defer_due:
+        data["prior_economic_deferrals"] = prior_def
+        if action in ("release", "release_after_deferral"):
+            if action == "release_after_deferral":
+                econ_second += 1
             why = (("Critical-risk line(s) " + ", ".join(critical)) if critical else
                    f"lost sales ${lost:,.0f} >= delivered cost ${C:,.0f}" if lost >= C else
-                   f"store is due on its {store_due[store_id][2]}-wk cadence ({store_due[store_id][1]}) — "
-                   f"due stores release (economic_deferral_for_due_stores off)")
+                   f"second due week, released per policy (deferred {prior_def} prior due "
+                   f"cycle(s); max_economic_deferrals {max_econ_def})")
             decide("low_value_cart", f"Order RELEASED: {nums} — {why} (§19.1)", store_id=store_id,
                    severity="warning", action="release", **data)
             for c in o["carts"]:
@@ -937,8 +995,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             econ["stores_released_low_value"] += 1
             continue
         decide("deferred_economics", f"Order DEFERRED: {nums} < delivered cost — waiting a week costs "
-                                     f"less than delivering now; need recalculated next week, never "
-                                     f"padded (§19.1, §23)", store_id=store_id, action="defer", **data)
+                                     f"less than delivering now; deferred once, will ship next time due "
+                                     f"regardless; need recalculated then, never padded (§19.1, §23)", store_id=store_id, action="defer", **data)
         econ["deferred_carts"] += n
         econ["deferred_units"] += data["units"]
         econ["deferred_wholesale"] += W
@@ -1043,7 +1101,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     cadence_summary = {
         "settings": {"delivery_cadence_weeks": cadence, "cadence_buffer_weeks": cad_buffer,
                      "due_slack_days": DUE_SLACK_DAYS,
-                     "economic_deferral_for_due_stores": econ_defer_due},
+                     "economic_deferral_for_due_stores": econ_defer_due,
+                     "max_economic_deferrals": max_econ_def},
+        "stores_deferred_first_time": len(deferred_stores),
+        "stores_released_after_deferral": econ_second,
+        "deferral_history_runs": [str(r["shipping_week"]) for r in hist_runs],
         "stores_due": sum(1 for v in store_due.values() if v[0]),
         "stores_not_due": sum(1 for v in store_due.values() if not v[0]),
         "stores_shipped": len(orders),
