@@ -16,6 +16,9 @@ class FakeCur:
     def execute(self, *_a, **_k):
         pass
 
+    def fetchone(self):
+        return None                      # column probe: order_carts.handling_tag absent
+
     def fetchall(self):
         return self.rows
 

@@ -185,8 +185,12 @@ def run_scenario_audit(run_id: str, user_email: str | None) -> dict:
 # ── Cart-config consolidation (§20) ──────────────────────────────────────────
 
 def _load_carts(cur, run_id: str):
-    cur.execute("""
+    cur.execute("""SELECT 1 AS ok FROM information_schema.columns
+                   WHERE table_name = 'order_carts' AND column_name = 'handling_tag'""")
+    tag_col = "oc.handling_tag" if cur.fetchone() else "NULL"
+    cur.execute(f"""
         SELECT oc.id AS cart_id, oc.order_id, oc.store_id, oc.config_code, oc.template_id,
+               {tag_col} AS handling_tag,
                cs.id AS shelf_id, cs.shelf_position, cs.sku_id, cs.profile_id, cs.kit_type,
                cs.tray_count, cs.unit_count
         FROM order_carts oc JOIN orders o ON o.id = oc.order_id
@@ -198,6 +202,7 @@ def _load_carts(cur, run_id: str):
     for r in cur.fetchall():
         c = carts.setdefault(r["cart_id"], {"cart_id": str(r["cart_id"]), "store_id": r["store_id"],
                                             "config_code": r["config_code"],
+                                            "handling_tag": (r.get("handling_tag") or "").strip(),
                                             "template_id": r["template_id"], "shelves": []})
         if r["shelf_id"]:
             c["shelves"].append({"shelf_id": str(r["shelf_id"]), "pos": r["shelf_position"],
@@ -239,7 +244,7 @@ def analyze_consolidation(cur, run_id: str, sku_families: dict,
     by_code = defaultdict(list)
     for c in carts:
         by_code[c["config_code"]].append(c)
-    configs = {code: {"carts": lst, "n": len(lst),
+    configs = {code: {"carts": lst, "n": len(lst), "tag": lst[0].get("handling_tag") or "",
                       "sig_full": _sig_full(lst[0]), "sig_nokit": _sig_nokit(lst[0]),
                       "sig_nopos": _sig_nopos(lst[0])}
                for code, lst in by_code.items()}
@@ -254,6 +259,9 @@ def analyze_consolidation(cur, run_id: str, sku_families: dict,
             if b in merged:
                 continue
             A, B = configs[a], configs[b]
+            if A["tag"] != B["tag"]:
+                # a store-restriction build (e.g. NO HEDERA) never merges with a normal cart
+                continue
             if A["sig_nokit"] == B["sig_nokit"] and A["sig_full"] != B["sig_full"]:
                 # kit-only difference. Neutral ONLY when every differing SKU is kit-flexible
                 # (1M grower-pot line in this batch): a 3M jute vs ceramic kit is a different

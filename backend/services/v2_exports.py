@@ -31,6 +31,14 @@ import re
 from collections import Counter, defaultdict
 from datetime import date, datetime
 
+try:                                    # store handling rules (workers/ is not a package)
+    import store_rules
+except ImportError:                     # app process: add backend/workers to the path
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "workers"))
+    import store_rules
+
 # ── constants ────────────────────────────────────────────────────────────────
 CART_SHELF_DEPTH_MM = 22.25 * 25.4          # cart_types 'cc' shelf_depth_in
 BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
@@ -118,7 +126,11 @@ def load_run(cur, run_id: str) -> dict | None:
     cur.execute("""SELECT id, store_id, status, cart_count, total_units
                    FROM orders WHERE run_id = %s""", (run_id,))
     orders = [dict(r) for r in cur.fetchall()]
-    cur.execute("""SELECT oc.id, oc.order_id, oc.store_id, oc.cart_number, oc.config_code, oc.cart_key
+    cur.execute("""SELECT 1 AS ok FROM information_schema.columns
+                   WHERE table_name = 'order_carts' AND column_name = 'handling_tag'""")
+    tag_col = ", oc.handling_tag" if cur.fetchone() else ""
+    cur.execute(f"""SELECT oc.id, oc.order_id, oc.store_id, oc.cart_number, oc.config_code, oc.cart_key
+                          {tag_col}
                    FROM order_carts oc JOIN orders o ON o.id = oc.order_id
                    WHERE o.run_id = %s ORDER BY oc.store_id, oc.cart_number""", (run_id,))
     carts = [dict(r) for r in cur.fetchall()]
@@ -155,8 +167,14 @@ def _norm_name(n: str) -> str:
 
 def load_reference(cur, batch_id: str | None, sku_ids=None) -> dict:
     """Store/SKU/Aster/packing reference data (RealDictCursor)."""
-    cur.execute("""SELECT store_id, store_name, city, state, division, merchant, volume_code,
-                          dynamic_velocity_tier, store_status FROM stores""")
+    # store-master handling columns are read when present (store_master_2026_11_22 migration)
+    cur.execute("""SELECT column_name::text AS c FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'stores' AND column_name IN
+                         ('street_address', 'postal_code', 'cross_dock', 'sku_rule',
+                          'sku_restriction', 'master_status', 'merchandiser')""")
+    extra = "".join(", " + r["c"] for r in cur.fetchall())
+    cur.execute(f"""SELECT store_id, store_name, city, state, division, merchant, volume_code,
+                          dynamic_velocity_tier, store_status{extra} FROM stores""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
     cur.execute("""SELECT k.sku_id, k.description, k.family, k.size_category, k.program,
                           fm.ipr_family
@@ -213,7 +231,12 @@ def cart_signature(cart: dict, shelves: list) -> str:
     agg = defaultdict(int)
     for s in shelves:
         agg[(int(s["shelf_position"]), int(s["sku_id"]), s.get("kit_type") or "")] += int(s.get("tray_count") or 0)
-    return "|".join(f"{p}:{k}:{kt}:{t}" for (p, k, kt), t in sorted(agg.items()))
+    sig = "|".join(f"{p}:{k}:{kt}:{t}" for (p, k, kt), t in sorted(agg.items()))
+    # A cart built to a store handling restriction (e.g. NO HEDERA) is its own config even
+    # when its SKU/tray content equals an unrestricted cart: ops must not build both from
+    # one sheet, because the Aster varieties on it differ.
+    tag = (cart.get("handling_tag") or "").strip()
+    return f"{sig}|TAG:{tag}" if tag else sig
 
 
 def _cc_number(name: str):
@@ -303,6 +326,18 @@ def store_vol(s: dict) -> str:
     return (s.get("volume_code") or "").strip()
 
 
+def store_address(s: dict) -> str:
+    """Street address + ZIP from the store master (blank until the master is loaded)."""
+    a = (s.get("street_address") or "").strip()
+    z = (s.get("postal_code") or "").strip()
+    return f"{a}, {z}" if a and z else a
+
+
+def store_notes(s: dict) -> str:
+    """Routing notes from the store master: cross dock + handling restriction."""
+    return store_rules.handling_notes(s)
+
+
 def build_stores_and_carts(model: dict, ref: dict):
     """Returns (openpyxl Workbook, report dict)."""
     import openpyxl
@@ -317,7 +352,7 @@ def build_stores_and_carts(model: dict, ref: dict):
     cols = sorted(set(labels.values()), key=_config_sort_key)
     col_idx = {lab: i for i, lab in enumerate(cols)}
 
-    stores, missing_meta = ref["stores"], []
+    stores, missing_meta, noted = ref["stores"], [], []
     div_order = {"North": 0, "South": 1, "West": 2}
 
     def sort_key(sid):
@@ -340,9 +375,12 @@ def build_stores_and_carts(model: dict, ref: dict):
         total = sum(x for x in counts if x)
         want = desired.get(sid)
         want = int(want) if want is not None else total
-        ws.append([sid, "", xl(s.get("division") or ""), xl(store_city_label(sid, s)),
+        note = store_notes(s)
+        if note:
+            noted.append(sid)
+        ws.append([sid, xl(store_address(s)), xl(s.get("division") or ""), xl(store_city_label(sid, s)),
                    xl((s.get("state") or "").strip()), xl(store_vol(s)),
-                   xl(s.get("merchant") or ""), "", want, total, want - total] + counts)
+                   xl(s.get("merchant") or ""), xl(note), want, total, want - total] + counts)
     for i, w in enumerate(SC_META_WIDTHS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for j, lab in enumerate(cols, len(SC_META_HEADERS) + 1):
@@ -356,6 +394,12 @@ def build_stores_and_carts(model: dict, ref: dict):
         "config_names_persisted": bool(model.get("config_names_persisted")),
         "permanent_cart_configs": [c for c in cols if _cc_number(c) is None],
         "stores_missing_metadata": missing_meta,
+        "stores_with_handling_notes": len(noted),
+        "cross_dock_stores": dict(Counter((stores.get(sid) or {}).get("cross_dock")
+                                          for sid in carts_by_store
+                                          if carts_by_store[sid] and (stores.get(sid) or {}).get("cross_dock"))),
+        "blocked_stores_in_run": sorted(sid for sid in carts_by_store if carts_by_store[sid]
+                                        and ((stores.get(sid) or {}).get("store_status") or "active") in BLOCK_STATUSES),
         "stores_missing_vol": [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)
                                if not ws.cell(r, 6).value],
         "cart_count_mismatch": [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)
@@ -617,9 +661,12 @@ def pack_plan_rows(model: dict, ref: dict):
         shelves_by_cart[s["cart_id"]].append(s)
 
     groups = defaultdict(list)            # (ship, route, label) -> carts
+    tag_of = {}                           # config label -> handling tag (NO HEDERA ...)
     for c in model["carts"]:
         route, ship = route_of.get(c["id"], (UNROUTED, None))
         groups[(ship, route, names[c["id"]])].append(c)
+        if (c.get("handling_tag") or "").strip():
+            tag_of[names[c["id"]]] = c["handling_tag"].strip()
 
     def gkey(k):
         ship, route, lab = k
@@ -676,6 +723,9 @@ def pack_plan_rows(model: dict, ref: dict):
             if not T:                            # unit-only shelf (manual edits): keep the line
                 base_rows = [(codes[0] if codes else None, K, 0, None)]
             for code, kq, trays, note in base_rows:
+                if tag_of.get(lab):          # restricted build: say so on every row of the config
+                    note = f"{tag_of[lab]} — {note}" if note else tag_of[lab]
+                    notes["handling_tag_rows"] += 1
                 eaches = trays * upt if trays else (L["units"] // K if K else 0)
                 if code is None:
                     notes["rows_without_aster_code"] += 1
@@ -805,6 +855,7 @@ def build_pack_plan(model: dict, ref: dict):
         "sheet_rows": len(rows), "total_used": grand, "route_config_groups": len(layouts),
         "routes": sorted({r["Route"] for r in rows}), "unrouted_rows": sum(r["Route"] == UNROUTED for r in rows),
         "mix_rows": notes["mix_rows"], "rows_without_aster_code": notes["rows_without_aster_code"],
+        "handling_tag_rows": notes["handling_tag_rows"],
         "units_without_aster_code": sum(r["Total Used"] for r in rows if not r["AsterCode"]),
         "bloomaker_total": sum(r["Total Used"] for r in rows if is_bloom(r)),
         "soil_total": sum(r["Total Used"] for r in rows if is_soil(r)),

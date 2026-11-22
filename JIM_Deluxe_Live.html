@@ -366,8 +366,9 @@ body{background:var(--x-bg);}
   <div class="xpanel">
     <div class="xph"><h2>Stores</h2><span class="sub">Store master, family grades, demand and what this run does with each store. Click a store for detail.</span>
       <span class="act"><span class="xsrc">Sec 4.1, 6, 11 &middot; stores + ipr_store_family</span></span></div>
+    <div id="stMaster"></div>
     <div class="xchips" id="stChips"></div>
-    <div class="xtools"><input class="xinput" id="stQ" type="search" placeholder="Search store #, name, city or merchant" aria-label="Search stores" oninput="X.st.page=0;xRenderSt()"></div>
+    <div class="xtools"><input class="xinput" id="stQ" type="search" placeholder="Search store #, name, city, merchant, cross dock or restriction" aria-label="Search stores" oninput="X.st.page=0;xRenderSt()"></div>
     <div id="stBody"><div class="xempty">Loading stores&hellip;</div></div>
     <div class="xnote">Grades show past performance and service. They set test size and risk tolerance but never override what a SKU actually sells (Sec 11.4). Conversion is the share of the last delivery sold within 13 weeks; below 60% the engine stops, reduces or tests (Sec 11.3).</div>
   </div>
@@ -3919,6 +3920,10 @@ var X_KINDS=[
   ['pushed_min_cart','Pushed: under one full cart','warn','Below the one-full-cart minimum, so the whole order waits a week; need recalculated with extra coverage (leadership, Nov 20).'],
   ['min_cart_service_review','Needs service review','bad','Pushed 4+ due cycles in a row under the cart minimum — an effective service stop that needs a DSM decision.'],
   ['assortment_block','Not in approved assortment','bad','The family is outside this store\'s approved assortment on the store master (Sec 24).'],
+  ['store_rule_block','Store rule: no routine order','bad','The store master says this store gets no routine replenishment (for example Kurt Weiss stores: holiday only, when directed). Nobody can override it here; change the store master.'],
+  ['sku_restriction_block','Store rule: product not allowed','warn','The store master limits what this store may receive (for example only 9cm Littles, Collectors, Rare Collectors, Holiday or Promo). Everything else was left off.'],
+  ['variety_restriction_block','Store rule: only restricted varieties available','warn','The only stock of this product is a variety the store may not receive (for example Hedera), so it was not shipped.'],
+  ['variety_restriction','Store rule: short because of a variety restriction','info','Stock exists, but only in a variety this store may not receive, so the store got less than it needed.'],
   ['capacity_cap','Cut to store capacity','warn','The order exceeded the store\'s cart capacity; lowest-value carts were cut (Sec 1).'],
   ['review_warning','Review warning','warn','The reviewer flagged the order but it ships.'],
   ['response_adjustment','Cadence adjusted from measured response','info','The store\'s 7-28 day shipment response moved its delivery cadence one week (Sec 29, feedback = apply).'],
@@ -4710,7 +4715,7 @@ async function xLoadSt(force){
     var g={};(r[1]||[]).forEach(function(x){g[x.store_id]=x;});
     var o={};(r[2]||[]).forEach(function(x){o[x.store_id]=x;});
     X.st.rows=(r[0]||[]).map(function(s){s._g=g[s.store_id]||{};s._o=o[s.store_id]||null;return s;});X.st.run=X.run;X.st.page=0;
-    xRenderSt();
+    xRenderSt();xLoadStMaster();
   }catch(e){if(body)body.innerHTML='<div class="xbanner bad" style="margin:14px 16px"><span>Could not load stores: '+escH(e.message)+'</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadSt(true)">Try again</button></span></div>';}
 }
 function xStRegion(r){X.st.region=r;X.st.page=0;xRenderSt();}
@@ -4720,17 +4725,18 @@ function xRenderSt(){
   var body=document.getElementById('stBody'),ch=document.getElementById('stChips');if(!body||!X.st.rows)return;
   var regs={};X.st.rows.forEach(function(s){var k=s.region||'No region';regs[k]=(regs[k]||0)+1;});
   if(ch)ch.innerHTML=['all'].concat(Object.keys(regs).sort()).map(function(k){var on=X.st.region===k;return '<button class="xchip'+(on?' on':'')+'" aria-pressed="'+on+'" onclick="xStRegion(\''+escH(k).replace(/'/g,'&#39;')+'\')">'+(k==='all'?'All '+xN(X.st.rows.length):escH(k)+' '+xN(regs[k]))+'</button>';}).join('')+
-    (X.run?'<button class="xchip'+(X.st.region==='run'?' on':'')+'" onclick="xStRegion(\'run\')">In this run</button>':'');
+    (X.run?'<button class="xchip'+(X.st.region==='run'?' on':'')+'" onclick="xStRegion(\'run\')">In this run</button>':'')+
+    '<button class="xchip'+(X.st.region==='handled'?' on':'')+'" aria-pressed="'+(X.st.region==='handled')+'" title="Do not ship, product restrictions and cross-dock stores from the store master" onclick="xStRegion(\'handled\')">Special handling '+xN(X.st.rows.filter(xStHandled).length)+'</button>';
   var q=(document.getElementById('stQ')||{}).value||'';
-  var rows=X.st.rows.filter(function(s){return (X.st.region==='all'||(X.st.region==='run'?!!s._o:(s.region||'No region')===X.st.region))&&xMatch(q,[s.store_id,s.store_name||'',s.city||'',s.state||'',s.merchant||'']);});
+  var rows=X.st.rows.filter(function(s){return (X.st.region==='all'||(X.st.region==='run'?!!s._o:X.st.region==='handled'?xStHandled(s):(s.region||'No region')===X.st.region))&&xMatch(q,[s.store_id,s.store_name||'',s.city||'',s.state||'',s.merchant||'',s.cross_dock||'',s.sku_restriction||'',s.merchandiser||'',s.master_status||'']);});
   if(!rows.length){body.innerHTML='<div class="xempty">Nothing matches.</div>';return;}
   var pages=Math.max(1,Math.ceil(rows.length/X_PAGE));if(X.st.page>=pages)X.st.page=pages-1;if(X.st.page<0)X.st.page=0;
   var pg=rows.slice(X.st.page*X_PAGE,(X.st.page+1)*X_PAGE);X.st.view=rows;
-  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">Region</th><th class="x-hide-sm">Status</th><th>Best family grades</th><th class="r">Demand / wk</th><th class="x-hide-sm">Conversion (13 wk)</th><th>This run</th></tr></thead><tbody>'+
+  body.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Store</th><th class="x-hide-sm">Region</th><th class="x-hide-sm">Status and handling</th><th>Best family grades</th><th class="r">Demand / wk</th><th class="x-hide-sm">Conversion (13 wk)</th><th>This run</th></tr></thead><tbody>'+
     pg.map(function(s,i){var gr=s._g.grades||{},fams=Object.keys(gr).sort(function(a,b){return (X_GR[gr[a]]!=null?X_GR[gr[a]]:9)-(X_GR[gr[b]]!=null?X_GR[gr[b]]:9);}).slice(0,3);
       var cv=s._g.conversion_13wk!=null?Number(s._g.conversion_13wk):null,o=s._o;
       return '<tr class="x-row" tabindex="0" onclick="xStOpen('+(X.st.page*X_PAGE+i)+')"><td><b>'+escH(s.store_id)+'</b> <span class="xwhy">'+escH(sn(s.store_name||''))+(s.city?', '+escH(s.city):'')+(s.state?' '+escH(s.state):'')+'</span></td>'+
-        '<td class="x-hide-sm">'+escH(s.region||'')+'</td><td class="x-hide-sm">'+(s.store_status&&!/^active$/i.test(s.store_status)?'<span class="xtag warn">'+escH(s.store_status)+'</span>':'<span class="xtag ok">Active</span>')+'</td>'+
+        '<td class="x-hide-sm">'+escH(s.region||'')+'</td><td class="x-hide-sm">'+xStTags(s)+'</td>'+
         '<td>'+(fams.length?fams.map(function(f){return '<span class="xgc '+xGcls(gr[f])+'" title="'+escH(f)+'">'+escH(gr[f])+'</span> <span class="xwhy">'+escH(f)+'</span>';}).join('<br>'):'<span class="xwhy">Not graded yet</span>')+'</td>'+
         '<td class="r">'+(s._g.weekly_units!=null?Number(s._g.weekly_units).toFixed(1):'&mdash;')+'</td>'+
         '<td class="x-hide-sm">'+(cv!=null?'<div style="display:flex;gap:6px;align-items:center"><div class="xhbar" style="flex:1"><i style="width:'+Math.min(100,cv*100).toFixed(0)+'%;background:'+(cv<0.6?'var(--x-bad-fg)':'var(--x-chart-1)')+'"></i></div><span class="xnum xsmall">'+Math.round(cv*100)+'%</span></div>':'<span class="xwhy">&mdash;</span>')+'</td>'+
@@ -4747,6 +4753,85 @@ function xRenderSt(){
      filter and page preserved (list state lives in X.st).
    - Permissions: any signed-in user reads; no actions beyond the evidence drawer. */
 function xStOpen(i){var s=(X.st.view||[])[i];if(!s)return;xStProfile(s);}
+/* ## Screen contract: Store master (Stores tab, top panel)
+   - Purpose: show which stores carry special handling from the Home Depot Store List
+     (do not ship, product / variety restrictions, cross dock) and load a new copy of it.
+   - Primary action: upload the workbook -> see exactly what would change -> load it.
+   - Data: /api/store-master/summary | preview | apply. Only the FIRST sheet is read.
+   - States: not set up (migration missing), never loaded, loaded, previewing, error.
+   - Permissions: order writers preview; only a manager or admin loads (server enforced). */
+var X_RULE_SHORT={no_hedera:'No Hedera',littles_collectors_only:'Limited products',holiday_only_directed:'Holiday only, when directed'};
+function xStHandled(s){return !!(s.sku_rule||s.cross_dock||(s.store_status&&!/^active$/i.test(s.store_status)));}
+function xStRule(code){var defs=((X.st.master||{}).rule_definitions)||[],d=null;defs.forEach(function(x){if(x.code===code)d=x;});
+  return {short:X_RULE_SHORT[code]||(d&&d.label)||xHuman(code),effect:(d&&d.effect)||'Store master restriction',block:code==='holiday_only_directed'||!d};}
+function xStTags(s){
+  var out=[],st=s.store_status&&!/^active$/i.test(s.store_status);
+  if(st)out.push('<span class="xtag '+(/^(do_not_ship|paused|inactive|hold)$/.test(s.store_status)?'bad':'warn')+'">'+escH(X_STATUS_LABEL[s.store_status]||xHuman(s.store_status))+'</span>');
+  if(s.sku_rule){var d=xStRule(s.sku_rule);out.push('<span class="xtag '+(d.block?'bad':'warn')+'" title="'+escH(d.effect)+'">'+escH(d.short)+'</span>');}
+  if(s.cross_dock)out.push('<span class="xtag info" title="Ships through this cross dock">X-dock '+escH(s.cross_dock)+'</span>');
+  if(!out.length)out.push('<span class="xtag ok">Active</span>');
+  return out.join(' ');
+}
+async function xLoadStMaster(){
+  try{X.st.master=await api('/api/store-master/summary');X.st.masterErr=null;}catch(e){X.st.master=null;X.st.masterErr=e.message;}
+  xRenderStMaster();
+  if(X.st.rows&&!X.st.cur)xRenderSt();
+}
+function xStMasterPick(){
+  var i=document.createElement('input');i.type='file';i.accept='.xlsx,.xlsm';
+  i.onchange=function(){if(i.files&&i.files[0]){X.st.mFile=i.files[0];X.st.mDesc=false;xStMasterPreview();}};
+  i.click();
+}
+async function xStMasterPreview(){
+  var el=document.getElementById('stMaster');if(!el||!X.st.mFile)return;
+  el.innerHTML='<div class="xbanner info" style="margin:12px 16px 0"><span class="spinner-border spinner-border-sm"></span><span>Reading '+escH(X.st.mFile.name)+'&hellip;</span></div>';
+  try{var fd=new FormData();fd.append('file',X.st.mFile);fd.append('update_descriptive',X.st.mDesc?'true':'false');
+    X.st.mPrev=await apiUpload('/api/store-master/preview',fd);}
+  catch(e){X.st.mPrev=null;X.st.mFile=null;toast('Could not read the store master: '+e.message,'danger');}
+  xRenderStMaster();
+}
+function xStMasterCancel(){X.st.mPrev=null;X.st.mFile=null;xRenderStMaster();}
+function xStMasterDesc(on){X.st.mDesc=!!on;xStMasterPreview();}
+async function xStMasterApply(){
+  if(!X.st.mFile||X.st.mBusy)return;
+  if(!confirm('Load this store master? Store handling rules change for the next engine run. Every change is logged.'))return;
+  X.st.mBusy=true;xRenderStMaster();
+  try{var fd=new FormData();fd.append('file',X.st.mFile);fd.append('update_descriptive',X.st.mDesc?'true':'false');
+    var r=await apiUpload('/api/store-master/apply',fd);
+    toast('Store master loaded: '+xN(r.stores_changed)+' stores updated','success');
+    X.st.mPrev=null;X.st.mFile=null;X.st.mBusy=false;xLoadSt(true);
+  }catch(e){X.st.mBusy=false;toast('Store master was not loaded: '+e.message,'danger');xRenderStMaster();}
+}
+function xRenderStMaster(){
+  var el=document.getElementById('stMaster');if(!el)return;
+  var m=X.st.master,p=X.st.mPrev,wrap=function(h){return '<div style="padding:12px 16px 0">'+h+'</div>';};
+  var up=canRole('order_writer')?'<button class="xbtn xbtn-s xbtn-sm" onclick="xStMasterPick()"><i class="bi bi-upload"></i> Upload store master</button>':'';
+  if(p){
+    var q=p.qa||{},a=q.after||{},b=q.before||{},cnt=function(o){return Object.keys(o||{}).map(function(k){return escH(X_RULE_SHORT[k]||k)+' '+xN(o[k]);}).join(' &middot; ')||'none';};
+    var h='<div class="xbanner '+((p.problems||[]).length?'bad':'info')+'" style="align-items:flex-start;flex-direction:column;margin-bottom:0">'+
+      '<div><b>Preview: '+escH(p.file||'store master')+'</b> &middot; sheet &ldquo;'+escH(p.sheet||'')+'&rdquo; (first sheet only; '+xN((p.sheets_ignored||[]).length)+' other tabs ignored). Nothing has been saved yet.</div>'+
+      '<div>'+xN(q.rows_accepted)+' of '+xN(q.input_rows)+' rows read &middot; '+xN(q.matched)+' matched to stores &middot; '+xN(q.rows_rejected)+' rejected &middot; '+xN(q.stores_changed)+' stores would change</div>'+
+      '<div>Do not ship: '+xN(b.do_not_ship||0)+' &rarr; <b>'+xN(a.do_not_ship||0)+'</b> &middot; Restrictions: '+cnt(b.by_rule)+' &rarr; <b>'+cnt(a.by_rule)+'</b> &middot; Cross dock: '+cnt(b.by_cross_dock)+' &rarr; <b>'+cnt(a.by_cross_dock)+'</b></div>';
+    if((p.status_changes||[]).length)h+='<div><b>Status changes:</b> '+p.status_changes.slice(0,40).map(function(x){return escH(x.store_id)+' '+escH(x.store||'')+' ('+escH(xHuman(x.from))+' &rarr; '+escH(xHuman(x.to))+')';}).join('; ')+(p.status_changes.length>40?' &hellip;':'')+'</div>';
+    if((p.problems||[]).length)h+='<div><b>'+xN(p.problems.length)+' problem(s) &mdash; fix the sheet before it can be loaded:</b><br>'+p.problems.slice(0,12).map(escH).join('<br>')+(p.problems.length>12?'<br>&hellip;':'')+'</div>';
+    if((p.not_in_sheet||[]).length)h+='<div>Stores in the app but not on the sheet (left untouched): '+p.not_in_sheet.slice(0,20).map(function(x){return escH(x.store_id);}).join(', ')+'</div>';
+    if((p.not_in_app||[]).length)h+='<div>Stores on the sheet but not in the app (skipped; add them first): '+p.not_in_app.slice(0,20).map(function(x){return escH(x.store_id);}).join(', ')+'</div>';
+    if(p.conflicts_total||X.st.mDesc)h+='<div><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" '+(X.st.mDesc?'checked':'')+' onchange="xStMasterDesc(this.checked)"> Also take the sheet&rsquo;s merchant, region and city where the app has a different value'+(p.conflicts_total?' ('+xN(p.conflicts_total)+' differences, e.g. '+(p.conflicts_summary||[]).slice(0,3).map(function(c){return escH(c.field)+': '+escH(c.app)+' &rarr; '+escH(c.sheet)+' &times;'+xN(c.stores);}).join('; ')+')':'')+'</label></div>';
+    if(!p.migration_applied)h+='<div><b>The database is not set up for the store master yet.</b> Ask the admin to run the store-master migration first.</div>';
+    h+='<div class="act" style="margin-left:0">'+
+      (p.can_apply?(canRole('manager')?'<button class="xbtn xbtn-p xbtn-sm" '+(X.st.mBusy?'disabled':'')+' onclick="xStMasterApply()">'+(X.st.mBusy?'Loading&hellip;':'Load this store master')+'</button>':'<span>Only a manager can load it. Send them this file.</span>'):'')+
+      '<button class="xbtn xbtn-s xbtn-sm" onclick="xStMasterCancel()">Cancel</button></div></div>';
+    el.innerHTML=wrap(h);return;
+  }
+  if(!m){el.innerHTML=X.st.masterErr?wrap('<div class="xbanner bad" style="margin-bottom:0"><span>Store master summary did not load: '+escH(X.st.masterErr)+'</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadStMaster()">Try again</button></span></div>'):'';return;}
+  if(!m.migration_applied){el.innerHTML=wrap('<div class="xbanner warn" style="margin-bottom:0"><i class="bi bi-exclamation-triangle"></i><span><b>Store handling rules are not active.</b> The store-master database migration has not been run, so do-not-ship, product restrictions and cross docks from the Home Depot Store List are not being applied to orders.</span><span class="act">'+up+'</span></div>');return;}
+  if(!m.master_loaded){el.innerHTML=wrap('<div class="xbanner warn" style="margin-bottom:0"><i class="bi bi-exclamation-triangle"></i><span><b>No store master loaded yet.</b> Upload the Home Depot Store List so do-not-ship stores, product restrictions and cross docks are applied to orders.</span><span class="act">'+up+'</span></div>');return;}
+  var L=m.last_load||{},tags=[];
+  if(m.stores_blocked)tags.push('<span class="xtag bad">Blocked from orders '+xN(m.stores_blocked)+'</span>');
+  (m.by_rule||[]).forEach(function(r){tags.push('<span class="xtag '+(r.code==='holiday_only_directed'?'bad':'warn')+'" title="'+escH(r.effect)+'">'+escH(X_RULE_SHORT[r.code]||r.label)+' '+xN(r.stores)+'</span>');});
+  (m.by_cross_dock||[]).forEach(function(c){tags.push('<span class="xtag info">X-dock '+escH(c.cross_dock)+' '+xN(c.stores)+'</span>');});
+  el.innerHTML=wrap('<div class="xbanner info" style="margin-bottom:0"><span><b>Store master</b> '+escH(L.source_file||'')+' &middot; loaded '+(L.loaded_at?xDate(L.loaded_at):'')+' by '+escH(L.loaded_by||'')+'</span><span style="display:flex;gap:6px;flex-wrap:wrap">'+tags.join('')+'</span><span class="act">'+up+'</span></div>');
+}
 function xStBack(){X.st.cur=null;xRenderSt();window.scrollTo(0,0);}
 var X_STATUS_LABEL={do_not_ship:'Do not ship',paused:'Paused',inactive:'Inactive',hold:'On hold',promotion:'Promotion'};
 function xStProfile(s){
@@ -4760,7 +4845,7 @@ function xStProfile(s){
     '<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;padding:14px 16px 4px">'+
       '<div style="font-size:22px;font-weight:700">'+escH(s.store_id)+' &middot; '+escH(sn(s.store_name||''))+'</div>'+
       '<div class="xmuted">'+escH([s.city,s.state].filter(Boolean).join(', '))+' &middot; '+escH(s.merchant||'no merchant')+' &middot; '+escH([s.region,s.division].filter(Boolean).join(' / ')||'no region')+'</div>'+
-      (st?'<span class="xtag warn">'+escH(X_STATUS_LABEL[s.store_status]||xHuman(s.store_status))+'</span>':'<span class="xtag ok">Active</span>')+
+      xStTags(s)+
       (o?'<span class="xtag info">This run: '+xN(o.cart_count)+' carts &middot; '+xN(o.total_units)+' u</span>'
         :'<span class="xtag">'+(X.run?'Not shipping this run':'No run loaded')+'</span>')+
       '<span style="margin-left:auto;display:flex;gap:8px">'+

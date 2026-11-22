@@ -38,6 +38,12 @@ def list_stores(
         if fenceline is not None:
             where.append("COALESCE(fenceline, false) = %s"); params.append(fenceline)
 
+        # store-master handling columns (present once store_master_2026_11_22 is applied)
+        cur.execute("""SELECT column_name::text AS c FROM information_schema.columns
+                       WHERE table_schema = 'public' AND table_name = 'stores' AND column_name IN
+                             ('master_status', 'sku_rule', 'sku_restriction', 'cross_dock',
+                              'merchandiser', 'street_address', 'postal_code')""")
+        extra = "".join(", " + r["c"] for r in cur.fetchall())
         sql = f"""
             SELECT store_id, store_name, city, state, region, division, merchant,
                    volume_code, volume_code_updated_at, volume_code_updated_by,
@@ -46,7 +52,7 @@ def list_stores(
                    merch_partner, store_status,
                    COALESCE(perm_racks, 0) AS perm_racks, COALESCE(fenceline, false) AS fenceline,
                    COALESCE(climb_itt_bundle, false) AS climb_itt_bundle,
-                   tier_terrarium, tier_climbitt
+                   tier_terrarium, tier_climbitt{extra}
             FROM stores
             WHERE {' AND '.join(where)}
             ORDER BY dynamic_velocity_score DESC NULLS LAST

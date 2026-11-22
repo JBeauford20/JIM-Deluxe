@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from db import get_db, cursor
 from routers.auth import get_current_user, require_role
+from services.store_master import store_rules
 
 router = APIRouter()
 
@@ -87,6 +88,22 @@ def _classify(cur, pid, regions, sku_ids, start_date):
               AND division = ANY(%s)
         """, (EXCLUDED_STATUS, regions))
     scope = {r["store_id"]: (r["division"] or "—") for r in cur.fetchall()}
+    # Store master: "Only Holiday when directed" stores (and stores whose rule is undefined)
+    # are in a program's scope only when someone explicitly added them to THIS program.
+    cur.execute("""SELECT 1 AS ok FROM information_schema.columns
+                   WHERE table_name = 'stores' AND column_name = 'sku_rule'""")
+    if cur.fetchone():
+        cur.execute("SELECT value FROM ipr_settings WHERE key = 'store_sku_rules'")
+        _row = cur.fetchone()
+        _rules = store_rules.merged_rules(_row["value"] if _row else None)
+        cur.execute("SELECT store_id, sku_rule FROM stores WHERE sku_rule IS NOT NULL AND store_id = ANY(%s)",
+                    (list(scope),))
+        _ruled = {r["store_id"]: store_rules.rule_for(r, _rules) for r in cur.fetchall()}
+        cur.execute("SELECT store_id FROM promotion_store_shipments WHERE promotion_id = %s", (pid,))
+        _directed = {r["store_id"] for r in cur.fetchall()}
+        for _sid, _r in _ruled.items():
+            if not store_rules.promo_eligible(_r, directed=_sid in _directed):
+                scope.pop(_sid, None)
     scope_ids = list(scope)
     scope_set = set(scope_ids)
     since = start_date or date(2000, 1, 1)

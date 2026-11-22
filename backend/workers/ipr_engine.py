@@ -30,6 +30,7 @@ from datetime import date, timedelta
 import psycopg2
 import psycopg2.extras
 
+import store_rules
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
 from recommendation_engine import (CART_SHELVES, CART_CEILING_IN, MIN_SHELF_CLEAR_IN,
@@ -69,6 +70,7 @@ SEASONAL_CADENCE_WEEKS = {
 OFF_SEASON_MONTHS = {9, 10, 11, 12, 1, 2}
 DEFAULT_CADENCE_BUFFER_WEEKS = 1
 SETTINGS_OVERRIDE = {}           # preview-only what-if overrides of ipr_settings (scenario analysis)
+STORE_OVERRIDES = {}             # preview-only {store_id: {col: value}} (e.g. a store master not yet loaded)
 # Weekly DTS feeds repeat delivery rows from other weeks (25.5K duplicate units found 2026-11-20;
 # the loader now skips them, but the table has no unique key). Read deliveries through this
 # drop-in dedupe: first feed to report a (store, sku, delivery_date) wins. Rows up to 2026-10-01
@@ -312,19 +314,36 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         log(f"Duplicate-run control: {len(prior_runs)} earlier run(s) for {shipping_week} — "
             f"{sum(same_week_prior.values()):,}u counted as inbound")
 
-    cur.execute("""SELECT al.id, al.sku_id, al.units_available, al.code_level, al.hard_good_type
+    cur.execute("""SELECT al.id, al.sku_id, al.units_available, al.code_level, al.hard_good_type,
+                          al.plant_id
                    FROM availability_lines al WHERE al.batch_id = %s ORDER BY al.sku_id, al.id""",
                 (batch_id,))
     avail_rows = cur.fetchall()
     if not avail_rows:
         raise ValueError("Incomplete Data: availability batch has no lines")
+    # Plant genus per availability line (store master variety restrictions, e.g. "No Hedera").
+    # HD SKUs are assortments; the variety — and so the genus — lives on the Aster plant code.
+    _pids = sorted({str(r["plant_id"]) for r in avail_rows if r["plant_id"]})
+    plant_genus, plant_name = {}, {}
+    if _pids:
+        cur.execute("""SELECT aster_code::text AS c, parsed_genus, product_name
+                       FROM variety_parsed_reference WHERE aster_code::text = ANY(%s)""", (_pids,))
+        for r in cur.fetchall():
+            plant_genus[r["c"]] = (r["parsed_genus"] or "").strip().lower()
+            plant_name[r["c"]] = r["product_name"] or ""
+        cur.execute("""SELECT aster_code::text AS c, aster_name FROM aster_product_mapping
+                       WHERE aster_code::text = ANY(%s)""", (_pids,))
+        for r in cur.fetchall():
+            plant_name.setdefault(r["c"], r["aster_name"] or "")
     supply = defaultdict(int)
     avail_meta, aster_lines = {}, defaultdict(list)
+    line_genus = {}
     for r in avail_rows:
         supply[r["sku_id"]] += int(r["units_available"] or 0)
         avail_meta.setdefault(r["sku_id"], {"code_level": r["code_level"],
                                             "hard_good_type": r["hard_good_type"]})
         aster_lines[r["sku_id"]].append([str(r["id"]), int(r["units_available"] or 0)])
+        line_genus[str(r["id"])] = plant_genus.get(str(r["plant_id"] or ""), "")
     for s in aster_lines:
         aster_lines[s].sort(key=lambda x: (-x[1], x[0]))
     total_supply = sum(supply.values())
@@ -450,18 +469,76 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     cur.execute("""SELECT column_name::text AS c FROM information_schema.columns
                    WHERE table_name = 'stores' AND column_name IN
                          ('capacity_carts', 'approved_assortment', 'receiving_restrictions',
-                          'dsm', 'dsm_email')""")
+                          'dsm', 'dsm_email', 'sku_rule', 'sku_restriction', 'cross_dock',
+                          'master_status')""")
     _hb_cols = sorted({r["c"] for r in cur.fetchall()})
     cur.execute(f"""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
                            region, merchant, state, volume_code{''.join(', ' + c for c in _hb_cols)}
                     FROM stores ORDER BY store_id""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
+    if preview and STORE_OVERRIDES:            # what-if store attributes (preview only, never written)
+        for _sid, _patch in STORE_OVERRIDES.items():
+            if _sid in stores:
+                stores[_sid].update(_patch)
+        _hb_cols = sorted(set(_hb_cols) | {k for _p in STORE_OVERRIDES.values() for k in _p})
     hard_block_data = {
         "columns_present": _hb_cols,
         "capacity_carts_set": sum(1 for s in stores.values() if s.get("capacity_carts")),
         "approved_assortment_set": sum(1 for s in stores.values() if s.get("approved_assortment")),
         "receiving_restrictions_set": sum(1 for s in stores.values() if s.get("receiving_restrictions")),
         "note": "§1/§4.1 hard blocks are inert for stores where the field is NULL",
+    }
+
+    # STORE MASTER HANDLING RULES (Home Depot Store List, first sheet; workers/store_rules.py).
+    # Hard blocks the agent may never override (§1): do-not-ship is stores.store_status; the
+    # SKU / variety restrictions are stores.sku_rule. A rule code with no definition blocks the
+    # store's routine replenishment (fail closed) — a restriction is never silently ignored.
+    rules = store_rules.merged_rules(S.get("store_sku_rules"))
+    store_rule = {sid: store_rules.rule_for(st_, rules) for sid, st_ in stores.items()
+                  if (st_.get("sku_rule") or "").strip()}
+    store_deny = {sid: store_rules.denied_genera(r) for sid, r in store_rule.items()
+                  if store_rules.denied_genera(r)}
+    _sensitive = set().union(*store_deny.values()) if store_deny else set()
+    # A line whose plant code has no variety reference cannot be genus-checked by lookup; fall
+    # back to the Aster product name so a denied genus named in it is still caught.
+    for r in avail_rows:
+        lid = str(r["id"])
+        if not line_genus.get(lid) and _sensitive:
+            nm = (plant_name.get(str(r["plant_id"] or ""), "") or "").lower()
+            hit = next((g for g in sorted(_sensitive) if g and g in nm.split()), None)
+            if hit:
+                line_genus[lid] = hit
+    pools = store_rules.VarietyPools(_sensitive)
+    for r in avail_rows:
+        pools.add(r["sku_id"], line_genus.get(str(r["id"]), ""), int(r["units_available"] or 0))
+    if what_if_unlimited:
+        for sku_id in supply:
+            if supply[sku_id] >= 10 ** 7:
+                pools.set_unlimited(sku_id, supply[sku_id])
+    NO_DENY = frozenset()
+    _unref = [r for r in avail_rows if r["plant_id"] and str(r["plant_id"]) not in plant_genus
+              and str(r["plant_id"]) not in plant_name]
+    if _sensitive and _unref:
+        decide("validation",
+               f"{len(_unref)} availability line(s) have a plant code with no variety reference — "
+               f"they cannot be checked against the variety restriction(s) "
+               f"({', '.join(sorted(g.title() for g in _sensitive))}) and are treated as permitted",
+               severity="warning", plant_ids=sorted({str(r['plant_id']) for r in _unref})[:40],
+               units=sum(int(r["units_available"] or 0) for r in _unref))
+    _unknown_rules = sorted({r["code"] for r in store_rule.values() if r.get("unknown")})
+    if _unknown_rules:
+        decide("validation",
+               f"Store rule code(s) with no definition: {', '.join(_unknown_rules)} — those stores "
+               f"are blocked from routine replenishment until the rule is defined",
+               severity="block", rules=_unknown_rules,
+               stores=sum(1 for r in store_rule.values() if r.get("unknown")))
+    hard_block_data["store_master"] = {
+        "columns_present": "sku_rule" in _hb_cols,
+        "stores_with_rule": len(store_rule),
+        "by_rule": dict(Counter(r["code"] for r in store_rule.values())),
+        "cross_dock_stores": sum(1 for s in stores.values() if s.get("cross_dock")),
+        "denied_genus_units_in_batch": {g: sum(pools.total[k].get(g, 0) for k in pools.total)
+                                        for g in sorted(_sensitive)},
     }
 
     def _scn_store(a, store_id):
@@ -1112,7 +1189,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # routine approvals. Below the 60% floor the family is stopped this week; between 60% and
     # the grade threshold it ships a grade-reduced quantity (never an identical shipment).
     ship, held, held_kind, not_due_lines = {}, {}, {}, {}
-    blocked_units = stopped_units = reduced_units = 0.0
+    blocked_units = stopped_units = reduced_units = rule_blocked_units = 0.0
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
         if l["trays"] <= 0:
@@ -1128,6 +1205,27 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             held[key], held_kind[key] = "store inactive / do-not-ship", "block"
             blocked_units += l["trays"] * l["upt"]
             continue
+        # Store master handling rule (hard block): no routine replenishment at all, or only
+        # the listed products. Variety (genus) restrictions are enforced at allocation.
+        _rule = store_rule.get(l["store_id"])
+        if _rule:
+            _ok, _why = store_rules.sku_allowed(_rule, sku_info.get(l["sku_id"]))
+            if not _ok:
+                held[key] = _why
+                held_kind[key] = ("store_rule_block" if store_rules.routine_blocked(_rule)
+                                  else "sku_restriction_block")
+                blocked_units += l["trays"] * l["upt"]
+                rule_blocked_units += l["trays"] * l["upt"]
+                continue
+            _deny = store_deny.get(l["store_id"])
+            if _deny and pools.supply(l["sku_id"], _deny) <= 0 < pools.supply(l["sku_id"]):
+                held[key] = (f"every available variety of this SKU is "
+                             f"{'/'.join(sorted(g.title() for g in _deny))} — not shipped "
+                             f"({_rule.get('label')})")
+                held_kind[key] = "variety_restriction_block"
+                blocked_units += l["trays"] * l["upt"]
+                rule_blocked_units += l["trays"] * l["upt"]
+                continue
         # Approved assortment (§1 hard block, §4.1, §24): when the store master lists approved
         # families, a family outside the list never ships. NULL/empty = no restriction on file.
         asst = st.get("approved_assortment")
@@ -1193,11 +1291,37 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                next_due=nxt, arrival=arrival, lines=len(ls),
                need_units=sum(l["trays"] * l["upt"] for l in ls),
                shipping_efficiency=shipping_efficiency(store_eff_s.get(st_id, 0), store_eff_d.get(st_id, 0)))
+    RULE_KINDS = ("store_rule_block", "sku_restriction_block", "variety_restriction_block")
+    _rule_agg = defaultdict(lambda: {"lines": 0, "units": 0, "families": Counter(), "why": None})
     for key, why in held.items():
         l = lines[key]
+        if held_kind[key] in RULE_KINDS:            # one decision per store, not per line
+            a_ = _rule_agg[(held_kind[key], l["store_id"])]
+            a_["lines"] += 1
+            a_["units"] += l["trays"] * l["upt"]
+            a_["families"][l["family"]] += l["trays"] * l["upt"]
+            a_["why"] = a_["why"] or why
+            continue
         decide(held_kind[key], why, store_id=l["store_id"], sku_id=l["sku_id"],
                family=l["family"], grade=l.get("grade"), conversion=l.get("conversion"),
                proposed_trays=l["trays"], proposed_units=l["trays"] * l["upt"])
+    for (kind_, st_id), a_ in sorted(_rule_agg.items()):
+        _r = store_rule.get(st_id) or {}
+        _st = stores.get(st_id) or {}
+        if kind_ == "store_rule_block":
+            msg = (f"No routine order: store master rule '{_r.get('label')}'"
+                   + (f" ({_st.get('master_status')})" if _st.get("master_status") else "")
+                   + f" — {a_['units']:,}u of calculated need across {a_['lines']} line(s) not shipped")
+        elif kind_ == "sku_restriction_block":
+            msg = (f"{a_['lines']} line(s) / {a_['units']:,}u outside the store's allowed products not "
+                   f"shipped — store master rule '{_r.get('label')}'")
+        else:
+            msg = (f"{a_['lines']} line(s) / {a_['units']:,}u not shipped: only restricted varieties "
+                   f"are available — store master rule '{_r.get('label')}'")
+        decide(kind_, msg, store_id=st_id, severity="info", rule=_r.get("code"),
+               rule_label=_r.get("label"), master_status=_st.get("master_status"),
+               lines=a_["lines"], proposed_units=a_["units"],
+               by_family=dict(a_["families"].most_common()))
     n_block = sum(1 for k in held_kind.values() if k == "block")
     n_stop = sum(1 for k in held_kind.values() if k == "stopped_13wk")
     n_reduced = sum(1 for l in ship.values() if l.get("reduced_13wk") is not None)
@@ -1237,19 +1361,27 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     unfilled = defaultdict(float)        # sku -> units of need not covered by supply
     sku_left = {}                        # sku -> supply left after priority allocation
     alloc_units_total = 0
+    variety_short = defaultdict(lambda: {"units": 0, "skus": set()})   # store -> restricted shortfall
     for sku_id, lst in by_sku.items():
-        remaining = supply.get(sku_id, 0)
         want = sum(l["trays"] * l["upt"] for l in lst)
         lst.sort(key=lambda x: (-x["priority"], x["store_id"]))
         for l in lst:
-            can = min(l["trays"], remaining // l["upt"])
+            # a store with a variety restriction draws only from the varieties it may receive
+            deny = store_deny.get(l["store_id"], NO_DENY)
+            can = min(l["trays"], pools.left(sku_id, deny) // l["upt"])
             l["alloc_trays"] = int(can)
             l["alloc_units"] = int(can) * l["upt"]
-            remaining -= l["alloc_units"]
+            pools.take(sku_id, l["alloc_units"], deny)
             if can < l["trays"]:
                 short = (l["trays"] - can) * l["upt"]
                 unfilled[sku_id] += short
                 l["short_units"] = short
+                if deny and pools.left(sku_id) >= l["upt"]:
+                    # stock exists, but only in a variety this store may not receive
+                    variety_short[l["store_id"]]["units"] += min(
+                        short, (pools.left(sku_id) // l["upt"]) * l["upt"])
+                    variety_short[l["store_id"]]["skus"].add(sku_id)
+        remaining = pools.left(sku_id)
         alloc_units_total += want - unfilled[sku_id]
         if unfilled[sku_id]:
             decide("allocation_shortfall",
@@ -1279,14 +1411,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         fam_need = sum(l["trays"] * l["upt"] for l in fl)
         fam_alloc = sum(l["alloc_units"] for l in fl)
         short = sorted((l for l in fl if l.get("short_units")), key=lambda x: (-x["short_units"], x["sku_id"]))
+        gdeny = store_deny.get(fk[0], NO_DENY)       # substitutes obey the variety restriction too
         cands = sorted((l for l in fl if not l.get("short_units") and not l.get("reactivation")
-                        and l["conf"] != "UNUSABLE" and l["need"] > 0 and sku_left.get(l["sku_id"], 0) > 0),
+                        and l["conf"] != "UNUSABLE" and l["need"] > 0
+                        and pools.left(l["sku_id"], gdeny) > 0),
                        key=lambda x: (-x["fc"], x["sku_id"]))
         for c in cands:
             if fam_need - fam_alloc < c["upt"]:
                 continue
             add = min(c["trays"] - c.get("gap_fill_trays", 0),           # selling-window guard
-                      sku_left[c["sku_id"]] // c["upt"],
+                      pools.left(c["sku_id"], gdeny) // c["upt"],
                       (fam_need - fam_alloc) // c["upt"])
             if add <= 0:
                 continue
@@ -1294,7 +1428,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             c["alloc_trays"] += add
             c["alloc_units"] += u
             c["gap_fill_trays"] = c.get("gap_fill_trays", 0) + add
-            sku_left[c["sku_id"]] -= u
+            pools.take(c["sku_id"], u, gdeny)
+            sku_left[c["sku_id"]] = pools.left(c["sku_id"])
             fam_alloc += u
             gap_fill_units += u
             gap_fill_trays += add
@@ -1312,6 +1447,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if gaps:
         log(f"Gap fill: {gap_fills:,} fills · {gap_fill_trays:,} trays · {gap_fill_units:,}u across "
             f"{len(gaps):,} short store x families")
+
+    for st_id, v in sorted(variety_short.items()):
+        _r = store_rule.get(st_id) or {}
+        decide("variety_restriction", f"{v['units']:,}u short on {len(v['skus'])} SKU(s): stock is "
+                                      f"available only in a variety this store may not receive "
+                                      f"(store master rule '{_r.get('label')}')",
+               store_id=st_id, severity="info", rule=_r.get("code"), units=v["units"],
+               skus=sorted(v["skus"]))
 
     # Scenario audit trail: one decision per directive — what was asked, what the pace
     # allowed, what was trimmed. The independent post-run audit reads exactly these.
@@ -1430,6 +1573,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                         "delivered_cost": cart_cost,
                         "freight_pct": None if freight_pct is None else round(freight_pct, 4),
                         "low_value": low_value})
+        # A cart for a variety-restricted store that carries a SKU whose batch supply includes
+        # a denied variety gets a handling tag: it becomes its own cart config, so ops never
+        # builds it off the same sheet as an unrestricted cart with the same SKU mix.
+        _deny = store_deny.get(store_id)
+        if _deny:
+            _tag = (store_rule[store_id].get("tag") or store_rule[store_id].get("label") or "RESTRICTED")
+            for c in out:
+                if any(pools.denied_supply(x[1], _deny) > 0 for x in c["contents"]):
+                    c["handling_tag"] = _tag
         grade_framework = {"AA": 3, "A": 3, "B": 2, "C+": 2, "C": 1, "C-": 1, "D": 1}
         top_grade = min((l["grade"] for l in olines), key=GRADE_ORDER.index)
         if len(out) > grade_framework[top_grade]:
@@ -1795,6 +1947,24 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         },
         "gap_fill": {"fills": gap_fills, "trays": gap_fill_trays, "units": gap_fill_units,
                      "short_store_families": len(gaps)},
+        "store_rules": {
+            "source": "Home Depot store master (first sheet) — stores.sku_rule / store_status / cross_dock",
+            "stores_with_rule": len(store_rule),
+            "by_rule": {code: {"label": (rules.get(code) or {}).get("label", code), "stores": n}
+                        for code, n in sorted(Counter(r["code"] for r in store_rule.values()).items())},
+            "stores_do_not_ship": sum(1 for s_ in stores.values()
+                                      if (s_.get("store_status") or "active") == "do_not_ship"),
+            "stores_no_routine_order": len({k[0] for k, v in held_kind.items() if v == "store_rule_block"}),
+            "stores_products_limited": len({k[0] for k, v in held_kind.items() if v == "sku_restriction_block"}),
+            "units_not_shipped_by_rule": int(rule_blocked_units),
+            "variety_restricted_stores_shipping": sum(1 for s_ in orders if s_ in store_deny),
+            "variety_short_units": int(sum(v["units"] for v in variety_short.values())),
+            "carts_with_handling_tag": sum(1 for c in all_carts if c.get("handling_tag")),
+            "cross_dock_stores_shipping": dict(Counter(
+                (stores.get(s_) or {}).get("cross_dock") for s_ in orders
+                if (stores.get(s_) or {}).get("cross_dock"))),
+            "denied_genus_units_in_batch": hard_block_data["store_master"]["denied_genus_units_in_batch"],
+        },
         "cart_economics": {
             "carts": len(all_carts),
             "wholesale_value": round(tot_wh, 2),
@@ -1854,6 +2024,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "lines_shipped": sum(len(o["lines"]) for o in orders.values()),
             "lines_blocked": n_block,
             "lines_assortment_blocked": sum(1 for k in held_kind.values() if k == "assortment_block"),
+            "lines_store_rule_blocked": sum(1 for k in held_kind.values() if k in RULE_KINDS),
+            "stores_store_rule_blocked": len({k[0] for k, v in held_kind.items() if v == "store_rule_block"}),
             "lines_stopped_13wk": n_stop,
             "lines_reduced_13wk": n_reduced,
             "lines_review_held": 0,                 # no routine holds in v2 (§1, §24)
@@ -1936,16 +2108,20 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     iso = shipping_week.isocalendar()
     order_rows, cart_rows, shelf_rows, line_rows, ledger_pending = [], [], [], [], []
     order_ids = {}
+    # Availability-line (Aster variety) assignment, per variety-restriction group: stores that
+    # may not receive a genus draw only from the lines they may receive; unrestricted stores
+    # use up the restricted varieties first. line_remaining[(deny, line)] is that group's share.
     line_remaining, sku_lines_order = {}, {}
-    sku_committed = defaultdict(int)
-    for o2 in orders.values():
+    sku_committed = defaultdict(lambda: defaultdict(int))       # sku -> deny set -> units
+    for st_id2, o2 in orders.items():
         for l in o2["lines"]:
-            sku_committed[l["sku_id"]] += l["alloc_units"]
-    for sku_id, tot in sku_committed.items():
-        alloc = _distribute_units_across_lines(tot, aster_lines.get(sku_id, []))
-        sku_lines_order[sku_id] = [lid for lid, _q in alloc]
-        for lid, q in alloc:
-            line_remaining[lid] = line_remaining.get(lid, 0) + q
+            sku_committed[l["sku_id"]][store_deny.get(st_id2, NO_DENY)] += l["alloc_units"]
+    for sku_id, by_group in sku_committed.items():
+        _lines = [[lid, av, line_genus.get(lid, "")] for lid, av in aster_lines.get(sku_id, [])]
+        for deny, got in store_rules.assign_lines(by_group, _lines, _distribute_units_across_lines).items():
+            sku_lines_order[(sku_id, deny)] = [lid for lid, _av in aster_lines.get(sku_id, []) if got.get(lid)]
+            for lid, q in got.items():
+                line_remaining[(deny, lid)] = line_remaining.get((deny, lid), 0) + q
 
     # exact-signature config codes (no cap, no consolidation — every code is buildable blind)
     sig_count = defaultdict(int)
@@ -1953,12 +2129,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     for store_id, o2 in orders.items():
         for c in o2["carts"]:
             sig = tuple(sorted((p, sk, tr, kt) for (p, sk, tr, u, kt, _pid) in c["contents"]))
+            if c.get("handling_tag"):               # restricted build = its own config
+                sig = sig + (("~tag", c["handling_tag"]),)
             cart_sig[(store_id, c["cart_number"])] = sig
             sig_count[sig] += 1
-    sig_code = {s: f"CC{i + 1}" for i, s in enumerate(sorted(sig_count, key=lambda s: (-sig_count[s], s)))}
+    sig_code = {s: f"CC{i + 1}" for i, s in enumerate(sorted(sig_count, key=lambda s: (-sig_count[s], str(s))))}
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'order_carts' AND column_name = 'handling_tag'""")
+    _has_tag_col = bool(cur.fetchone())
+    cart_tag_rows = []
 
     cart_seq = 0
     template = {}
+    unassigned_restricted = defaultdict(int)     # variety-restricted units left without a line
     for store_id in sorted(orders):
         o2 = orders[store_id]
         oid = str(uuid.uuid4())
@@ -1981,6 +2164,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             cart_rows.append((cid, oid, store_id, c["cart_number"], "cc", c["shelves_used"], CART_SHELVES,
                               c["total_units"], c["is_full"], False, None, CART_SHELVES,
                               f"WK{iso[0]}{iso[1]:02d}-C{cart_seq:04d}", code, True))
+            if c.get("handling_tag"):
+                cart_tag_rows.append((c["handling_tag"], cid))
+            _deny = store_deny.get(store_id, NO_DENY)
             t = template.setdefault(code, {"cart_count": 0, "stores": set(), "units": 0, "shelves": None})
             t["cart_count"] += 1
             t["stores"].add(store_id)
@@ -1996,20 +2182,23 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             t.setdefault("cart_ids", []).append(cid)
             for (pos, sk, tr, u, kt, pid) in c["contents"]:
                 need_u, trays_left, segs = u, tr, []
-                for lid in sku_lines_order.get(sk, []):
+                for lid in sku_lines_order.get((sk, _deny), []):
                     if need_u <= 0:
                         break
-                    av = line_remaining.get(lid, 0)
+                    av = line_remaining.get((_deny, lid), 0)
                     if av <= 0:
                         continue
                     take = min(need_u, av)
                     st = trays_left if take == need_u else min(trays_left, max(1, round(tr * take / u)))
                     segs.append((lid, take, st))
-                    line_remaining[lid] = av - take
+                    line_remaining[(_deny, lid)] = av - take
                     need_u -= take
                     trays_left -= st
                 if need_u > 0 or not segs:
-                    segs.append((None, need_u if segs else u, max(0, trays_left)))
+                    _short = need_u if segs else u
+                    segs.append((None, _short, max(0, trays_left)))
+                    if _deny and _short > 0:
+                        unassigned_restricted[store_id] += _short
                 for (lid, su, st) in segs:
                     if su <= 0:
                         continue
@@ -2034,6 +2223,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             cart_key, config_code, is_template_exact)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """, cart_rows, page_size=500)
+    if _has_tag_col and cart_tag_rows:
+        psycopg2.extras.execute_batch(cur, "UPDATE order_carts SET handling_tag = %s WHERE id = %s",
+                                      cart_tag_rows, page_size=500)
+    elif cart_tag_rows:
+        decide("validation", f"{len(cart_tag_rows)} cart(s) carry a store handling tag but "
+                             f"order_carts.handling_tag does not exist — apply the store_master "
+                             f"migration so restricted carts get their own cart config", severity="block")
+    for st_id2, u2 in sorted(unassigned_restricted.items()):
+        decide("validation", f"{u2:,}u for a variety-restricted store could not be matched to a permitted "
+                             f"availability line — assign the variety by hand; the restricted variety "
+                             f"was NOT assigned", store_id=st_id2, severity="warning", units=u2)
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO cart_shelves (id, cart_id, shelf_position, sku_id, profile_id, kit_type,
             tray_count, unit_count, availability_line_id)
