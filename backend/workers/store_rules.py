@@ -9,10 +9,11 @@ engine, exports and UI all read the rule through here. Pure Python, no DB.
 Rule shape (ipr_settings key `store_sku_rules` overrides/extends DEFAULT_RULES by code):
   label            text shown to people
   routine          False = the store gets NO routine replenishment at all
-  directed_only    True = seasonal/promo product ships only when the store is explicitly
-                   added to that program ("when directed")
+  directed_only    True = product ships only "when directed": the store is explicitly added
+                   to a promotion, or an approved scenario names the store (Josh 2026-11-22)
   allow_only       routine replenishment is limited to SKUs matching ANY of:
                      families       skus.family values
+                     programs       skus.program values
                      legacy_groups  skus.legacy_product_group values
                      ipr_families   ipr_family_map.ipr_family values
                      holiday        True = holiday / seasonal SKUs
@@ -35,7 +36,9 @@ DEFAULT_RULES = {
     "littles_collectors_only": {
         "label": "Only 9cm Littles, Collectors, Rare Collectors, Holiday, or Promo",
         "routine": True,
-        "allow_only": {"families": ["9cm Littles"],
+        # Josh 2026-11-22: "9cm Littles" = the Littles program only — NOT Littles Ceramic and
+        # NOT the 9cm hanging basket.
+        "allow_only": {"programs": ["Littles"],
                        "legacy_groups": ["Collectors", "Rare Collectors"],
                        "holiday": True},
     },
@@ -105,18 +108,24 @@ def routine_blocked(rule):
     return bool(rule) and not rule.get("routine", True)
 
 
-def sku_allowed(rule, sku):
-    """(allowed, reason) for one SKU at a store under `rule` in ROUTINE replenishment.
-    sku: dict with family / legacy_product_group / ipr_family / is_holiday."""
+def sku_allowed(rule, sku, directed=False):
+    """(allowed, reason) for one SKU at a store under `rule` in the engine.
+    sku: dict with family / program / legacy_product_group / ipr_family / is_holiday.
+    directed: an approved scenario explicitly names this store for this SKU — the only way a
+    'when directed' store receives anything, and then only its allowed products."""
     if not rule:
         return True, None
-    if routine_blocked(rule):
+    if rule.get("unknown"):
+        return False, f"store rule '{rule.get('code')}' is not defined: no replenishment"
+    if routine_blocked(rule) and not (directed and rule.get("directed_only")):
         return False, f"store rule '{rule.get('label', rule.get('code'))}': no routine replenishment"
     allow = rule.get("allow_only")
     if not allow:
         return True, None
     sku = sku or {}
     if (sku.get("family") or "") in (allow.get("families") or []):
+        return True, None
+    if (sku.get("program") or "") in (allow.get("programs") or []):
         return True, None
     if (sku.get("legacy_product_group") or "") in (allow.get("legacy_groups") or []):
         return True, None

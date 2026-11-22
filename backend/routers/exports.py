@@ -158,30 +158,49 @@ _COL_WIDTHS = [8, 10, 8, 20, 18, 22, 12, 16, 12, 10, 14, 6, 14, 14, 8, 28, 12]
 _DATA_BOLD_COLS = {5, 6, 7}
 
 
+# Row styling for the cart-config export. `ws.max_row` rescans every cell in the sheet, and
+# it was called for each appended row — quadratic, ~2 minutes on a 700-cart run (2026-11-22).
+# `ws._current_row` is the row `append` just wrote (O(1)); style objects are shared.
+def _styles():
+    from openpyxl.styles import Font, Alignment
+    return Font(bold=True), Alignment(horizontal='center')
+
+
+_STYLE_CACHE = {}
+
+
+def _last_row(ws):
+    if "s" not in _STYLE_CACHE:
+        _STYLE_CACHE["s"] = _styles()
+    r = ws._current_row
+    return _STYLE_CACHE["s"], [ws.cell(row=r, column=c) for c in range(1, ws.max_column_hint + 1)]
+
+
 def _style_header(ws):
     """Last appended row → all cells bold + centered."""
-    from openpyxl.styles import Font, Alignment
-    for cell in ws[ws.max_row]:
-        cell.font      = Font(bold=True)
-        cell.alignment = Alignment(horizontal='center')
+    (bold, center), cells = _last_row(ws)
+    for cell in cells:
+        cell.font      = bold
+        cell.alignment = center
 
 
 def _style_data(ws):
     """Last appended row → E/F/G bold+centered, rest centered."""
-    from openpyxl.styles import Font, Alignment
-    for i, cell in enumerate(ws[ws.max_row], 1):
-        cell.alignment = Alignment(horizontal='center')
+    (bold, center), cells = _last_row(ws)
+    for i, cell in enumerate(cells, 1):
+        cell.alignment = center
         if i in _DATA_BOLD_COLS:
-            cell.font = Font(bold=True)
+            cell.font = bold
 
 
 def _style_subtotal(ws):
     """Last appended row → only columns H(8) and I(9) bold+centered."""
-    from openpyxl.styles import Font, Alignment
-    for i, cell in enumerate(ws[ws.max_row], 1):
-        if i in (8, 9):
-            cell.font      = Font(bold=True)
-            cell.alignment = Alignment(horizontal='center')
+    (bold, center), _cells = _last_row(ws)
+    r = ws._current_row
+    for i in (8, 9):
+        cell = ws.cell(row=r, column=i)
+        cell.font      = bold
+        cell.alignment = center
 
 
 def _distribute_trays(total_trays, aster_list):
@@ -328,15 +347,13 @@ def cart_config_export(run_id: str, user=Depends(get_current_user)):
         shelves_by_config[s["config_code"]].append(s)
 
     # Unique ordered config codes
-    seen_codes = []
-    for s in all_shelves:
-        if s["config_code"] not in seen_codes:
-            seen_codes.append(s["config_code"])
+    seen_codes = list(dict.fromkeys(s["config_code"] for s in all_shelves))
 
     # ── Build workbook ────────────────────────────────────────────────────────
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Cart Configurations"
+    ws.max_column_hint = len(COL_HEADERS)       # fixed width; avoids rescanning the sheet
 
     # Set column widths to match template proportions
     from openpyxl.utils import get_column_letter

@@ -352,7 +352,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # k.family / k.legacy_product_group are the v1 naming the scenario scopes match on.
     cur.execute("""
         SELECT k.sku_id, k.description, k.wholesale_price_whl, k.is_holiday,
-               k.family, k.legacy_product_group,
+               k.family, k.legacy_product_group, k.program,
                fm.ipr_family, fm.approved, pb.retail_price
         FROM skus k
         LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
@@ -1209,7 +1209,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # the listed products. Variety (genus) restrictions are enforced at allocation.
         _rule = store_rule.get(l["store_id"])
         if _rule:
-            _ok, _why = store_rules.sku_allowed(_rule, sku_info.get(l["sku_id"]))
+            # "when directed" = an approved scenario that names this store (not an exclusion)
+            _directed = bool(_rule.get("directed_only")) and any(
+                a["scope_store_ids"] and l["store_id"] in a["scope_store_ids"]
+                and a not in scn_excl and a not in scn_unsupported and _scn_sku(a, l["sku_id"])
+                for a in scn_all)
+            _ok, _why = store_rules.sku_allowed(_rule, sku_info.get(l["sku_id"]), directed=_directed)
             if not _ok:
                 held[key] = _why
                 held_kind[key] = ("store_rule_block" if store_rules.routine_blocked(_rule)

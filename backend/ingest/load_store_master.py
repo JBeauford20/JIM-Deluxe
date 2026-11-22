@@ -61,6 +61,13 @@ def main():
               f"--update-descriptive takes the sheet's value)")
         for c in pl["conflicts_summary"][:15]:
             print(f"  {c['field']}: app '{c['app']}' vs sheet '{c['sheet']}' x {c['stores']}")
+    inf, unres = pl["merchandiser_inferred"], pl["merchandiser_unresolved"]
+    print(f"merchandiser filled from neighbouring stores: {len(inf)} | still blank: {len(unres)}")
+    for x in inf:
+        print(f"  INFERRED {x['store_id']}: {x['merchandiser']} ({x['basis']})")
+    for x in unres:
+        print(f"  UNRESOLVED {x['store_id']} {x['state']} {x['market']}: market has "
+              f"{x['market_merchandisers'] or 'none'}; district has {x['district_merchandisers'] or 'none'}")
     for p in pl["problems"]:
         print(f"  PROBLEM {p}")
     if a.json:

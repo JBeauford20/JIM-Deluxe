@@ -46,6 +46,11 @@ NEEDS_RESTRICTION = {"With Exceptions", "Kurt Weiss"}
 DIVISION = {"northern": ("North", "Northern"), "southern": ("South", "Southern"),
             "western": ("West", "Western"), "north": ("North", "Northern"),
             "south": ("South", "Southern"), "west": ("West", "Western")}
+# Merchant successions confirmed by Josh 2026-11-22: where the app still has the old merchant
+# and the sheet has the successor, the load takes the sheet's name. Other merchant
+# differences stay conflicts (kept as-is unless update_descriptive).
+MERCHANT_SUCCESSIONS = {"mark kociubinski": "Paul Haitsch", "bryan dennison": "Joe Dandan"}
+MERCHANDISER_TYPOS = {"altmas - s": "Altman - S"}
 BLANKS = {"", "#n/a", "n/a", "na", "none", "null", "-", "#ref!", "#value!"}
 
 HEADER_ALIASES = {
@@ -166,7 +171,8 @@ def parse_workbook(data: bytes, filename: str = "") -> dict:
         out["rows"].append({
             "store_id": sid, "row": n,
             "master_status": status, "sku_restriction": restr, "sku_rule": code, "cross_dock": cd,
-            "merchandiser": _clean(cell(r, "merchandiser")),
+            "merchandiser": MERCHANDISER_TYPOS.get((_clean(cell(r, "merchandiser")) or "").lower(),
+                                                   _clean(cell(r, "merchandiser"))),
             "facility_name": _clean(cell(r, "facility_name")),
             "street_address": _clean(cell(r, "street_address")),
             "postal_code": _clean(cell(r, "postal_code")),
@@ -177,7 +183,36 @@ def parse_workbook(data: bytes, filename: str = "") -> dict:
             "market_number": _int(cell(r, "market_number")),
             "division": div[0], "region": div[1], "merchant": _clean(cell(r, "merchant")),
         })
+    infer_merchandisers(out)
     return out
+
+
+def infer_merchandisers(out: dict):
+    """Fill a blank / #N/A merchandiser from the store's neighbours (Josh 2026-11-22): when
+    every other store in the same HD market has one merchandiser, the store gets it; failing
+    that, the same test on its district. Not unanimous = left blank and listed."""
+    rows = out["rows"]
+    by_mkt, by_dist = {}, {}
+    for r in rows:
+        if r["merchandiser"]:
+            by_mkt.setdefault(r["market_number"], set()).add(r["merchandiser"])
+            by_dist.setdefault(r["district"], set()).add(r["merchandiser"])
+    out["merchandiser_inferred"], out["merchandiser_unresolved"] = [], []
+    for r in rows:
+        if r["merchandiser"]:
+            continue
+        m, d = by_mkt.get(r["market_number"]) or set(), by_dist.get(r["district"]) or set()
+        if r["market_number"] is not None and len(m) == 1:
+            val, basis = next(iter(m)), f"market {r['market_number']} {r['market_name'] or ''}".strip()
+        elif r["district"] and len(d) == 1:
+            val, basis = next(iter(d)), f"district {r['district']}"
+        else:
+            out["merchandiser_unresolved"].append(
+                {"store_id": r["store_id"], "state": r["state"], "market": r["market_name"],
+                 "market_merchandisers": sorted(m), "district_merchandisers": sorted(d)})
+            continue
+        r["merchandiser"] = val
+        out["merchandiser_inferred"].append({"store_id": r["store_id"], "merchandiser": val, "basis": basis})
 
 
 def _same(a, b):
@@ -239,7 +274,9 @@ def plan(parsed: dict, db_stores: dict, update_descriptive: bool = False) -> dic
             if new is None or _same(old, new):
                 continue
             blank = old is None or str(old).strip() == ""
-            if blank or (update_descriptive and not _same_loose(old, new)):
+            succeeded = (f == "merchant" and _same_loose(
+                MERCHANT_SUCCESSIONS.get(store_rules.norm_text(old), ""), new))
+            if blank or succeeded or (update_descriptive and not _same_loose(old, new)):
                 changes.append({"store_id": sid, "field": f, "old": old, "new": new})
                 after[sid][f] = new
             elif not _same_loose(old, new):
@@ -273,6 +310,8 @@ def plan(parsed: dict, db_stores: dict, update_descriptive: bool = False) -> dic
         "conflicts_summary": [{"field": f, "app": a, "sheet": s, "stores": n}
                               for (f, a, s), n in conf_by.most_common(60)],
         "conflicts_total": len(conflicts),
+        "merchandiser_inferred": parsed.get("merchandiser_inferred") or [],
+        "merchandiser_unresolved": parsed.get("merchandiser_unresolved") or [],
         "update_descriptive": update_descriptive,
         "changes": changes,
         "sheet_store_ids": sorted(sheet_ids & set(db_stores)),
@@ -321,7 +360,8 @@ def apply(cur, pl: dict, by: str) -> dict:
         cur.execute("UPDATE stores SET master_loaded_at = now(), master_source = %s WHERE store_id = ANY(%s)",
                     (src, pl["sheet_store_ids"]))
     summary = {k: pl[k] for k in ("qa", "status_changes", "not_in_app", "not_in_sheet",
-                                  "conflicts_summary", "conflicts_total", "update_descriptive")}
+                                  "conflicts_summary", "conflicts_total", "update_descriptive",
+                                  "merchandiser_inferred", "merchandiser_unresolved")}
     cur.execute("""INSERT INTO store_master_loads (loaded_by, source_file, sheet_name, rows_read,
                                                    stores_changed, summary, changes)
                    VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb) RETURNING id""",

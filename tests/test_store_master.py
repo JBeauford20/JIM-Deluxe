@@ -13,7 +13,12 @@ import store_rules as R  # noqa: E402
 from services import store_master as M  # noqa: E402
 from services import v2_exports as X  # noqa: E402
 
-LITTLES = {"family": "9cm Littles", "legacy_product_group": "Premium", "ipr_family": "9cm Standard"}
+LITTLES = {"family": "9cm Littles", "program": "Littles", "legacy_product_group": "Premium",
+           "ipr_family": "9cm Standard"}
+CERAMIC9 = {"family": "9cm Littles", "program": "Littles Ceramic", "legacy_product_group": "Premium",
+            "ipr_family": "9cm Standard"}
+HB9 = {"family": "9cm Canopy", "program": None, "legacy_product_group": "Premium",
+       "ipr_family": "9cm Canopy/Hanging Basket"}
 STD12 = {"family": "12cm", "legacy_product_group": "Premium", "ipr_family": "12cm Standard"}
 COLL17 = {"family": "17cm", "legacy_product_group": "Collectors", "ipr_family": "17cm Collector"}
 RARE12 = {"family": "12cm", "legacy_product_group": "Rare Collectors", "ipr_family": "12cm Rare Collector"}
@@ -39,7 +44,8 @@ def test_littles_collectors_only_allow_list():
     r = R.rule_for({"sku_rule": "littles_collectors_only"})
     for ok in (LITTLES, COLL17, RARE12, HOLIDAY):
         assert R.sku_allowed(r, ok)[0], ok
-    assert not R.sku_allowed(r, STD12)[0]
+    for no in (STD12, CERAMIC9, HB9):          # Josh 2026-11-22: no ceramics, no hanging basket
+        assert not R.sku_allowed(r, no)[0], no
     assert not R.routine_blocked(r)
 
 
@@ -47,6 +53,9 @@ def test_holiday_only_directed_blocks_all_routine_and_needs_direction():
     r = R.rule_for({"sku_rule": "holiday_only_directed"})
     assert R.routine_blocked(r)
     assert not R.sku_allowed(r, LITTLES)[0] and not R.sku_allowed(r, HOLIDAY)[0]
+    # directed by an approved scenario naming the store: only its allowed (holiday) product
+    assert R.sku_allowed(r, HOLIDAY, directed=True)[0]
+    assert not R.sku_allowed(r, LITTLES, directed=True)[0]
     assert R.promo_eligible(r, directed=False) is False
     assert R.promo_eligible(r, directed=True) is True
     assert R.promo_eligible(None) is True
@@ -148,14 +157,16 @@ def test_parse_reads_only_first_sheet_and_normalises():
         _row(664, "Do Not Ship"),
         _row(608, "With Exceptions", restr="Only 9cm Littles, Collectors, Rare Collectors, Holiday, or Promo"),
         _row(2601, None, cd="ICS-Mass", merch="#N/A"),
-        _row(4701, None, restr="No Hedera"),
+        _row(4701, None, restr="No Hedera", merch="Costa - W"),
     ]), "m.xlsx")
     assert p["sheet"] == "Sheet1" and p["sheets_ignored"] == ["Stores"] and not p["problems"]
     by = {r["store_id"]: r for r in p["rows"]}
     assert set(by) == {664, 608, 2601, 4701}
     assert by[664]["master_status"] == "Do Not Ship" and by[664]["cross_dock"] is None
     assert by[608]["sku_rule"] == "littles_collectors_only"
+    # same market + district as the others, but they disagree (Altman - W / Costa - W)
     assert by[2601]["cross_dock"] == "ICS-Mass" and by[2601]["merchandiser"] is None
+    assert [x["store_id"] for x in p["merchandiser_unresolved"]] == [2601]
     assert by[4701]["sku_rule"] == "no_hedera" and by[4701]["district"] == "0074"
     assert by[664]["division"] == "West" and by[664]["region"] == "Western"
 
@@ -212,6 +223,29 @@ def test_plan_descriptive_fields_fill_blanks_but_keep_conflicts_unless_asked():
     pl2 = _plan(update=True)
     merch2 = {c["store_id"]: c["new"] for c in pl2["changes"] if c["field"] == "merchant"}
     assert merch2 == {701: "Filled In", 700: "New Name"} and pl2["conflicts_total"] == 0
+
+
+def test_blank_merchandiser_filled_only_when_neighbours_agree():
+    p = M.parse_workbook(_wb([_row(1), _row(2), _row(3, merch="#N/A"), _row(4, merch="Altmas - S")]), "m.xlsx")
+    by = {r["store_id"]: r for r in p["rows"]}
+    assert by[4]["merchandiser"] == "Altman - S"            # known typo canonicalised
+    assert by[3]["merchandiser"] is None                     # market now has two merchandisers
+    p2 = M.parse_workbook(_wb([_row(1), _row(2), _row(3, merch="#N/A")]), "m.xlsx")
+    assert {r["store_id"]: r["merchandiser"] for r in p2["rows"]}[3] == "Altman - W"
+    assert p2["merchandiser_inferred"][0]["basis"].startswith("market 48")
+
+
+def test_confirmed_merchant_successions_apply_without_the_flag():
+    db = {1: {"store_id": 1, "store_status": "active", "merchant": "MARK KOCIUBINSKI"},
+          2: {"store_id": 2, "store_status": "active", "merchant": "Bryan Dennison"},
+          3: {"store_id": 3, "store_status": "active", "merchant": "Mark Kociubinski"},
+          4: {"store_id": 4, "store_status": "active", "merchant": "Someone Else"}}
+    parsed = M.parse_workbook(_wb([_row(1, merchant="Paul Haitsch"), _row(2, merchant="Joe Dandan"),
+                                   _row(3, merchant="Dave Graham"), _row(4, merchant="Paul Haitsch")]), "m.xlsx")
+    pl = M.plan(parsed, db)
+    assert {c["store_id"]: c["new"] for c in pl["changes"] if c["field"] == "merchant"} \
+        == {1: "Paul Haitsch", 2: "Joe Dandan"}
+    assert pl["conflicts_total"] == 2                        # 3 and 4 are not confirmed successions
 
 
 def test_plan_is_idempotent_once_applied():
