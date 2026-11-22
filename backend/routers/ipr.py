@@ -15,7 +15,9 @@ DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", 
                   "duplicate_run", "stopped_13wk", "reduced_13wk", "gap_fill", "low_value_cart", "deferred_economics", "not_due",
                   "deferral", "reactivation", "pushed_min_cart", "min_cart_service_review",
                   "assortment_block", "capacity_cap", "response_adjustment",
-                  "scenario_applied", "scenario_exclusion")
+                  "scenario_applied", "scenario_exclusion",
+                  "store_rule_block", "sku_restriction_block", "variety_restriction_block",
+                  "variety_restriction")
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
 # role (Josh), but one person can never sign both steps. 'manager' joined the director step
@@ -175,6 +177,88 @@ def settings(user=Depends(get_current_user)):
         cur = cursor(conn)
         cur.execute("SELECT key, value, spec_ref, status, note, updated_at FROM ipr_settings ORDER BY key")
         return cur.fetchall()
+
+
+# ── Editable policies (Policies screen) ───────────────────────────────────────
+# Leadership 2026-11-20: rule and setting changes run through the IPR Manager. Managers and
+# admins edit; everyone reads. Each change is validated against the catalog bounds, applies
+# to the NEXT engine run (past runs are never rewritten), and is logged in change_log
+# (entity 'ipr_setting') with who, when, old value, new value and the reason given.
+import json as _json
+from typing import Any
+
+from services import settings_catalog as _cat
+
+
+class SettingChange(BaseModel):
+    value: Any = None
+    reason: str = Field(min_length=5, max_length=500)
+
+
+def _setting_history(cur, limit=60, key=None):
+    cur.execute("""SELECT entity_id AS key, action, user_email, created_at FROM change_log
+                   WHERE entity = 'ipr_setting' AND (%s::text IS NULL OR entity_id = %s)
+                   ORDER BY created_at DESC LIMIT %s""", (key, key, limit))
+    out = []
+    for r in cur.fetchall():
+        try:
+            a = _json.loads(r["action"])
+        except Exception:
+            a = {"note": r["action"]}
+        e = _cat.BY_KEY.get(r["key"]) or {}
+        out.append({"key": r["key"], "label": e.get("label", r["key"]), "kind": e.get("kind"),
+                    "by": r["user_email"], "at": r["created_at"], "old": a.get("old"),
+                    "new": a.get("new"), "reason": a.get("reason"), "was_default": a.get("was_default")})
+    return out
+
+
+@router.get("/settings/catalog")
+def settings_catalog(user=Depends(get_current_user)):
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT key, value, spec_ref, status, note, updated_at FROM ipr_settings")
+        rows = {r["key"]: dict(r) for r in cur.fetchall()}
+        last = {}
+        for h in _setting_history(cur, 400):
+            last.setdefault(h["key"], {"by": h["by"], "at": h["at"], "reason": h["reason"]})
+        out = _cat.describe(rows, last)
+        out["can_edit"] = _role(user) in ("manager", "admin")
+        return out
+
+
+@router.get("/settings/history")
+def settings_history(limit: int = Query(60, ge=1, le=400), user=Depends(get_current_user)):
+    with get_db() as conn:
+        return _setting_history(cursor(conn), limit)
+
+
+@router.put("/settings/{key}")
+def update_setting(key: str, body: SettingChange, user=Depends(require_role("manager", "admin"))):
+    """Change one policy. Manager / admin only."""
+    try:
+        new = _cat.validate(key, body.value)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    entry = _cat.BY_KEY[key]
+    email = user.get("email") if isinstance(user, dict) else None
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("SELECT value FROM ipr_settings WHERE key = %s FOR UPDATE", (key,))
+        row = cur.fetchone()
+        old = row["value"] if row else entry["default"]
+        if row is not None and old == new:
+            raise HTTPException(409, "That is already the current value. Nothing was changed.")
+        stamp = f"edited by {email or 'manager'} {date.today().isoformat()}"
+        cur.execute("""INSERT INTO ipr_settings (key, value, spec_ref, status, note)
+                       VALUES (%s, %s::jsonb, %s, %s, %s)
+                       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+                           status = EXCLUDED.status, updated_at = now()""",
+                    (key, _json.dumps(new), "Policies screen", stamp, entry["help"]))
+        log_change(cur, None, "ipr_setting", key,
+                   _json.dumps({"old": old, "new": new, "reason": body.reason.strip(),
+                                "was_default": row is None}, default=str), email)
+        return {"key": key, "value": new, "old": old, "status": stamp,
+                "applies": "next engine run"}
 
 
 class ReactivationRequest(BaseModel):

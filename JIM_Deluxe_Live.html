@@ -461,9 +461,13 @@ body{background:var(--x-bg);}
 <div id="screen-xpol" class="screen xs">
 <div class="xwrap">
   <div class="xpanel">
-    <div class="xph"><h2>Policies</h2><span class="sub">The rules the engine runs on right now. Read only here.</span>
+    <div class="xph"><h2>Policies</h2><span class="sub">The rules the engine runs on. A change applies to the next engine run; runs already made are not changed.</span>
       <span class="act"><span class="xsrc">ipr_settings</span></span></div>
     <div id="polBody"><div class="xempty">Loading policies&hellip;</div></div>
+  </div>
+  <div class="xpanel">
+    <div class="xph"><h2>Change history</h2><span class="sub">Every policy change: who, when, from what to what, and why.</span></div>
+    <div id="polHist"><div class="xempty">Loading&hellip;</div></div>
   </div>
 </div>
 </div>
@@ -5147,14 +5151,93 @@ async function xLoadHist(force){
 async function xOpenRun(id){try{await xLoadRun(id);rId=id;xGo('tw');toast('Showing that run','ok');}catch(e){toast('Could not open run: '+e.message,'err');}}
 
 /* ---------- policies ---------- */
-async function xLoadPol(){var el=document.getElementById('polBody');if(!el)return;
-  try{var rs=await api('/api/ipr/settings');
-    el.innerHTML='<div class="xscroll"><table class="xdata"><thead><tr><th>Policy</th><th>Value</th><th>Source</th><th>Status</th></tr></thead><tbody>'+
-      rs.map(function(r){var v=r.value,vs=typeof v==='object'?JSON.stringify(v):String(v);if(vs.length>140)vs=vs.slice(0,140)+'...';
-        var st=String(r.status||''),tone=/spec/i.test(st)?'ok':/back-?test|initial/i.test(st)?'warn':/supersed/i.test(st)?'':'info';
-        return '<tr><td><b>'+escH(xHuman(r.key))+'</b><br><span class="xraw">'+escH(r.key)+'</span>'+(r.note?'<div class="xwhy">'+escH(xPlain(r.note))+'</div>':'')+'</td><td class="xsmall" style="font-family:Consolas,monospace;overflow-wrap:anywhere;max-width:340px">'+escH(vs)+'</td><td>'+escH(xPlain(r.spec_ref||''))+'</td><td><span class="xtag '+tone+'">'+escH(st)+'</span></td></tr>';}).join('')+
-      '</tbody></table></div><div class="xnote">Tunables marked "requires back-testing" are initial values from the leadership doc. Editing policies from this screen comes later.</div>';
-  }catch(e){el.innerHTML='<div class="xempty">Could not load policies: '+escH(e.message)+'</div>';}}
+/* ## Screen contract: Policies
+   - Purpose: see every rule the engine runs on and let the manager change the safe ones.
+   - Primary action: change a value -> Save -> give the reason. Applies to the NEXT run.
+   - Data: GET /api/ipr/settings/catalog, GET /api/ipr/settings/history, PUT /api/ipr/settings/{key}.
+   - States: loading, error with retry, read-only (not a manager), saving, validation error.
+   - Permissions: everyone reads; only manager / admin saves (server enforced, bounds checked). */
+var X_POL={data:null,idx:{},busy:null};
+function xPolPct(v){return Math.round(Number(v)*10000)/100;}
+function xPolFmt(kind,v){
+  if(v==null)return 'blank';
+  if(Array.isArray(v))return v.join(', ')||'none';
+  if(typeof v==='object'){var pc=/pct$/.test(kind||'');var ks=Object.keys(v);return ks.length?ks.map(function(k){return k+' '+(pc?xPolPct(v[k])+'%':v[k]);}).join(', '):'built-in schedule';}
+  if(kind==='pct')return xPolPct(v)+'%';
+  if(kind==='money')return '$'+xN(v);
+  if(kind==='bool')return v?'On':'Off';
+  return String(v);
+}
+function xPolNumIn(key,sub,val,kind,dis,s){
+  var pc=/pct$/.test(kind),whole=/int$/.test(kind)||kind==='money';
+  var show=(val==null||val==='')?'':(pc?xPolPct(val):val);
+  var lo=s.min!=null?(pc?xPolPct(s.min):s.min):'',hi=s.max!=null?(pc?xPolPct(s.max):s.max):'';
+  return (kind==='money'?'<span class="xwhy">$</span> ':'')+'<input type="number" class="xinput" style="width:'+(sub!=null?'74px':'120px')+'" data-pol="'+escH(key)+'"'+(sub!=null?' data-k="'+escH(sub)+'"':'')+
+    ' value="'+escH(show)+'" min="'+lo+'" max="'+hi+'" step="'+(whole?'1':'any')+'"'+(dis?' disabled':'')+' aria-label="'+escH(s.label+(sub!=null?' '+sub:''))+'" oninput="xPolDirty(\''+escH(key)+'\')">'+(pc?' <span class="xwhy">%</span>':'');
+}
+function xPolCtl(s,dis){
+  var k=s.kind,v=s.value,key=s.key,ch='onchange="xPolDirty(\''+escH(key)+'\')"';
+  if(k==='bool')return '<select class="xinput" data-pol="'+escH(key)+'" '+ch+(dis?' disabled':'')+' aria-label="'+escH(s.label)+'"><option value="true"'+(v?' selected':'')+'>On</option><option value="false"'+(!v?' selected':'')+'>Off</option></select>';
+  if(k==='choice')return '<select class="xinput" data-pol="'+escH(key)+'" '+ch+(dis?' disabled':'')+' aria-label="'+escH(s.label)+'">'+(s.choices||[]).map(function(c){return '<option value="'+escH(c)+'"'+(c===v?' selected':'')+'>'+escH((s.choice_labels||{})[c]||c)+'</option>';}).join('')+'</select>';
+  if(k==='list')return '<input type="text" class="xinput" style="width:100%;max-width:420px" data-pol="'+escH(key)+'" value="'+escH((v||[]).join(', '))+'"'+(dis?' disabled':'')+' aria-label="'+escH(s.label)+'" oninput="xPolDirty(\''+escH(key)+'\')">';
+  if(/^(grade|map)_/.test(k)){
+    var names=/^grade/.test(k)?(X_POL.data.grades||[]):Object.keys(Object.assign({},s.default||{},v||{})).sort(function(a,b){return a==='_default'?1:b==='_default'?-1:a.localeCompare(b);});
+    return '<div style="display:flex;flex-wrap:wrap;gap:6px 14px">'+names.map(function(n){
+      return '<label style="display:flex;gap:6px;align-items:center;margin:0;font-size:12px"><span style="min-width:'+(/^grade/.test(k)?'22px':'150px')+'">'+escH((s.key_labels||{})[n]||n)+'</span>'+xPolNumIn(key,n,(v||{})[n],k,dis,s)+'</label>';}).join('')+'</div>';
+  }
+  return xPolNumIn(key,null,v,k,dis,s);
+}
+function xPolRead(s){
+  var els=document.querySelectorAll('[data-pol="'+s.key+'"]'),k=s.kind,pc=/pct$/.test(k);
+  var num=function(el){if(el.value==='')return null;var n=Number(el.value);return pc?Number((n/100).toFixed(4)):n;};
+  if(k==='bool')return els[0].value==='true';
+  if(k==='choice')return els[0].value;
+  if(k==='list')return els[0].value.split(',').map(function(x){return x.trim();}).filter(Boolean);
+  if(/^(grade|map)_/.test(k)){var o={};Array.prototype.forEach.call(els,function(el){o[el.getAttribute('data-k')]=num(el);});return o;}
+  return num(els[0]);
+}
+function xPolDirty(key){var b=document.getElementById('polSave_'+key);if(b)b.disabled=false;}
+async function xPolSave(key,useDefault){
+  var s=X_POL.idx[key];if(!s||X_POL.busy)return;
+  var val=useDefault?s.default:xPolRead(s);
+  var why=prompt((useDefault?'Reset "'+s.label+'" to the built-in default ('+xPolFmt(s.kind,s.default)+').':'Change "'+s.label+'" from '+xPolFmt(s.kind,s.value)+' to '+xPolFmt(s.kind,val)+'.')+'\n\nWhy? This is recorded in the change history. It applies to the next engine run.');
+  if(why==null)return;
+  if(why.trim().length<5){toast('Give a short reason (at least 5 characters) so the change can be traced.','warning');return;}
+  X_POL.busy=key;var b=document.getElementById('polSave_'+key);if(b){b.disabled=true;b.textContent='Saving…';}
+  try{await api('/api/ipr/settings/'+encodeURIComponent(key),{method:'PUT',body:JSON.stringify({value:val,reason:why.trim()})});
+    toast('Saved: '+s.label+'. Applies to the next engine run.','success');X_POL.busy=null;xLoadPol();
+  }catch(e){X_POL.busy=null;if(b){b.disabled=false;b.textContent='Save';}toast('Not saved: '+e.message,'danger');}
+}
+async function xLoadPol(){
+  var el=document.getElementById('polBody'),hi=document.getElementById('polHist');if(!el)return;
+  try{
+    var d=await api('/api/ipr/settings/catalog');X_POL.data=d;X_POL.idx={};
+    var dis=!d.can_edit,h='';
+    if(dis)h+='<div class="xbanner info" style="margin:12px 16px 0"><i class="bi bi-lock"></i><span>You can read every policy here. Only the IPR manager can change them.</span></div>';
+    (d.groups||[]).forEach(function(g){
+      h+='<div class="xph" style="border-top:1px solid var(--x-border)"><h2 style="font-size:14px">'+escH(g.name)+'</h2></div><div class="xscroll"><table class="xdata"><tbody>'+
+        g.settings.map(function(s){X_POL.idx[s.key]=s;
+          var lc=s.last_change,same=JSON.stringify(s.value)===JSON.stringify(s.default);
+          var foot=s.is_default?'Built-in default (never changed here)':(lc?'Last changed '+xDate(lc.at)+' by '+escH(lc.by||'')+(lc.reason?': '+escH(lc.reason):''):escH(xPlain(s.status||'')));
+          return '<tr><td style="width:44%"><b>'+escH(s.label)+'</b><div class="xwhy">'+escH(s.help||'')+'</div><div class="xwhy" style="margin-top:2px">'+foot+'</div></td>'+
+            '<td>'+xPolCtl(s,dis)+'</td>'+
+            '<td class="r" style="white-space:nowrap">'+(dis?'':'<button class="xbtn xbtn-p xbtn-sm" id="polSave_'+escH(s.key)+'" disabled onclick="xPolSave(\''+escH(s.key)+'\')">Save</button>'+
+              (same?'':' <button class="xbtn xbtn-s xbtn-sm" title="Built-in default: '+escH(xPolFmt(s.kind,s.default))+'" onclick="xPolSave(\''+escH(s.key)+'\',true)">Use default</button>'))+'</td></tr>';}).join('')+
+        '</tbody></table></div>';});
+    var adv=d.advanced||[];
+    if(adv.length)h+='<details style="border-top:1px solid var(--x-border)"><summary class="xph" style="cursor:pointer"><b>Advanced settings ('+xN(adv.length)+')</b> <span class="xwhy">read only here: scoring weights, per-SKU freshness, store rule definitions</span></summary><div class="xscroll"><table class="xdata"><thead><tr><th>Setting</th><th>Value</th><th>Source</th></tr></thead><tbody>'+
+      adv.map(function(r){var v=r.value,vs=typeof v==='object'?JSON.stringify(v):String(v);if(vs.length>160)vs=vs.slice(0,160)+'...';
+        return '<tr><td><b>'+escH(xHuman(r.key))+'</b>'+(r.note?'<div class="xwhy">'+escH(xPlain(r.note))+'</div>':'')+'</td><td class="xsmall" style="font-family:Consolas,monospace;overflow-wrap:anywhere;max-width:340px">'+escH(vs)+'</td><td class="xwhy">'+escH(xPlain(r.status||''))+'</td></tr>';}).join('')+'</tbody></table></div></details>';
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div class="xbanner bad" style="margin:14px 16px"><span>Could not load policies: '+escH(e.message)+'</span><span class="act"><button class="xbtn xbtn-s xbtn-sm" onclick="xLoadPol()">Try again</button></span></div>';}
+  if(!hi)return;
+  try{
+    var rows=await api('/api/ipr/settings/history?limit=60');
+    hi.innerHTML=rows.length?'<div class="xscroll"><table class="xdata"><thead><tr><th>When</th><th>Who</th><th>Policy</th><th>From</th><th>To</th><th>Why</th></tr></thead><tbody>'+
+      rows.map(function(r){return '<tr><td style="white-space:nowrap">'+xDate(r.at)+'</td><td>'+escH(r.by||'')+'</td><td><b>'+escH(r.label)+'</b></td><td class="xsmall">'+escH(xPolFmt(r.kind,r.old))+(r.was_default?' <span class="xwhy">(default)</span>':'')+'</td><td class="xsmall"><b>'+escH(xPolFmt(r.kind,r.new))+'</b></td><td>'+escH(r.reason||'')+'</td></tr>';}).join('')+'</tbody></table></div>'
+      :'<div class="xempty">No policy has been changed from this screen yet.</div>';
+  }catch(e){hi.innerHTML='<div class="xempty">Change history did not load: '+escH(e.message)+'</div>';}
+}
 
 /* ---------- boot ---------- */
 var _xBoot0=xBoot;
