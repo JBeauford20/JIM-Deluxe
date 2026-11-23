@@ -44,6 +44,12 @@ CATALOG = [
          kind="grade_int", default={}, min=1, max=12, allow_blank=True,
          help="How often a store of each grade is due a delivery. Leave a grade blank to use the "
               "built-in seasonal schedule (in season AA/A/B 3, C 4, D 5; off season AA/A 4, B 5, C/D 6)."),
+    dict(key="arrival_from_store_profile", group="Delivery timing",
+         label="Use each store's usual delivery day", kind="bool", default=False,
+         help="Off: every store is assumed to receive its order 2 days after the Monday of the ship "
+              "week. On: each store's own usual day from routed history is used (network 7 days; "
+              "North 6, South 7, West 8), so the order covers the sales made before the truck lands. "
+              "Turning it on raises order sizes."),
     dict(key="cadence_buffer_weeks", group="Delivery timing", label="Extra weeks of cover on top of the cadence",
          kind="number", default=1, min=0, max=4,
          help="Each order covers the weeks until the next delivery plus this buffer."),

@@ -292,7 +292,7 @@ async function loadSkus(id){
       return '<div class="twrap"><table><tr>'+cols.map(function(c){return '<th'+(NUM[c[0]]?' class="num"':'')+'>'+c[1]+'</th>'}).join('')+'</tr>'+
         rows.map(function(r){return '<tr>'+cols.map(function(c){
           var v=r[c[0]];if(c[0]==='trend'&&v!=null)v=(v>=1?'+':'')+Math.round((v-1)*100)+'%';
-          return '<td'+(NUM[c[0]]?' class="num"':'')+'>'+esc(v==null?'—':(typeof v==='number'?Number(v).toLocaleString():v))+'</td>'}).join('')+'</tr>'}).join('')+'</table></div>';
+          return '<td'+(NUM[c[0]]?' class="num"':'')+'>'+esc(v==null?'—':(c[0]==='sku_id'?String(v):(typeof v==='number'?Number(v).toLocaleString():v)))+'</td>'}).join('')+'</tr>'}).join('')+'</table></div>';
     }
     var C=[['sku_id','SKU'],['description','Product'],['u13','13wk u'],['u4','4wk u'],['trend','Trend']];
     var CB=[['sku_id','SKU'],['description','Product'],['u13','13wk u'],['del13','Del 13wk'],['cause','Why']];

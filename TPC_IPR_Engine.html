@@ -4854,8 +4854,10 @@ function xStProfile(s){
       (o?'<span class="xtag info">This run: '+xN(o.cart_count)+' carts &middot; '+xN(o.total_units)+' u</span>'
         :'<span class="xtag">'+(X.run?'Not shipping this run':'No run loaded')+'</span>')+
       '<span style="margin-left:auto;display:flex;gap:8px">'+
+      (canRole('order_writer')?'<button class="xbtn xbtn-s xbtn-sm" onclick="xStEdit()"><i class="bi bi-pencil"></i> Edit store</button>':'')+
       (X.run?'<button class="xbtn xbtn-s xbtn-sm" onclick="xOpenEvidence(X.st.curEv,\'review\')">This run\'s decisions</button>':'')+
       '</span></div>'+
+    '<div id="stpEdit"></div>'+
     '<div id="stpTiles" class="xobj" style="padding:8px 16px"><div class="xempty"><span class="spinner-border spinner-border-sm me-2"></span>Loading store facts&hellip;</div></div>'+
     '<div class="xgrid2" style="padding:0 16px 8px">'+
       '<div class="xpanel"><div class="xph"><h2>Weekly sales, last 13 weeks</h2><span class="sub">Units sold at the register per week.</span></div><div id="stpSales"><div class="xempty">Loading&hellip;</div></div></div>'+
@@ -4871,6 +4873,63 @@ function xStProfile(s){
   xStFill(s.store_id);
 }
 function xStRetry(){if(X.st.cur)xStProfile(X.st.cur);}
+/* ## Screen contract: Edit store (Stores tab -> store profile)
+   - Purpose: change how one store is handled without leaving its profile.
+   - Primary action: set the status (Do not ship, Promotion, ...) with a note; also Velo
+     code, permanent racks, fenceline.
+   - Data: PUT /api/store-status/{id}/edit (stamps who and when; Velo changes are logged).
+   - States: closed, open, saving, validation message, error toast.
+   - Permissions: order writer and above (server enforced). Applies to the next engine run. */
+var X_ST_STATUSES=[['active','Active (normal)'],['do_not_ship','Do not ship'],['paused','Paused'],['hold','On hold'],
+  ['inactive','Inactive (closed)'],['promotion','Promotion'],['opening','Opening / reopening'],['store_walk','Store walk'],['fenceline','Fenceline']];
+var X_ST_BLOCK={do_not_ship:1,paused:1,hold:1,inactive:1};
+function xStEditClose(){var e=document.getElementById('stpEdit');if(e)e.innerHTML='';}
+function xStEdit(){
+  var s=X.st.cur,e=document.getElementById('stpEdit');if(!s||!e)return;
+  if(e.innerHTML){xStEditClose();return;}
+  var st=s.store_status||'active',opt=function(list,cur){return list.map(function(o){return '<option value="'+escH(o[0])+'"'+(o[0]===cur?' selected':'')+'>'+escH(o[1])+'</option>';}).join('');};
+  e.innerHTML='<div class="xpanel" style="margin:6px 16px 10px"><div class="xph"><h2>Edit store '+escH(s.store_id)+'</h2><span class="sub">Changes apply to the next engine run and are stamped with your name.</span></div>'+
+    '<div style="display:flex;flex-wrap:wrap;gap:12px 20px;padding:12px 16px;align-items:flex-end">'+
+    '<label style="margin:0;font-size:12px">Status<br><select class="xinput" id="steStatus" onchange="xStEditHint()">'+opt(X_ST_STATUSES,st)+'</select></label>'+
+    '<label style="margin:0;font-size:12px;flex:1 1 260px">Note (why; required to block a store)<br><input class="xinput" id="steNote" type="text" maxlength="300" style="width:100%" value="'+escH(s.status_note||'')+'"></label>'+
+    '<label style="margin:0;font-size:12px">Velo code<br><select class="xinput" id="steVelo">'+opt([['','(none)'],['AA','AA'],['A','A'],['B','B'],['C','C'],['D','D']],(s.volume_code||'').trim())+'</select></label>'+
+    '<label style="margin:0;font-size:12px">Permanent racks<br><input class="xinput" id="stePerm" type="number" min="0" max="20" step="1" style="width:90px" value="'+escH(s.perm_racks||0)+'"></label>'+
+    '<label style="margin:0;font-size:12px;display:flex;gap:6px;align-items:center"><input type="checkbox" id="steFence"'+(s.fenceline?' checked':'')+'> Fenceline store</label>'+
+    '<span style="margin-left:auto;display:flex;gap:6px"><button class="xbtn xbtn-p xbtn-sm" id="steSave" onclick="xStEditSave()">Save</button><button class="xbtn xbtn-s xbtn-sm" onclick="xStEditClose()">Cancel</button></span></div>'+
+    '<div id="steHint" class="xwhy" style="padding:0 16px 12px"></div></div>';
+  xStEditHint();
+}
+function xStEditHint(){
+  var s=X.st.cur,h=document.getElementById('steHint'),v=(document.getElementById('steStatus')||{}).value;if(!s||!h)return;
+  var m=[];
+  if(X_ST_BLOCK[v])m.push('This status blocks the store: the engine will write no order for it and nobody can override that on a run.');
+  if(v==='promotion'||v==='opening')m.push('This status is a flag for people. It does not change what the current engine orders for the store.');
+  if(s.master_status==='Do Not Ship'&&v!=='do_not_ship')m.push('The store master sheet lists this store as Do Not Ship. Unless the sheet is changed too, the next store master load will block it again.');
+  if(s.sku_rule)m.push('Product restrictions ('+escH(xStRule(s.sku_rule).short)+') come from the store master sheet and are changed there, not here.');
+  h.innerHTML=m.join('<br>');
+}
+async function xStEditSave(){
+  var s=X.st.cur;if(!s||X.st.saving)return;
+  var v=document.getElementById('steStatus').value,note=document.getElementById('steNote').value.trim(),
+      velo=document.getElementById('steVelo').value,perm=parseInt(document.getElementById('stePerm').value||'0',10),fence=document.getElementById('steFence').checked;
+  if(X_ST_BLOCK[v]&&v!==(s.store_status||'active')&&note.length<5){toast('Add a short note saying why this store is being blocked.','warning');return;}
+  if(isNaN(perm)||perm<0||perm>20){toast('Permanent racks must be a whole number from 0 to 20.','warning');return;}
+  var body={};
+  if(v!==(s.store_status||'active')||note!==(s.status_note||'')){body.store_status=v;body.status_note=note;}
+  if(velo&&velo!==(s.volume_code||'').trim())body.volume_code=velo;
+  if(perm!==(s.perm_racks||0))body.perm_racks=perm;
+  if(fence!==!!s.fenceline)body.fenceline=fence;
+  if(!Object.keys(body).length){toast('Nothing changed.','info');return;}
+  if(X_ST_BLOCK[v]&&v!==(s.store_status||'active')&&!confirm('Set store '+s.store_id+' to "'+(X_STATUS_LABEL[v]||v)+'"? The engine will write no order for it from the next run on.'))return;
+  X.st.saving=true;var b=document.getElementById('steSave');if(b){b.disabled=true;b.textContent='Saving…';}
+  try{
+    var r=await api('/api/store-status/'+s.store_id+'/edit',{method:'PUT',body:JSON.stringify(body)});
+    s.store_status=r.store_status;s.status_note=r.status_note;s.volume_code=r.volume_code;
+    if(body.perm_racks!=null)s.perm_racks=body.perm_racks;if(body.fenceline!=null)s.fenceline=body.fenceline;
+    X.st.saving=false;toast('Store '+s.store_id+' saved. Applies to the next engine run.','success');
+    xStProfile(s);xLoadStMaster();
+  }catch(e){X.st.saving=false;if(b){b.disabled=false;b.textContent='Save';}toast('Not saved: '+e.message,'danger');}
+}
 async function xStFill(id){
   var cur=X.st.cur;                                   // snapshot: Back-while-loading safe
   if(!cur||String(cur.store_id)!==String(id))return;
@@ -4881,11 +4940,15 @@ async function xStFill(id){
     '<button class="xbtn xbtn-s xbtn-sm" style="margin-left:auto" onclick="xStRetry()">Try again</button></div>');};
   try{
     var p=await api('/api/dsm/stores/'+id+'/profile');
+    var ld=await api('/api/stores/'+id+'/delivery-profile').catch(function(){return null;});
     var t='';
     if(p.ranks)t+=xTile('National rank','#'+xN(p.ranks.national_rank),'of '+xN(p.ranks.national_of)+' stores')+
                  xTile('Region rank','#'+xN(p.ranks.region_rank),'of '+xN(p.ranks.region_of)+' in '+escH(cur.region||'region'));
     t+=xTile('YTD sales',(p.ytd&&p.ytd.dollars!=null)?xUsd(p.ytd.dollars):'&mdash;',(p.ytd&&p.ytd.units!=null)?xN(p.ytd.units)+' units':'')+
        xTile('Demand / wk',(cur._g.weekly_units!=null?Number(cur._g.weekly_units).toFixed(1):'&mdash;'),'units, engine forecast')+
+       (ld?xTile('Usual delivery','Day '+xN(ld.days),
+          (ld.basis==='store'?xN(ld.n)+' trips'+(ld.p80!=null?', 8 in 10 by day '+xN(ld.p80):'')+(ld.transit!=null?', '+xN(ld.transit)+' d on the road':'')
+            :'no history of its own yet; '+escH(ld.basis)+' average')+'. Days after the Monday of the ship week.'):'')+
        xTile('Last delivery',p.last_delivery?xDate(p.last_delivery):'none','')+
        xTile('Inbound',xN((p.inbound||{}).loaded_units||0)+' u',(p.inbound&&p.inbound.manifest_delivery_after_sales)?'truck en route':'loaded in transit')+
        xTile('DSM',escH(cur.dsm||(p.store||{}).dsm||'not assigned'),'');
@@ -4915,11 +4978,11 @@ async function xStFill(id){
       return '<div class="xscroll"><table class="xdata"><thead><tr>'+cols.map(function(c){return '<th'+(c[2]?' class="r"':'')+'>'+c[1]+'</th>';}).join('')+'</tr></thead><tbody>'+
         rows.map(function(r){return '<tr>'+cols.map(function(c){var v=r[c[0]];
           if(c[0]==='trend'&&v!=null)v=(v>=1?'+':'')+Math.round((v-1)*100)+'%';
-          return '<td'+(c[2]?' class="r"':'')+'>'+escH(v==null?'—':(typeof v==='number'?Number(v).toLocaleString():v))+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table></div>';};
-    var C=[['sku_id','SKU',1],['description','Product'],['u13','13wk u',1],['u4','4wk u',1],['trend','Trend',1]];
+          return '<td'+(c[2]?' class="r"':'')+'>'+escH(v==null?'—':(c[0]==='sku_id'?String(v):(typeof v==='number'?Number(v).toLocaleString():v)))+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table></div>';};
+    var C=[['sku_id','SKU'],['description','Product'],['u13','13wk u',1],['u4','4wk u',1],['trend','Trend',1]];
     set('stpSkus','<div class="xgrid2">'+
       '<div><h4 style="margin:8px 16px 4px">Top sellers</h4>'+tbl(kk.top5,C)+'</div>'+
-      '<div><h4 style="margin:8px 16px 4px">Weakest &mdash; and why</h4>'+tbl(kk.bottom5,[['sku_id','SKU',1],['description','Product'],['u13','13wk u',1],['cause','Why']])+'</div>'+
+      '<div><h4 style="margin:8px 16px 4px">Weakest &mdash; and why</h4>'+tbl(kk.bottom5,[['sku_id','SKU'],['description','Product'],['u13','13wk u',1],['cause','Why']])+'</div>'+
       '<div><h4 style="margin:8px 16px 4px">Fastest growing</h4>'+tbl(kk.fastest_growing,C)+'</div>'+
       '<div><h4 style="margin:8px 16px 4px">Selling but silent 14+ days</h4>'+tbl(kk.no_recent_sales,C)+'</div></div>');
   }catch(e){fail('stpSkus','SKU performance',e);}

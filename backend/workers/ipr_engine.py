@@ -30,6 +30,7 @@ from datetime import date, timedelta
 import psycopg2
 import psycopg2.extras
 
+import store_lead
 import store_rules
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
@@ -473,7 +474,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                           'master_status')""")
     _hb_cols = sorted({r["c"] for r in cur.fetchall()})
     cur.execute(f"""SELECT store_id, store_name, active, store_status, dynamic_velocity_tier,
-                           region, merchant, state, volume_code{''.join(', ' + c for c in _hb_cols)}
+                           region, merchant, state, division, volume_code{''.join(', ' + c for c in _hb_cols)}
                     FROM stores ORDER BY store_id""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
     if preview and STORE_OVERRIDES:            # what-if store attributes (preview only, never written)
@@ -481,6 +482,28 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if _sid in stores:
                 stores[_sid].update(_patch)
         _hb_cols = sorted(set(_hb_cols) | {k for _p in STORE_OVERRIDES.values() for k in _p})
+    # ARRIVAL PER STORE (store delivery profile, workers/store_lead.py). The engine has always
+    # assumed every store receives its order 2 days after the Monday of the ship week; routed
+    # history says the usual figure is 7 (North 6, South 7, West 8). With
+    # arrival_from_store_profile on, each store's own usual day is used for the sales it will
+    # make before the truck lands and for the due test. Off = the old flat 2 days.
+    lead_on = str(S.get("arrival_from_store_profile", False)).lower() in ("true", "1", "yes")
+    store_arrival, lead_summary = {}, None
+    if lead_on:
+        cur.execute(store_lead.MANIFEST_SQL)
+        _lp, lead_summary = store_lead.build_profiles(
+            [dict(r) for r in cur.fetchall()],
+            {sid: {"state": s_.get("state"), "division": s_.get("division")} for sid, s_ in stores.items()})
+        store_arrival = {sid: shipping_week + timedelta(days=p_["days"]) for sid, p_ in _lp.items()}
+        log(f"Arrival from store delivery profiles: network {lead_summary['network_days']}d after ship-week "
+            f"Monday; {lead_summary['stores_with_history']:,} stores on their own history")
+
+    def arrival_of(sid):
+        return store_arrival.get(sid, arrival)
+
+    def dta_of(sid):
+        return max(0, (arrival_of(sid) - anchor).days)
+
     hard_block_data = {
         "columns_present": _hb_cols,
         "capacity_carts_set": sum(1 for s in stores.values() if s.get("capacity_carts")),
@@ -549,7 +572,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             return False
         if a["scope_region"] and st_.get("region") != a["scope_region"]:
             return False
-        if a["scope_state"] and st_.get("state") != a["scope_state"]:
+        if a["scope_state"] and (st_.get("state") or "").strip().upper() != a["scope_state"].strip().upper():
             return False
         if a["scope_velocity_tier"] and (st_.get("dynamic_velocity_tier") or "").strip() != a["scope_velocity_tier"]:
             return False
@@ -991,7 +1014,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                          "in-transit lines are loaded — inbound estimated from avg "
                                          "delivery size (LOW)", store_id=store_id, severity="warning")
 
-        before_arrival = fc / 7.0 * days_to_arrival
+        before_arrival = fc / 7.0 * dta_of(store_id)
         dup = same_week_prior.get((store_id, sku_id), 0)        # duplicate-run control (§24)
         if dup:
             inbound_src = (f"{inbound_src} + {dup}u earlier run, same ship week" if inbound
@@ -1100,7 +1123,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     crit_stores = {l["store_id"] for l in lines.values() if l["risk"] == "Critical"}
     for st_id in {l["store_id"] for l in lines.values() if l["trays"] > 0}:
         cg, cw = store_cadence(st_id)
-        due, nxt = due_status(store_last_del.get(st_id), arrival, cw, st_id in crit_stores)
+        due, nxt = due_status(store_last_del.get(st_id), arrival_of(st_id), cw, st_id in crit_stores)
         store_due[st_id] = (due, cg, cw, nxt)
     for st_id in sorted(set(pd_adj) & set(store_due)):
         decide("response_adjustment",
@@ -1132,7 +1155,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if st_id in store_due:
             is_due = store_due[st_id][0]
         else:                                    # no cadence-sized trays: due by cadence alone?
-            is_due = due_status(store_last_del.get(st_id), arrival, store_cadence(st_id)[1],
+            is_due = due_status(store_last_del.get(st_id), arrival_of(st_id), store_cadence(st_id)[1],
                                 st_id in crit_stores)[0]
         if not is_due:
             continue
@@ -1154,7 +1177,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 size_line(x)
     for st_id in {l["store_id"] for l in lines.values() if l["trays"] > 0} - set(store_due):
         cg, cw = store_cadence(st_id)            # stores that only gained trays via extension
-        due, nxt = due_status(store_last_del.get(st_id), arrival, cw, st_id in crit_stores)
+        due, nxt = due_status(store_last_del.get(st_id), arrival_of(st_id), cw, st_id in crit_stores)
         store_due[st_id] = (due, cg, cw, nxt)
     log(f"Fill-to-cart: {len(extended):,} due stores extended to fill one CC cart "
         f"(avg +{(sum(extended.values()) / len(extended)) if extended else 0:.1f} wk coverage)")
@@ -1293,7 +1316,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         decide("not_due", f"Not due: cadence {cw} wk ({cg}); last delivery {last}; next due arrival "
                           f"{nxt} — no order this week, need recalculated next week",
                store_id=st_id, cadence_grade=cg, cadence_weeks=cw, last_delivery=last,
-               next_due=nxt, arrival=arrival, lines=len(ls),
+               next_due=nxt, arrival=arrival_of(st_id), lines=len(ls),
                need_units=sum(l["trays"] * l["upt"] for l in ls),
                shipping_efficiency=shipping_efficiency(store_eff_s.get(st_id, 0), store_eff_d.get(st_id, 0)))
     RULE_KINDS = ("store_rule_block", "sku_restriction_block", "variety_restriction_block")
@@ -1726,7 +1749,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
         critical = sorted(l["sku_id"] for l in o["lines"] if l["risk"] == "Critical")
         prior_def = prior_economic_deferrals(hist.get(store_id, []))
-        overdue = is_overdue(store_last_del.get(store_id), arrival, store_due[store_id][2])
+        overdue = is_overdue(store_last_del.get(store_id), arrival_of(store_id), store_due[store_id][2])
         action = economic_action(W, n, lost, cart_cost, low_value_wh, bool(critical), prior_def, max_econ_def,
                                  overdue=overdue)
         if min_full_carts > 0 and action == "defer":
@@ -1907,6 +1930,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "sales_anchor": str(anchor), "arrival": str(arrival),
+        "arrival_basis": ({"mode": "store delivery profile", **{k: lead_summary[k] for k in
+                           ("network_days", "stores_with_history", "by_basis", "by_division", "deliveries")}}
+                          if lead_summary else
+                          {"mode": f"flat {ARRIVAL_OFFSET_DAYS} days after the ship-week Monday for every store"}),
         "objective": {
             "minimum_weekly_retail": objective,
             "baseline_weekly_retail": round(base_units_rev),

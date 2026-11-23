@@ -49,7 +49,7 @@ def list_stores(
                    volume_code, volume_code_updated_at, volume_code_updated_by,
                    dynamic_velocity_tier, dynamic_velocity_score,
                    tier_9cm, tier_12cm, tier_h2o, tier_collectors, tier_boutique,
-                   merch_partner, store_status,
+                   merch_partner, store_status, status_note,
                    COALESCE(perm_racks, 0) AS perm_racks, COALESCE(fenceline, false) AS fenceline,
                    COALESCE(climb_itt_bundle, false) AS climb_itt_bundle,
                    tier_terrarium, tier_climbitt{extra}
@@ -60,6 +60,47 @@ def list_stores(
         """
         cur.execute(sql, params + [limit, offset])
         return cur.fetchall()
+
+
+def _lead():
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "workers"))
+    import store_lead
+    return store_lead
+
+
+@router.get("/delivery-profiles/summary")
+def delivery_profiles_summary(user=Depends(get_current_user)):
+    """Network / division / state usual days from the Monday of the ship week to delivery."""
+    with get_db() as conn:
+        _prof, summary = _lead().load_profiles(cursor(conn))
+        return summary
+
+
+@router.get("/{store_id}/delivery-profile")
+def store_delivery_profile(store_id: int, user=Depends(get_current_user)):
+    """How long a truck usually takes to reach this store, with its recent trips."""
+    sl = _lead()
+    with get_db() as conn:
+        cur = cursor(conn)
+        prof, summary = sl.load_profiles(cur)
+        p = prof.get(store_id)
+        if p is None:
+            from fastapi import HTTPException
+            raise HTTPException(404, "Store not found")
+        cur.execute("""SELECT week_number, load_code, ship_date, delivery_date FROM delivery_manifest
+                       WHERE store_id = %s AND delivery_date IS NOT NULL
+                       ORDER BY delivery_date DESC LIMIT 12""", (store_id,))
+        trips = []
+        for r in cur.fetchall():
+            mon = sl.week_monday(r["week_number"], r["delivery_date"]) if r["week_number"] else None
+            trips.append({"week": r["week_number"], "load": r["load_code"], "ship_date": r["ship_date"],
+                          "delivery_date": r["delivery_date"],
+                          "days_from_monday": (r["delivery_date"] - mon).days if mon else None,
+                          "transit_days": ((r["delivery_date"] - r["ship_date"]).days
+                                           if r["ship_date"] else None)})
+        return {"store_id": store_id, **p, "network_days": summary["network_days"], "recent": trips}
 
 
 @router.get("/recommended/weekly")

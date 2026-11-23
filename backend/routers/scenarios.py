@@ -37,19 +37,26 @@ from routers.ai_explanations import _client, _call
 router = APIRouter()
 
 # ── Directive vocabulary the engine honors (playbook_engine.py) ──────────────
+# What the v2 engine (workers/ipr_engine.py) actually applies. The legacy types 'sku_push' and a
+# non-zero 'cart_target_override' are NOT applied by v2 (availability may not drive demand;
+# cart counts are demand-driven), so the parser is no longer offered them.
 ADJUSTMENT_TYPES = {
-    "cart_target_override": "Set stores in scope to an exact cart count. Use value_numeric=0 to "
-                            "REMOVE/exclude those stores from this week entirely.",
-    "demand_multiplier":    "Multiply demand for store+SKU combos in scope. >1 boosts, <1 suppresses, "
-                            "0 effectively drops that SKU for those stores.",
-    "exclusion":            "Hard-block the SKU(s) in scope from the stores in scope (zeroes them). "
-                            "To send a product to ONLY one region, emit one exclusion per OTHER region.",
-    "priority_boost":       "Add a flat bonus to the priority score of stores in scope (favor them).",
-    "sku_push":             "Move more of a SKU overall by raising its availability weight (0-1).",
-    "allocation_floor":     "Guarantee stores in scope at least value_numeric carts of the scoped SKU.",
-    "allocation_cap":       "Limit stores in scope to at most value_numeric carts of the scoped SKU.",
+    "cart_target_override": "ONLY with value_numeric = 0: remove the stores in scope from this "
+                            "week entirely. Never any other number.",
+    "demand_multiplier":    "Multiply forecast demand for the store + product in scope. 1.25 = 25% "
+                            "more, 0.8 = 20% less. Capped by the engine (default 3x). Needs a "
+                            "product scope (family, legacy tier or SKU) unless it is truly everything.",
+    "exclusion":            "Block the product in scope from the stores in scope this week. To send "
+                            "a product to ONLY one region, emit one exclusion per OTHER region.",
+    "priority_boost":       "Move the stores in scope up the allocation order when supply is short. "
+                            "value_numeric between 0.05 and 0.2.",
+    "allocation_floor":     "Give the stores in scope at least value_numeric SHELVES of the product "
+                            "in scope. The engine trims it to what each store sells, never more.",
+    "allocation_cap":       "Limit the stores in scope to at most value_numeric SHELVES of the "
+                            "product in scope.",
 }
 _ALLOWED = set(ADJUSTMENT_TYPES)
+_VOCAB = "\n".join(f"- {k}: {v}" for k, v in ADJUSTMENT_TYPES.items())
 
 # Scope fields the engine matches on (exact values only — see catalog)
 _STORE_SCOPES = ["scope_merchant", "scope_region", "scope_state",
@@ -67,7 +74,8 @@ def _catalog(cur) -> dict:
     return {
         "regions":        col("SELECT DISTINCT region AS v FROM stores WHERE region IS NOT NULL ORDER BY 1"),
         "merchants":      col("SELECT DISTINCT merchant AS v FROM stores WHERE merchant IS NOT NULL ORDER BY 1"),
-        "states":         col("SELECT DISTINCT state AS v FROM stores WHERE state IS NOT NULL ORDER BY 1"),
+        "states":         col("SELECT DISTINCT UPPER(TRIM(state)) AS v FROM stores "
+                              "WHERE state IS NOT NULL AND TRIM(state) <> '' ORDER BY 1"),
         "velocity_tiers": ["AA", "A", "B", "C", "D", "P"],
         "families":       col("SELECT DISTINCT family AS v FROM skus WHERE family IS NOT NULL ORDER BY 1"),
         "legacy_tiers":   col("SELECT DISTINCT legacy_product_group AS v FROM skus WHERE legacy_product_group IS NOT NULL ORDER BY 1"),
@@ -92,6 +100,12 @@ RULES
 - Prefer scope_family for product groups (e.g. "bowls" -> family "H2O Bowl"); use scope_sku_id only
   when the user clearly means one specific SKU.
 - Give each adjustment a short human label.
+- Specific stores: put their numbers in scope_store_ids as a JSON list of integers, e.g. [608, 664].
+  Store numbers are checked after you answer, so do not warn that you cannot verify them.
+- "More" / "less" / a percentage of a product -> demand_multiplier. "At least N shelves" ->
+  allocation_floor. "No more than N shelves" -> allocation_cap. "Take X first" -> priority_boost.
+- If the request cannot be expressed with the types below, return no adjustment and say why in
+  warnings, in one plain sentence.
 
 Return STRICT JSON only, no prose:
 {
@@ -133,10 +147,34 @@ def _validate(adjustments: list, cat: dict) -> tuple:
              "scope_family": set(cat["families"]), "scope_legacy_tier": set(cat["legacy_tiers"])}
     sku_ids = {s["sku_id"] for s in cat["skus"]}
     for a in adjustments:
+        if not isinstance(a, dict):
+            continue
         atype = a.get("adjustment_type")
         if atype not in _ALLOWED:
             warns.append(f"Dropped unsupported directive '{atype}'.")
             continue
+        if atype == "cart_target_override" and float(a.get("value_numeric") or 0) != 0:
+            warns.append("Setting an exact cart count is not supported; cart counts follow demand. "
+                         "Dropped.")
+            continue
+        if isinstance(a.get("scope_state"), str):
+            a["scope_state"] = a["scope_state"].strip().upper()
+        ids = a.get("scope_store_ids")
+        if ids is not None:                       # "608", ["608"], 608 -> [608]
+            if not isinstance(ids, (list, tuple)):
+                ids = [ids]
+            good = []
+            for x in ids:
+                try:
+                    good.append(int(str(x).strip()))
+                except (TypeError, ValueError):
+                    warns.append(f"'{x}' is not a store number — ignored.")
+            a["scope_store_ids"] = sorted(set(good)) or None
+        try:
+            if a.get("scope_sku_id") is not None:
+                a["scope_sku_id"] = int(a["scope_sku_id"])
+        except (TypeError, ValueError):
+            a["scope_sku_id"] = None
         for f, allowed in valid.items():
             v = a.get(f)
             if v and v not in allowed:
@@ -149,6 +187,36 @@ def _validate(adjustments: list, cat: dict) -> tuple:
     return clean, warns
 
 
+def _check_stores(cur, adjustments: list) -> tuple:
+    """Drop store numbers that are not in the store master and say what handling each named
+    store carries (do not ship, store-master restriction) so the reviewer sees it."""
+    ids = sorted({i for a in adjustments for i in (a.get("scope_store_ids") or [])})
+    if not ids:
+        return adjustments, []
+    cur.execute("""SELECT column_name FROM information_schema.columns
+                   WHERE table_name = 'stores' AND column_name = 'sku_restriction'""")
+    extra = ", sku_restriction, master_status" if cur.fetchone() else ""
+    cur.execute(f"SELECT store_id, store_name, store_status{extra} FROM stores WHERE store_id = ANY(%s)", (ids,))
+    known = {r["store_id"]: r for r in cur.fetchall()}
+    warns = [f"Store {i} is not in the store master — ignored." for i in ids if i not in known]
+    for i, r in sorted(known.items()):
+        if (r.get("store_status") or "active") in ("do_not_ship", "paused", "inactive", "hold"):
+            warns.append(f"Store {i} is {r['store_status'].replace('_', ' ')}: nothing ships there "
+                         f"whatever this scenario says.")
+        elif r.get("sku_restriction"):
+            warns.append(f"Store {i} has a store-master restriction ({r['sku_restriction']}); the "
+                         f"scenario cannot ship anything outside it.")
+    out = []
+    for a in adjustments:
+        if a.get("scope_store_ids"):
+            a["scope_store_ids"] = [i for i in a["scope_store_ids"] if i in known] or None
+            if a["scope_store_ids"] is None and not any(a.get(f) for f in _STORE_SCOPES):
+                warns.append(f"'{a.get('label') or a['adjustment_type']}' named no valid store — dropped.")
+                continue
+        out.append(a)
+    return out, warns
+
+
 def _store_count(cur, a: dict) -> Optional[int]:
     """Rough preview of how many active stores a store-scoped directive touches."""
     where, params = ["active = true"], []
@@ -159,7 +227,7 @@ def _store_count(cur, a: dict) -> Optional[int]:
     if a.get("scope_region"):
         where.append("region = %s"); params.append(a["scope_region"])
     if a.get("scope_state"):
-        where.append("state = %s"); params.append(a["scope_state"])
+        where.append("UPPER(TRIM(state)) = %s"); params.append(a["scope_state"])
     if a.get("scope_velocity_tier"):
         where.append("TRIM(dynamic_velocity_tier) = %s"); params.append(a["scope_velocity_tier"])
     if len(where) == 1:
@@ -222,7 +290,8 @@ def parse_scenario(body: ParseReq,
     with get_db() as conn:
         cur = cursor(conn)
         cat = _catalog(cur)
-        user_msg = (f"CATALOG (valid scope values):\n{json.dumps(cat)}\n\n"
+        user_msg = (f"ADJUSTMENT TYPES (the only ones you may use):\n{_VOCAB}\n\n"
+                    f"CATALOG (valid scope values):\n{json.dumps(cat)}\n\n"
                     f"SCENARIO: {body.text.strip()}")
         from services.ipr_ai import call_model
         raw = call_model(_PARSE_SYSTEM, user_msg, max_tokens=1500)
@@ -231,8 +300,12 @@ def parse_scenario(body: ParseReq,
             parsed = json.loads(raw[s:e])
         except Exception:
             raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
-        adjustments, warns = _validate(parsed.get("adjustments", []), cat)
-        warns = (parsed.get("warnings") or []) + warns
+        if not isinstance(parsed, dict):
+            raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
+        raw_adj = parsed.get("adjustments")
+        adjustments, warns = _validate(raw_adj if isinstance(raw_adj, list) else [], cat)
+        adjustments, w2 = _check_stores(cur, adjustments)
+        warns = [str(w) for w in (parsed.get("warnings") or [])] + warns + w2
         for a in adjustments:
             a["stores_affected"] = _store_count(cur, a)
     return {"interpretation": parsed.get("interpretation", ""),
