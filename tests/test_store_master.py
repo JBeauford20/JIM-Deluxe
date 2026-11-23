@@ -270,3 +270,27 @@ def test_tagged_cart_gets_its_own_config_and_notes():
     assert X.store_notes({"cross_dock": "Free State", "sku_rule": "no_hedera"}) == "X-Dock: Free State; NO HEDERA"
     assert X.store_address({"street_address": "1 Main St", "postal_code": "90703"}) == "1 Main St, 90703"
     assert X.store_address({}) == ""
+
+
+# ── availability grade: grade 3 (mature / contract grower) is picked first ──
+RANK = {"G3a": 0, "G3b": 0, "G2": 998}          # as the engine builds it for grade_first = 3
+
+
+def test_preferred_grade_is_used_up_before_the_other():
+    lines = [["G2", 500, ""], ["G3a", 60, ""], ["G3b", 40, ""]]
+    got = R.assign_lines({frozenset(): 80}, lines, _dist, rank=RANK)[frozenset()]
+    assert sum(got.values()) == 80 and "G2" not in got
+    got = R.assign_lines({frozenset(): 150}, lines, _dist, rank=RANK)[frozenset()]
+    assert got["G3a"] == 60 and got["G3b"] == 40 and got["G2"] == 50
+
+
+def test_grade_never_overrides_a_variety_restriction():
+    lines = [["G3a", 100, "hedera"], ["G2", 100, "epipremnum"]]
+    got = R.assign_lines({HED: 30, frozenset(): 50}, lines, _dist, rank={"G3a": 0, "G2": 998})
+    assert got[HED] == {"G2": 30}                 # restricted store never gets the Hedera, grade 3 or not
+    assert got[frozenset()] == {"G3a": 50}
+
+
+def test_without_a_rank_assignment_is_unchanged():
+    lines = [["A", 60, ""], ["B", 40, ""]]
+    assert R.assign_lines({frozenset(): 50}, lines, _dist) == R.assign_lines({frozenset(): 50}, lines, _dist, rank=None)

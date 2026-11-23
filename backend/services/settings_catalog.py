@@ -102,6 +102,11 @@ CATALOG = [
          kind="map_int", default={"_default": 90}, min=14, max=400,
          key_labels={"_default": "Any other family"},
          help="Stock older than this is assumed dumped and no longer counts as on hand."),
+    dict(key="availability_grade_first", group="Inventory in stores",
+         label="Availability grade to ship first", kind="int", default=3, min=0, max=9,
+         help="Plants of this grade are picked before any other grade of the same product. Grade 3 = "
+              "more mature plants and contract-grower stock. It changes which plants are picked, "
+              "never how much a store is sent. 0 = no preference."),
     dict(key="in_transit_low_factor", group="Inventory in stores", label="How much to trust estimated in-transit units",
          kind="pct", default=0.5, min=0, max=1,
          help="In-transit units whose store was estimated (not confirmed) count at this share."),

@@ -125,6 +125,7 @@ def build(cur, run_id: str) -> dict | None:
         "families": families, "divisions": divisions,
         "production": s.get("production"),
         "store_rules": s.get("store_rules") or {},
+        "grades": s.get("availability_grades"),
         "scenarios": (s.get("scenarios") or {}).get("by_directive") or [], "directed": directed,
         "policy_changes": policy, "status_changes": status_changes,
         "manual_edits": manual_edits, "edits_by": edits_by, "since": since,
@@ -221,6 +222,15 @@ def render(d: dict, test: bool = True) -> dict:
     else:
         parts.append(_section("Ideal production", '<p style="font-size:13px;color:#6b7a73">Not available for '
                                                   'this run (it was made before production figures were saved).</p>'))
+    g = d.get("grades")
+    if g and g.get("by_grade"):
+        parts.append(_section("Availability by grade", _table(
+            ["Grade", "Greenhouse has", "Shipping", "Left after this week"],
+            [(f"Grade {k}" + (" (picked first)" if str(g.get("picked_first")) == k else ""),
+              _n(v["available_units"]), _n(v["shipping_units"]), _n(v["left_units"]))
+             for k, v in g["by_grade"].items()], right=(1, 2, 3)),
+            "Grade 3 is more mature plants and contract-grower stock. It is picked before grade 2 "
+            "within each product."))
     sr = d["store_rules"]
     if sr:
         parts.append(_section("Store handling rules applied", _table(

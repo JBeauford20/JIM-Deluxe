@@ -39,6 +39,7 @@ QTY_KEYWORDS   = ['qty', 'quantity', 'units', 'avail', 'count', 'amount',
                   'available', 'on hand', 'total', 'wk']
 DESC_KEYWORDS  = ['desc', 'name', 'item name', 'product name', 'description']
 ORIGIN_KEYWORDS = ['origin', 'location', 'source', 'grower', 'cg', 'site']
+GRADE_KEYWORDS  = ['grade']       # 3 = mature / contract-grower stock that ships first
 
 # Hard-good type derived from SKU family when file drives routing (Mode A)
 FAMILY_TO_HARD_GOOD = {
@@ -122,6 +123,8 @@ def load_availability(filepath: str, shipping_week: date = None,
     qty_col    = find_col(header, QTY_KEYWORDS)
     desc_col   = find_col(header, DESC_KEYWORDS)
     origin_col = find_col(header, ORIGIN_KEYWORDS)
+    grade_col  = next((i for i, h in enumerate(header)
+                       if str(h or '').strip().lower() in GRADE_KEYWORDS), None)
 
     # A plain "SKU" column holding Home Depot SKUs (10 digits starting "10", e.g. 1012142347)
     # IS the HD SKU. Without this, the WK48 file fell back to the Aster mapping (Mode B) and
@@ -170,6 +173,7 @@ def load_availability(filepath: str, shipping_week: date = None,
             'quantity':    quantity,
             'description': str(desc_val).strip() if desc_val else None,
             'origin':      str(orig_val).strip() if orig_val else None,
+            'grade':       safe_int(row[grade_col]) if grade_col is not None and grade_col < len(row) else None,
         }
 
         if mode == 'A':
@@ -337,17 +341,28 @@ def load_availability(filepath: str, shipping_week: date = None,
             line['code_level'],
             line['legacy_product_group'],
             line.get('origin'),
+            line.get('grade'),
         ))
 
     # One row per Aster code so the Inventory Draw can show the full variety
     # breakdown. The engine aggregates with SUM(units_available) GROUP BY sku_id
     # so multiple rows per HD SKU cause no issues for allocation.
-    psycopg2.extras.execute_batch(cur, """
+    # availability_lines.grade arrives with the availability_grade_2026_11_23 migration; until
+    # it is applied the grade is simply not stored (the upload must never fail on it).
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'availability_lines' AND column_name = 'grade'""")
+    has_grade = bool(cur.fetchone())
+    if not has_grade:
+        line_rows = [r[:-1] for r in line_rows]
+        if any(l.get('grade') is not None for l in matched):
+            log("  NOTE: the file has grades but the database cannot store them yet "
+                "(run migrations/availability_grade_2026_11_23.py) - grade-first picking is off.")
+    psycopg2.extras.execute_batch(cur, f"""
         INSERT INTO availability_lines
             (batch_id, sku_id, units_available, plant_id, kit_id,
              hard_good_type, kit_selection_required, code_level,
-             legacy_product_group, shipping_origin)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+             legacy_product_group, shipping_origin{', grade' if has_grade else ''})
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s{',%s' if has_grade else ''})
     """, line_rows, page_size=500)
 
     conn.commit()

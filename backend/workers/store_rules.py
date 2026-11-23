@@ -223,9 +223,27 @@ class VarietyPools:
                 break
 
 
-def assign_lines(total_by_group, lines, distribute):
+def _fill_by_rank(want, pool, rank, distribute):
+    """Draw `want` units from `pool` [[line_id, units]] a rank at a time (lowest rank first;
+    lines of one rank share proportionally). rank: {line_id: number}; missing = last."""
+    got, left = {}, int(want)
+    for rk in sorted({rank.get(lid, 10 ** 6) for lid, _u in pool}):
+        if left <= 0:
+            break
+        tier = [x for x in pool if rank.get(x[0], 10 ** 6) == rk]
+        for lid, q in distribute(min(left, sum(u for _l, u in tier)), tier):
+            got[lid] = got.get(lid, 0) + q
+            left -= q
+    return got
+
+
+def assign_lines(total_by_group, lines, distribute, rank=None):
     """Split a SKU's shipped units across its availability lines so no group draws a line
     it may not receive.
+
+    rank            optional {line_id: number} — lines with a lower number are used up first
+                    (availability grade: grade 3, mature / contract-grower stock, goes before
+                    grade 2). Never overrides a variety restriction.
 
     total_by_group  {deny_frozenset: units shipped to stores with that deny set}
     lines           [[line_id, units_available, genus_lower]]
@@ -243,7 +261,16 @@ def assign_lines(total_by_group, lines, distribute):
             out[deny] = {}
             continue
         ok = [[lid, cap[lid]] for lid, _u, _g in lines if cap[lid] > 0 and genus[lid] not in deny]
-        if not deny:
+        if rank:
+            # grade first; among lines of one grade, unrestricted stores still take the
+            # varieties restricted stores cannot have before the ones they can
+            rk = dict(rank)
+            if not deny:
+                for x in ok:
+                    sens_ = genus[x[0]] and any(genus[x[0]] in d for d in total_by_group if d)
+                    rk[x[0]] = rk.get(x[0], 10 ** 6) + (0 if sens_ else 0.5)
+            got = _fill_by_rank(want, ok, rk, distribute)
+        elif not deny:
             # unrestricted stores use up the sensitive lines first
             sens = [x for x in ok if genus[x[0]] and any(genus[x[0]] in d for d in total_by_group if d)]
             rest = [x for x in ok if x not in sens]

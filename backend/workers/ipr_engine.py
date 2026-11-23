@@ -317,11 +317,23 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         log(f"Duplicate-run control: {len(prior_runs)} earlier run(s) for {shipping_week} — "
             f"{sum(same_week_prior.values()):,}u counted as inbound")
 
-    cur.execute("""SELECT al.id, al.sku_id, al.units_available, al.code_level, al.hard_good_type,
-                          al.plant_id
+    # Availability grade (Josh 2026-11-23): grade 3 = more mature plants and contract-grower
+    # stock, which must leave first; grade 2 = everything else. Grade never changes how much a
+    # store is sent — only which plants are picked for it (see the line assignment at write).
+    cur.execute("""SELECT 1 FROM information_schema.columns
+                   WHERE table_name = 'availability_lines' AND column_name = 'grade'""")
+    _has_grade = bool(cur.fetchone())
+    cur.execute(f"""SELECT al.id, al.sku_id, al.units_available, al.code_level, al.hard_good_type,
+                          al.plant_id, {'al.grade' if _has_grade else 'NULL::int'} AS grade
                    FROM availability_lines al WHERE al.batch_id = %s ORDER BY al.sku_id, al.id""",
                 (batch_id,))
     avail_rows = cur.fetchall()
+    _gf = S.get("availability_grade_first", 3)
+    grade_first = int(_gf) if _gf not in (None, "", False) else 0          # 0 = no preference
+    line_grade = {str(r["id"]): r["grade"] for r in avail_rows if r["grade"] is not None}
+    # lower rank = used first: the preferred grade, then other grades from high to low, then ungraded
+    line_rank = ({lid: (0 if g == grade_first else 1000 - int(g)) for lid, g in line_grade.items()}
+                 if grade_first and line_grade else None)
     if not avail_rows:
         raise ValueError("Incomplete Data: availability batch has no lines")
     # Plant genus per availability line (store master variety restrictions, e.g. "No Hedera").
@@ -2043,8 +2055,34 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "note": "need = units to fill every store's need this week before any gate; short / surplus "
                 "compare that need with this availability, family by family",
     }
+    # Grade readout: what each grade has, and what this plan takes from it when the preferred
+    # grade is picked first within each SKU (variety restrictions can shift a little at write).
+    grades = None
+    if line_grade:
+        _ga, _gs = defaultdict(int), defaultdict(int)
+        _by_sku = defaultdict(lambda: defaultdict(int))
+        for r in avail_rows:
+            if r["grade"] is not None:
+                _ga[int(r["grade"])] += int(r["units_available"] or 0)
+                _by_sku[r["sku_id"]][int(r["grade"])] += int(r["units_available"] or 0)
+        _ship_sku = defaultdict(int)
+        for _o in orders.values():
+            for l in _o["lines"]:
+                _ship_sku[l["sku_id"]] += l["alloc_units"]
+        for _sk, _u in _ship_sku.items():
+            _left = _u
+            for _g in sorted(_by_sku.get(_sk, {}), key=lambda g: (g != grade_first, -g)):
+                _t = min(_left, _by_sku[_sk][_g])
+                _gs[_g] += _t
+                _left -= _t
+        grades = {"picked_first": grade_first or None,
+                  "by_grade": {str(g): {"available_units": _ga[g], "shipping_units": _gs.get(g, 0),
+                                        "left_units": _ga[g] - _gs.get(g, 0)} for g in sorted(_ga, reverse=True)},
+                  "note": "grade 3 = more mature plants and contract-grower stock; it is used before "
+                          "grade 2 within each SKU. Grade never changes how much a store is sent."}
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
+        "availability_grades": grades,
         "production": production,
         "sales_anchor": str(anchor), "arrival": str(arrival),
         "arrival_basis": ({"mode": "store delivery profile", **{k: lead_summary[k] for k in
@@ -2270,7 +2308,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             sku_committed[l["sku_id"]][store_deny.get(st_id2, NO_DENY)] += l["alloc_units"]
     for sku_id, by_group in sku_committed.items():
         _lines = [[lid, av, line_genus.get(lid, "")] for lid, av in aster_lines.get(sku_id, [])]
-        for deny, got in store_rules.assign_lines(by_group, _lines, _distribute_units_across_lines).items():
+        for deny, got in store_rules.assign_lines(by_group, _lines, _distribute_units_across_lines,
+                                                  rank=line_rank).items():
             sku_lines_order[(sku_id, deny)] = [lid for lid, _av in aster_lines.get(sku_id, []) if got.get(lid)]
             for lid, q in got.items():
                 line_remaining[(deny, lid)] = line_remaining.get((deny, lid), 0) + q
