@@ -49,6 +49,75 @@ def _week(d):
     return d.strftime("%b %d, %Y").replace(" 0", " ") if hasattr(d, "strftime") else str(d)
 
 
+CURVE_DAYS = (7, 14, 21, 28, 34)
+CURVE_SQL = """
+WITH d AS (
+  SELECT dl.store_id, dl.sku_id, dl.delivery_date AS dd, SUM(dl.units_delivered) AS units
+  FROM deliveries dl
+  WHERE dl.delivery_date > %(a)s::date - 125 AND dl.delivery_date <= %(a)s::date - 34
+  GROUP BY 1, 2, 3 HAVING SUM(dl.units_delivered) > 0),
+clean AS (
+  SELECT d.* FROM d
+  WHERE NOT EXISTS (SELECT 1 FROM deliveries x WHERE x.store_id = d.store_id AND x.sku_id = d.sku_id
+                    AND x.delivery_date > d.dd AND x.delivery_date <= d.dd + 34 AND x.units_delivered > 0)
+    AND NOT EXISTS (SELECT 1 FROM deliveries x WHERE x.store_id = d.store_id AND x.sku_id = d.sku_id
+                    AND x.delivery_date < d.dd AND x.delivery_date >= d.dd - 28 AND x.units_delivered > 0)),
+s AS (
+  SELECT c.store_id, c.sku_id, c.dd, c.units,
+         COALESCE(SUM(sa.units_sold) FILTER (WHERE sa.sale_date <  c.dd + 7), 0)  AS d7,
+         COALESCE(SUM(sa.units_sold) FILTER (WHERE sa.sale_date <  c.dd + 14), 0) AS d14,
+         COALESCE(SUM(sa.units_sold) FILTER (WHERE sa.sale_date <  c.dd + 21), 0) AS d21,
+         COALESCE(SUM(sa.units_sold) FILTER (WHERE sa.sale_date <  c.dd + 28), 0) AS d28,
+         COALESCE(SUM(sa.units_sold), 0) AS d34
+  FROM clean c LEFT JOIN sales sa ON sa.store_id = c.store_id AND sa.sku_id = c.sku_id
+       AND sa.sale_date >= c.dd AND sa.sale_date < c.dd + 34
+  GROUP BY 1, 2, 3, 4)
+SELECT COALESCE(fm.ipr_family, 'Unmapped') AS family, COALESCE(st.volume_code, '?') AS grade,
+       COUNT(*) AS deliveries, SUM(s.units) AS units,
+       SUM(LEAST(s.d7, s.units)) AS d7, SUM(LEAST(s.d14, s.units)) AS d14, SUM(LEAST(s.d21, s.units)) AS d21,
+       SUM(LEAST(s.d28, s.units)) AS d28, SUM(LEAST(s.d34, s.units)) AS d34
+FROM s JOIN stores st ON st.store_id = s.store_id LEFT JOIN ipr_family_map fm ON fm.sku_id = s.sku_id
+GROUP BY 1, 2"""
+
+
+def sell_through_curves(cur, anchor):
+    """Measured sell-through 7/14/21/28/34 days after a delivery (CEO review 2026-11-23), by
+    product family and by store grade. REPORTING ONLY: it does not size any order.
+
+    Cohort: store x SKU deliveries that landed 34 to 125 days before the sales cut-off, with no
+    other delivery of the same product to the same store in the 28 days before or the 34 days
+    after, so the sales that follow belong to that delivery. Sold units are capped at delivered
+    units. The delivery date is the recorded transaction date, which can be days before the
+    product is on the shelf, so the early days read low."""
+    if not anchor:
+        return None
+    cur.execute(CURVE_SQL, {"a": anchor})
+    fam, grd = {}, {}
+    for r in cur.fetchall():
+        for key, bucket in ((r["family"], fam), (r["grade"], grd)):
+            b = bucket.setdefault(key, {"deliveries": 0, "units": 0.0, "sold": [0.0] * 5})
+            b["deliveries"] += int(r["deliveries"])
+            b["units"] += _f(r["units"])
+            for i, k in enumerate(("d7", "d14", "d21", "d28", "d34")):
+                b["sold"][i] += _f(r[k])
+
+    def rows(bucket, order=None):
+        out = []
+        for k, b in bucket.items():
+            if b["units"] < 500 or k in ("?", "Unmapped"):
+                continue
+            out.append({"name": k, "deliveries": b["deliveries"], "units": round(b["units"]),
+                        "pct": [round(x / b["units"], 3) for x in b["sold"]]})
+        return sorted(out, key=(lambda x: order.index(x["name"]) if x["name"] in order else 99) if order
+                      else (lambda x: -x["units"]))
+
+    tot_u = sum(b["units"] for b in fam.values())
+    tot = [sum(b["sold"][i] for b in fam.values()) / tot_u for i in range(5)] if tot_u else None
+    return {"days": list(CURVE_DAYS), "by_family": rows(fam)[:14],
+            "by_grade": rows(grd, ["AA", "A", "B", "C+", "C", "C-", "D"]),
+            "all": [round(x, 3) for x in tot] if tot else None, "units": round(tot_u)}
+
+
 # ── facts ────────────────────────────────────────────────────────────────────
 def _exceptions(cur, run_id, week):
     """One row per scenario adjustment the run applied, with how fully it was carried out."""
@@ -155,6 +224,35 @@ def facts(cur, run_id: str) -> dict | None:
     overrides = cur.fetchone()["n"]
 
     exceptions, rejected, pending = _exceptions(cur, run_id, week)
+    # stores left out of a short directed shipment, strongest first (engine decision record)
+    cur.execute("""SELECT data FROM run_decisions WHERE run_id = %s AND decision_type = 'directed_left_out'
+                   ORDER BY created_at""", (run_id,))
+    left_out = [r["data"] for r in cur.fetchall()]
+    for x in exceptions:
+        x["left_out"] = next((d.get("left_out") for d in left_out if d.get("label") == x["label"]), None)
+    # dollar definitions (CEO review): retail, wholesale, margin, freight, shown separately
+    cur.execute("""SELECT COALESCE(SUM(q.qty * pb.retail_price), 0) AS retail,
+                          COALESCE(SUM(q.qty * k.wholesale_price_whl), 0) AS wholesale,
+                          COALESCE(SUM(q.qty) FILTER (WHERE pb.retail_price IS NULL), 0) AS no_retail,
+                          COALESCE(SUM(q.qty) FILTER (WHERE k.wholesale_price_whl IS NULL), 0) AS no_wholesale
+                   FROM (SELECT ol.sku_id, COALESCE(ol.approved_qty, ol.draft_qty, ol.recommended_qty) AS qty
+                         FROM orders od JOIN order_lines ol ON ol.order_id = od.id WHERE od.run_id = %s) q
+                   JOIN skus k ON k.sku_id = q.sku_id LEFT JOIN pricebook_hd pb ON pb.sku_id = q.sku_id""",
+                (run_id,))
+    dol = cur.fetchone()
+    cur.execute("SELECT value FROM ipr_settings WHERE key = 'category_margin_pct'")
+    mrow = cur.fetchone()
+    mpct = mrow["value"] if mrow and isinstance(mrow["value"], dict) else {}
+    margin = None
+    if mpct:
+        margin = sum(_f(x["wholesale"]) * _f(mpct.get(x["family"], mpct.get("_default"))) for x in base["families"])
+    dollars = {"retail": round(_f(dol["retail"])), "wholesale": round(_f(dol["wholesale"])),
+               "units_without_retail_price": int(_f(dol["no_retail"])),
+               "units_without_wholesale_price": int(_f(dol["no_wholesale"])),
+               "margin": None if margin is None else round(margin),
+               "freight": ce.get("delivered_cost"), "freight_pct": ce.get("freight_pct")}
+    ct = s.get("corrective_tests") or {}
+    curves = sell_through_curves(cur, s.get("sales_anchor"))
     ol = base.get("outlook") or {}
     goal = _f(ol.get("goal") or o.get("minimum_weekly_retail"))
     low, high = (ce.get("assumptions") or {}).get("normal_wholesale_range") or [1700, 3000]
@@ -233,8 +331,20 @@ def facts(cur, run_id: str) -> dict | None:
     check("Products that do not sell through are held back",
           "met", f"{_n(c.get('lines_stopped_13wk'))} store-product lines stopped and "
                  f"{_n(c.get('lines_reduced_13wk'))} reduced at the 13-week sell-through review",
-          f"{_n(a.get('stopped_13wk_units'))} units held; {_n(c.get('lines_reactivated'))} line(s) were "
-          f"reactivated by approval.")
+          f"{_n(a.get('stopped_13wk_units'))} units held."
+          + (f" {_n(ct.get('lines'))} lines that would have been stopped ship a capped corrective test "
+             f"instead ({_n(ct.get('units'))} units): {_n(ct.get('top_grade_lines'))} at AA/A families, which "
+             f"are investigated rather than stopped, and {_n(ct.get('near_miss_lines'))} near misses where "
+             f"recent sales were not a fair read. {_n(ct.get('alerts'))} AA/A store families are flagged "
+             f"for a look." if ct.get("enabled") else " Corrective tests were not in use for this order."))
+    if curves and curves.get("all"):
+        _d28, _d34 = curves["all"][3], curves["all"][4]
+        check("Deliveries sell through at 68% to 72%",
+              "met" if _d34 >= 0.68 else "partly" if _d34 >= 0.59 else "not_met",
+              f"Measured: {_pct(_d28)} sold by day 28 and {_pct(_d34)} by day 34",
+              f"Across {_n(curves['units'])} delivered units in the last four months, where the following "
+              f"sales can be tied to one delivery. Early days read low because the recorded delivery date "
+              f"is before the product is on the shelf.", tier="primary")
     check("Do-not-ship stores and store-master rules are respected",
           "met" if not dns_shipping else "not_met",
           f"{_n(dns_shipping)} do-not-ship store(s) on the order; {_n(sr.get('units_not_shipped_by_rule'))} units "
@@ -272,7 +382,7 @@ def facts(cur, run_id: str) -> dict | None:
         "families": base["families"], "exceptions": exceptions, "rejected": rejected, "pending": pending,
         "overrides": overrides, "checks": checks, "manual_edits": base["manual_edits"],
         "policy_changes": len(base["policy_changes"]), "status_changes": len(base["status_changes"]),
-        "cart_completion": cc,
+        "cart_completion": cc, "corrective_tests": ct, "dollars": dollars, "curves": curves,
         "availability": {"plant_units": int(_f(av["total"]) - _f(av["hard"])), "hard_goods_units": int(_f(av["hard"])),
                          "note": "hard goods are Climb-itt hardware and pre-built carts, not plants"},
         "data": base["data"], "allocation": {"available_units": a.get("available_units"),
@@ -318,6 +428,8 @@ def overview(f: dict) -> dict:
                               "exceptions", "rejected", "pending", "overrides", "checks", "manual_edits",
                               "allocation", "cadence_by_grade", "data")}
     slim["availability"], slim["cart_completion"] = f.get("availability"), f.get("cart_completion")
+    slim["corrective_tests"], slim["dollars"] = f.get("corrective_tests"), f.get("dollars")
+    slim["sell_through_all_stores"] = (f.get("curves") or {}).get("all")
     slim["families"] = f["families"][:10]
     raw = ipr_ai.call_model(OVERVIEW_PROMPT, "FACTS (JSON):\n" + json.dumps(slim, default=str), max_tokens=6000)
     try:
@@ -460,6 +572,14 @@ def render(f: dict, ai: dict | None, generated_at=None) -> str:
                          if x.get("trays_requested") else "applied"))
             meter = (f'<div class="meter"><i style="width:{min(100, fol * 100):.0f}%"></i></div>' if fol is not None else "")
             notes = "".join(f'<div class="muted">{E(n)}</div>' for n in x["notes"])
+            lo = x.get("left_out") or []
+            if lo:
+                notes += ('<div class="muted" style="margin-top:4px"><b>Left out, strongest store first '
+                          '(fill in this order if more arrives):</b> '
+                          + E("; ".join(f"{r['store_id']} {r.get('store_name') or ''} {r.get('state') or ''}".strip()
+                                        + f" ({_usd(r['store_weekly_sales'])}/wk, {_n(r['units_short'])} units)"
+                                        for r in lo[:40]))
+                          + (f" and {len(lo) - 40} more" if len(lo) > 40 else "") + "</div>")
             body += (f'<tr><td><b>{E(x["label"] or "Exception")}</b>'
                      + (f'<div class="muted">Request: {E(x["request"])}{"…" if len(x["request"]) >= 220 else ""}</div>'
                         if x.get("request") else "") + notes + "</td>"
@@ -505,6 +625,43 @@ def render(f: dict, ai: dict | None, generated_at=None) -> str:
     scored = sum(1 for c in supp if c["status"] != "info")
     p.append(f'<p class="muted">{met} of {scored} supporting rules met. Results are computed from the order '
              f'itself, not written by the AI.</p>')
+
+    dl = f.get("dollars")
+    if dl:
+        p.append('<h2>Order value, by definition</h2><table><tr><th>Measure</th><th class="r">Dollars</th>'
+                 '<th>How it is worked out</th></tr>'
+                 f'<tr><td>Home Depot retail value</td><td class="r">{_usd(dl["retail"])}</td><td class="muted">'
+                 f'units x Home Depot retail price'
+                 + (f'; {_n(dl["units_without_retail_price"])} units have no retail price on file'
+                    if dl["units_without_retail_price"] else "") + '</td></tr>'
+                 f'<tr><td>TPC wholesale revenue</td><td class="r">{_usd(dl["wholesale"])}</td><td class="muted">'
+                 f'units x SKU wholesale price'
+                 + (f'; {_n(dl["units_without_wholesale_price"])} units have no wholesale price on file'
+                    if dl["units_without_wholesale_price"] else "") + '</td></tr>'
+                 f'<tr><td>Estimated margin dollars</td><td class="r">'
+                 f'{_usd(dl["margin"]) if dl["margin"] is not None else "not reported"}</td><td class="muted">'
+                 + ('wholesale revenue x the approved margin for each product family' if dl["margin"] is not None
+                    else 'needs approved category margin estimates; none have been supplied') + '</td></tr>'
+                 f'<tr><td>Freight cost</td><td class="r">{_usd(dl["freight"])}</td><td class="muted">'
+                 f'{_pct(dl["freight_pct"], 1)} of wholesale revenue</td></tr></table>')
+    cv = f.get("curves")
+    if cv and cv.get("all"):
+        def _crow(name, units, pct, bold=False):
+            b1, b2 = ("<b>", "</b>") if bold else ("", "")
+            return (f'<tr><td>{b1}{E(str(name))}{b2}</td><td class="r">{_n(units)}</td>'
+                    + "".join(f'<td class="r">{b1}{_pct(x)}{b2}</td>' for x in pct) + "</tr>")
+        hd = ('<tr><th>{}</th><th class="r">Units delivered</th>'
+              + "".join(f'<th class="r">Day {d}</th>' for d in cv["days"]) + "</tr>")
+        p.append('<h2>Sell-through after delivery, measured</h2><p class="muted">Share of a delivery sold by '
+                 'each day, from deliveries in the last four months where the sales that follow can be tied '
+                 'to one delivery. For information: it does not size orders yet.</p><table>'
+                 + hd.format("Product family") + _crow("All products", cv["units"], cv["all"], True)
+                 + "".join(_crow(r["name"], r["units"], r["pct"]) for r in cv["by_family"]) + "</table>"
+                 + '<h3>By store grade</h3><table>' + hd.format("Store grade")
+                 + "".join(_crow(r["name"], r["units"], r["pct"]) for r in cv["by_grade"]) + "</table>"
+                 + '<p class="note">The recorded delivery date is the transaction date, which can be several '
+                   'days before the product is on the shelf, so the early days read low. Sold units are '
+                   'capped at delivered units.</p>')
 
     # 6. watch + breakdown
     if ai.get("watch"):

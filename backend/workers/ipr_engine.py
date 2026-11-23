@@ -1291,6 +1291,22 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # the grade threshold it ships a grade-reduced quantity (never an identical shipment).
     ship, held, held_kind, not_due_lines = {}, {}, {}, {}
     blocked_units = stopped_units = reduced_units = rule_blocked_units = 0.0
+    # CORRECTIVE TESTS (spec V2 §11.3, §24; CEO review 2026-11-23): a 13-week result below the
+    # stop line "does not receive another identical routine shipment", but it is a demand signal,
+    # not a universal block. Where the weak result has an explainable cause the family ships a
+    # capped test instead of stopping, with no manual approval (§11.3):
+    #   AA / A family grade      always a test, and flagged for investigation (§31 alert)
+    #   any grade, near miss     within `corrective_test_near_miss_points` of the stop line AND
+    #                            the product's recent sales were not a fair read (likely stocked
+    #                            out, or a sales-reporting gap)
+    # Test size = `corrective_test_share` of the normal quantity, at least one tray; reviewed
+    # four weeks after it lands. Everything else stays stopped.
+    ct_on = str(S.get("corrective_test_13wk", True)).lower() not in ("false", "0", "no")
+    ct_share = float(S.get("corrective_test_share", 0.5) or 0.5)
+    ct_near = float(S.get("corrective_test_near_miss_points", 0.10) or 0.10)
+    ct = {"lines": 0, "units": 0, "units_held_back": 0, "top_grade_lines": 0, "near_miss_lines": 0,
+          "alerts": 0, "enabled": ct_on}
+    ct_alerted = set()
     rule_overrides = defaultdict(list)       # store -> [(sku, the rule reason that was overridden)]
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
@@ -1372,6 +1388,40 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 decide("reactivation", f"{l['family']} reactivated (approved override test) — {allowed} "
                                        f"trays within the approved test quantity", store_id=l["store_id"],
                        sku_id=l["sku_id"], reactivation_id=r["id"], conversion=conv, grade=g)
+                ship[key] = l
+                continue
+        if svc == "BLOCKED" and ct_on:
+            _top = g in ("AA", "A")
+            _unfair = ("stocked out" in l["method"]) or ("EDI gap" in l["method"])
+            _nearm = conv is not None and conv >= hard_block - ct_near and _unfair
+            if _top or _nearm:
+                new_trays = max(1, int(math.floor(l["trays"] * ct_share)))
+                _why = ("an AA/A family is investigated, not stopped" if _top else
+                        f"within {ct_near * 100:.0f} points of the stop line and recent sales were not a "
+                        f"fair read ({'likely stocked out' if 'stocked out' in l['method'] else 'sales-reporting gap'})")
+                _rev = arrival_of(l["store_id"]) + timedelta(days=28)
+                decide("corrective_test",
+                       f"{l['family']} sold {conv:.0%} of its last deliveries by 13 weeks (stop line "
+                       f"{hard_block:.0%}). Ships a capped corrective test, not a stop: {new_trays} of "
+                       f"{l['trays']} trays — {_why}. Review {_rev} (spec §11.3).",
+                       store_id=l["store_id"], sku_id=l["sku_id"], family=l["family"], grade=g,
+                       conversion=conv, need_trays=l["trays"], test_trays=new_trays, upt=l["upt"],
+                       cause="top_grade" if _top else "near_miss_unfair_read", review_date=str(_rev),
+                       severity="warning" if _top else "info")
+                ct["lines"] += 1
+                ct["units"] += new_trays * l["upt"]
+                ct["units_held_back"] += (l["trays"] - new_trays) * l["upt"]
+                ct["top_grade_lines" if _top else "near_miss_lines"] += 1
+                if _top and fk not in ct_alerted:
+                    ct_alerted.add(fk)
+                    ct["alerts"] += 1
+                    decide("grade_alert",
+                           f"{g} store family below the 13-week stop line: {l['family']} sold {conv:.0%} "
+                           f"of its last deliveries (stop line {hard_block:.0%}). A capped test is shipping; "
+                           f"the store needs a look — wrong items, timing, pricing or display (spec §31).",
+                           store_id=l["store_id"], family=l["family"], grade=g, conversion=conv,
+                           severity="warning")
+                l["trays"], l["corrective_test"] = new_trays, True
                 ship[key] = l
                 continue
         if svc == "BLOCKED":
@@ -1604,15 +1654,35 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     directed_stores = set()
     _vmiss = defaultdict(lambda: [0, 0, None])
+    _vleft = defaultdict(list)           # adjustment -> stores left out, for the ranked list
+    _store_wk = defaultdict(float)       # store -> forecast weekly sales, all products ($)
+    for l in lines.values():
+        _store_wk[l["store_id"]] += l["fc"] * usd(l)
     for l in ship.values():
         if l.get("variety_short"):
             _vmiss[l["directed_adj"]][0] += 1
             _vmiss[l["directed_adj"]][1] += l["short_units"]
             _vmiss[l["directed_adj"]][2] = l["variety_name"]
+        if l.get("directed_trays") and l.get("alloc_trays", 0) < l["directed_trays"]:
+            _vleft[l["directed_adj"]].append({
+                "store_id": l["store_id"], "store_name": (stores.get(l["store_id"]) or {}).get("store_name"),
+                "state": (stores.get(l["store_id"]) or {}).get("state"),
+                "units_short": (l["directed_trays"] - l.get("alloc_trays", 0)) * l["upt"],
+                "value_short": round((l["directed_trays"] - l.get("alloc_trays", 0)) * l["upt"] * usd(l), 2),
+                "store_weekly_sales": round(_store_wk[l["store_id"]])})
     for _aid, (_n, _u, _nm) in sorted(_vmiss.items()):
         decide("validation", f"Directed shipment of {_nm}: {_u:,} units for {_n} store(s) could not be "
                              f"filled — this availability does not have enough of that variety. Nothing "
                              f"else was substituted.", severity="warning", variety=_nm, units=_u, stores=_n)
+    for _aid, _rows in sorted(_vleft.items()):
+        # Stores left out, strongest first: the order to fill them in if more product arrives.
+        _rows.sort(key=lambda r: (-r["store_weekly_sales"], r["store_id"]))
+        _lab = next((a["label"] for a in scn_all if str(a.get("adj_id")) == str(_aid)), "directed shipment")
+        decide("directed_left_out",
+               f"'{_lab}': {len(_rows)} store(s) left out or short, {sum(r['units_short'] for r in _rows):,} "
+               f"units (${sum(r['value_short'] for r in _rows):,.0f}). The product is not available. Ranked "
+               f"by the store's weekly sales, strongest first — fill in this order if more arrives.",
+               severity="warning", adjustment_id=str(_aid), label=_lab, left_out=_rows)
     for l in ship.values():
         if l.get("directed_trays"):
             _g = min(l.get("alloc_trays", 0), l["directed_trays"])
@@ -1763,6 +1833,22 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     orig[(st_id, l["sku_id"])] = l["alloc_trays"]
                     pools.give_back(l["sku_id"], l["alloc_units"], deny)
         completion["stores_tried"] = len(short)
+        # TEST ITEMS (spec V2 §21 items 3 and 5; CEO review): when a store's own products cannot
+        # finish the cart, a small number of products it has NOT sold may ride along, chosen from
+        # what comparable stores sell (same overall grade and region, at least `_cmp_min` of them
+        # selling it). One tray per product, at most `_cmp_max` products, and never more than the
+        # grade's share of one cart (AA/A 20%, B 10%, C and D none). Stopped families, store rules,
+        # variety bans, the approved assortment, hard goods and seasonal items stay out.
+        _cmp_on = str(S.get("gap_fill_test_items", True)).lower() not in ("false", "0", "no")
+        _cmp_share = {"AA": .20, "A": .20, "B": .10}
+        _cmp_min, _cmp_max = 10, 3
+        _cmp = defaultdict(lambda: defaultdict(list))      # (grade, region) -> sku -> [weekly rates]
+        if _cmp_on:
+            for (_st, _sk), _l in lines.items():
+                if _l["fc"] > 0:
+                    _s = stores.get(_st) or {}
+                    _cmp[(_s.get("volume_code"), _s.get("region"))][_sk].append(_l["fc"])
+        completion.update(test_stores=0, test_trays=0, test_units=0)
         for st_id in short:
             ls = _cc_by_store[st_id]
             deny = store_deny.get(st_id, NO_DENY)
@@ -1808,6 +1894,47 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     break
                 got[pick[0]["sku_id"]] += 1
                 state, fill = pick[1], pick[2]
+            tests = []                          # new store x SKU lines for test items
+            _sinfo = stores.get(st_id) or {}
+            _share = _cmp_share.get(_sinfo.get("volume_code"), 0) if _cmp_on else 0
+            if fill < min_cart_fill and _share > 0 and ls:
+                _rule = store_rule.get(st_id)
+                _asst = _sinfo.get("approved_assortment")
+                _pool = _cmp.get((_sinfo.get("volume_code"), _sinfo.get("region"))) or {}
+                _opts = []
+                for _sk, _rates in _pool.items():
+                    if (len(_rates) < _cmp_min or (st_id, _sk) in lines or _sk not in plannable
+                            or _sk not in pack or pools.left(_sk, deny) < int(pack[_sk].get("units_per_tray") or 1)):
+                        continue
+                    _i = sku_info.get(_sk) or {}
+                    _fam = _i.get("ipr_family") or "Unmapped"
+                    if (_fam == "Prebuilt Cart" or (_fam == "Climb-ITT" and not (_i.get("program") or "").strip())
+                            or (service.get((st_id, _fam)) or ("",))[0] == "BLOCKED"):
+                        continue
+                    if isinstance(_asst, (list, tuple)) and _asst and _fam not in _asst:
+                        continue
+                    if _rule and not store_rules.sku_allowed(_rule, _i, directed=False)[0]:
+                        continue
+                    _med = sorted(_rates)[len(_rates) // 2]
+                    # the test tray must sell inside the 13-week review window at the comparable
+                    # stores' pace — a slow product never rides along to finish a cart (§21)
+                    if _med <= 0 or int(pack[_sk].get("units_per_tray") or 1) / _med > 13:
+                        continue
+                    _opts.append((-_med * (price(_sk)[0] or 0.0), _sk, _med, len(_rates), _fam))
+                _used = 0.0
+                for _neg, _sk, _med, _nc, _fam in sorted(_opts):
+                    if fill >= min_cart_fill or len(tests) >= _cmp_max:
+                        break
+                    pid, cap, h, pmax = _cc_prof(_sk)
+                    if _used + 1.0 / cap > _share * CART_SHELVES + 1e-9:
+                        continue
+                    trial = {k: list(v) for k, v in state.items()}
+                    trial.setdefault(pid, [0, cap, h, pmax])[0] += 1
+                    f2 = _cc_best_fill(trial)
+                    if f2 <= fill + 1e-9:
+                        continue
+                    state, fill, _used = trial, f2, _used + 1.0 / cap
+                    tests.append((_sk, _med, _nc, _fam))
             if fill < min_cart_fill:
                 completion["stores_short"] += 1     # nothing qualified completes the cart
                 _w = sum(1 for l in cands if _room(l)[2] <= 0)
@@ -1819,6 +1946,34 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 completion.setdefault("short_fill_bands", [0, 0, 0, 0])[min(3, int(fill / 0.25))] += 1
                 continue                       # lines keep their original figures; pushed below
             parts, tr_gap, u_gap, w_gap, u_delta = [], 0, 0, 0.0, 0
+            for _sk, _med, _nc, _fam in tests:
+                # a full line record, copied from one of the store's own lines so every field the
+                # order writer reads is present, then set to this product's own figures
+                nl = dict(ls[0])
+                _upt = int(pack[_sk].get("units_per_tray") or 1)
+                _p, _psrc = price(_sk)
+                for _k in ("completion_trays", "completion_wos", "gap_fill_trays", "short_units", "variety_short",
+                           "reduced_13wk", "corrective_test", "directed_trays", "directed_adj", "variety_codes",
+                           "variety_name", "scn_cap_trays", "scn_floor_trays", "deferred_units"):
+                    nl.pop(_k, None)
+                nl.update(sku_id=_sk, family=_fam, upt=_upt, fc=_med, r2=0.0, r4=0.0, r10=0.0, r13=0.0,
+                          method=f"test item: median of {_nc} comparable stores (same grade and region)",
+                          onhand=0.0, oh_adj=0.0, conf="LOW", oh_src="no history at this store",
+                          inbound=0, inbound_src="none", before_arrival=0.0, projected=0.0, risk="Unknown",
+                          need=float(_upt), trays=1, trays_unreduced=1, cap_note="test item: one tray",
+                          price=_p, price_src=_psrc, sales13=0.0, cohort=0.0, plannable=True,
+                          grade=grade.get((st_id, _fam), ls[0].get("grade")), service="ELIGIBLE",
+                          conversion=None, conv_conf="no history", reactivation=None,
+                          sku_fit=0.0, priority=min(x.get("priority", 0) for x in ls),
+                          alloc_trays=0, alloc_units=0, test_item=True)
+                lines[(st_id, _sk)] = nl
+                ship[(st_id, _sk)] = nl
+                ls.append(nl)
+                got[_sk] = 1
+                completion["test_trays"] += 1
+                completion["test_units"] += _upt
+            if tests:
+                completion["test_stores"] += 1
             for l in ls:
                 n, o = got[l["sku_id"]], orig.get((st_id, l["sku_id"]), 0)
                 if n <= 0 and o <= 0:
@@ -1828,7 +1983,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 u_delta += (n - o) * l["upt"]
                 l["alloc_trays"], l["alloc_units"] = n, n * l["upt"]
                 gap = max(0, n - max(l["trays"], o))            # trays beyond the store's own need
-                if gap:
+                if l.get("test_item"):
+                    l["completion_trays"], l["completion_wos"] = n, round(n * l["upt"] / l["fc"], 1)
+                    tr_gap, u_gap, w_gap = tr_gap + n, u_gap + n * l["upt"], w_gap + n * l["upt"] * usd(l)
+                    parts.append(f"TEST ITEM {sku_info[l['sku_id']]['description'].strip()} +{n} tray "
+                                 f"({n * l['upt']}u; not sold here before, comparable stores sell "
+                                 f"{l['fc']:.1f}/wk)")
+                elif gap:
                     wos_after = (max(0.0, l["projected"]) + l["alloc_units"]) / l["fc"]
                     l["completion_trays"], l["completion_wos"] = gap, round(wos_after, 1)
                     tr_gap, u_gap, w_gap = tr_gap + gap, u_gap + gap * l["upt"], w_gap + gap * l["upt"] * usd(l)
@@ -2411,6 +2572,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "availability_grades": grades,
         "production": production,
         "cart_completion": completion,
+        "corrective_tests": ct,
         "sales_anchor": str(anchor), "arrival": str(arrival),
         "arrival_basis": ({"mode": "store delivery profile", **{k: lead_summary[k] for k in
                            ("network_days", "stores_with_history", "by_basis", "by_division", "deliveries")}}
@@ -2825,7 +2987,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                conversion=l["conversion"], priority=round(l["priority"], 4), sku_fit=round(l["sku_fit"], 4),
                primary_trays=max(0, l["alloc_trays"] - l.get("completion_trays", 0) - l.get("gap_fill_trays", 0)),
                gap_fill_trays=min(l["alloc_trays"], l.get("completion_trays", 0) + l.get("gap_fill_trays", 0)),
-               gap_fill_reason=("cart completion: sells at this store, inside the weeks-of-supply limit"
+               gap_fill_reason=("test item: sells at comparable stores, one tray to complete the cart"
+                                if l.get("test_item") else
+                                "cart completion: sells at this store, inside the weeks-of-supply limit"
                                 if l.get("completion_trays") else
                                 "same-family substitute for a short product" if l.get("gap_fill_trays") else None),
                weeks_supply_after=l.get("completion_wos"),

@@ -79,6 +79,26 @@ CATALOG = [
          kind="money", default=900000, min=0, max=10000000,
          help="The goal the This Week readout measures against (wholesale dollars). Reporting only; "
               "it never adds product to orders."),
+    dict(key="corrective_test_13wk", group="Sell-through gates",
+         label="Ship a capped test in place of a 13-week stop where the cause is explainable",
+         kind="bool", default=True,
+         help="AA and A families below the stop line always ship a capped test and are flagged for a "
+              "look. Other grades do so only when they missed by a few points and recent sales were not "
+              "a fair read (likely stocked out, or a sales-reporting gap). Off = every result below the "
+              "stop line is stopped."),
+    dict(key="corrective_test_share", group="Sell-through gates", label="Corrective test size, share of normal",
+         kind="pct", default=0.5, min=0.1, max=1.0,
+         help="A corrective test ships this share of the normal quantity, at least one tray."),
+    dict(key="corrective_test_near_miss_points", group="Sell-through gates",
+         label="How close to the stop line counts as a near miss",
+         kind="pct", default=0.10, min=0.01, max=0.30,
+         help="0.10 = within ten points of the stop line (50% to 60% when the stop line is 60%)."),
+    dict(key="gap_fill_test_items", group="Minimum order and carts",
+         label="Let test items from comparable stores help complete a cart",
+         kind="bool", default=True,
+         help="When a store's own products cannot finish a cart, add up to three products it has not "
+              "sold, one tray each, chosen from what stores of the same grade and region sell. AA and A "
+              "up to 20% of a cart, B 10%, C and D none."),
     dict(key="cart_completion", group="Minimum order and carts", label="Complete a short cart with qualified gap-fill",
          kind="bool", default=True,
          help="When a due store's order does not fill one cart, add trays of products that sell at that "

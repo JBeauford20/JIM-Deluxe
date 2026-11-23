@@ -455,6 +455,8 @@ body{background:var(--x-bg);}
     <div id="apprReact"><div class="xempty">Loading&hellip;</div></div>
     <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Service reviews from the latest run</h2><span class="sub">Stores pushed 4+ cycles under the one-cart minimum &mdash; an effective service stop needing a decision.</span></div>
     <div id="apprSvc"><div class="xempty">Loading&hellip;</div></div>
+    <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>AA and A stores below the sell-through stop line</h2><span class="sub">A top-grade store sold a product family below the 13-week stop line. A capped test ships; the store needs a look (wrong items, timing, pricing, display).</span></div>
+    <div id="apprAlert"><div class="xempty">Loading&hellip;</div></div>
     <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Independent scenario audit</h2><span class="sub">After the run: a separate AI pass verifies every applied scenario against store pace.</span>
       <span class="act"><button class="xbtn xbtn-s xbtn-sm" id="scnAudBtn" onclick="xScnAudit()"><i class="bi bi-shield-check"></i>Audit the current run</button></span></div>
     <div id="apprAud"><div class="xempty">Open a run on This Week, then audit its scenarios here.</div></div>
@@ -3961,6 +3963,9 @@ var X_KINDS=[
   ['response_adjustment','Cadence adjusted from measured response','info','The store\'s 7-28 day shipment response moved its delivery cadence one week (Sec 29, feedback = apply).'],
   ['scenario_applied','Scenario applied','info','An approved plain-English scenario changed this week, bounded by what stores sell; trims are listed.'],
   ['cart_completion','Cart completed with gap-fill','ok','The store\'s own need did not fill one cart, so trays of products that sell at this store were added, best first, until one cart was full. Each stays inside its weeks-of-supply limit.'],
+  ['corrective_test','Corrective test in place of a stop','warn','Sold below the 13-week stop line, but ships a capped test: an AA/A family is investigated, not stopped; other grades only when they missed narrowly and recent sales were not a fair read. Reviewed four weeks after it lands.'],
+  ['grade_alert','AA/A store below the stop line','bad','A top-grade store sold a family below the 13-week stop line. A capped test is shipping; the store needs a look.'],
+  ['directed_left_out','Directed shipment short','warn','An approved directed shipment could not be filled for every store. Lists the stores left out, strongest first.'],
   ['directed_shipment','Directed shipment','vio','A manager-approved scenario sent this product to the store regardless of its sales history. It skips the due test, the 13-week gates and the full-cart minimum, but never a do-not-ship or store-master restriction.'],
   ['store_rule_override','Store rule overridden by approval','warn','A manager-approved directed shipment sent a product this store\'s store-master rule normally keeps out. The rule still applies to everything else there.'],
   ['scenario_exclusion','Excluded by scenario','warn','An approved scenario removed this store or product from the week.'],
@@ -5300,6 +5305,15 @@ async function xLoadAppr(){
         return '<tr><td><b>'+d.store_id+'</b> '+escH(d.store_name||'')+'</td><td>'+escH(d.reason)+'</td></tr>';}).join('')+'</tbody></table></div>')
         :'<div class="xempty">No service reviews in the open run.</div>';
     }else sv.innerHTML='<div class="xempty">Open a run on This Week to see its service reviews.</div>';
+    var al=document.getElementById('apprAlert');
+    if(al){
+      if(X.run){
+        var ar=await api('/api/ipr/runs/'+X.run+'/decisions?type=grade_alert&limit=500').catch(function(){return[];});
+        al.innerHTML=(ar||[]).length?('<div class="xsmall xmuted" style="padding:8px 16px">'+ar.length+' store families flagged in the open run.</div><div class="xscroll" style="max-height:340px"><table class="xdata"><tbody>'+ar.map(function(d){
+          return '<tr><td><b>'+d.store_id+'</b> '+escH(d.store_name||'')+'</td><td>'+escH(d.reason)+'</td></tr>';}).join('')+'</tbody></table></div>')
+          :'<div class="xempty">No AA or A store is below the stop line in the open run.</div>';
+      }else al.innerHTML='<div class="xempty">Open a run on This Week to see its alerts.</div>';
+    }
     var n=(r.pending||[]).length+reacts.length;
     if(badge){badge.textContent=n>99?'99+':n;badge.classList.toggle('zero',!n);}
   }catch(e){el.innerHTML='<div class="xempty">Could not load approvals: '+escH(e.message)+'</div>';}
