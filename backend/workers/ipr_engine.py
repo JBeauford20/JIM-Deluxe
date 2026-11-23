@@ -1682,10 +1682,45 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             continue
         orders.setdefault(l["store_id"], []).append(l)
 
+    prebuilt_alone = []          # stores whose only product this week is a pre-built cart
     for store_id, olines in orders.items():
+        # A PRE-BUILT CART (e.g. the Climb-itt Bundle) only travels with at least one CC cart of
+        # product (Josh 2026-11-23). A store with nothing else this week does not get it.
+        _pbl = [l for l in olines if (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart"
+                and l.get("alloc_trays", 0) > 0]
+        if _pbl and not any(l.get("alloc_trays", 0) > 0 for l in olines if l not in _pbl):
+            decide("validation",
+                   f"{', '.join(sorted({sku_info[l['sku_id']]['description'] for l in _pbl}))} NOT sent: the "
+                   f"store has no other product this week, and a pre-built cart only travels with at "
+                   f"least one CC cart.", store_id=store_id, severity="warning")
+            for l in _pbl:
+                alloc_units_total -= l["alloc_units"]
+                l["alloc_trays"] = l["alloc_units"] = 0
+            prebuilt_alone.append(store_id)
+            orders[store_id] = {"lines": olines, "carts": []}
+            continue
+        # A NAMED-VARIETY directed shipment ("one full cart of Monstera Bulbasaur") rides on its
+        # own cart(s): its trays are never mixed onto shelves with other product.
+        _ded = [l for l in olines if l.get("variety_codes") and l.get("alloc_trays", 0) > 0]
+        ded_carts = []
+        for l in sorted(_ded, key=lambda x: x["sku_id"]):
+            pk0 = pack[l["sku_id"]]
+            cap, pid0 = int(pk0["trays_per_shelf"]), pk0["profile_id"]
+            h0 = float(pk0["clear_height_in"] or MIN_SHELF_CLEAR_IN)
+            pmax0 = min(CART_SHELVES, int(pk0["max_shelves"] or CART_SHELVES))
+            left, cur_c = l["alloc_trays"], None
+            while left > 0:
+                take = min(left, cap)
+                if cur_c is None or len(cur_c["shelves"]) >= pmax0 or cur_c["height"] + h0 > CART_CEILING_IN:
+                    cur_c = {"shelves": [], "height": 0.0, "prof_ct": defaultdict(int)}
+                    ded_carts.append(cur_c)
+                cur_c["shelves"].append((pid0, [(l["sku_id"], take, take * l["upt"], None, pid0)]))
+                cur_c["height"] += h0
+                cur_c["prof_ct"][pid0] += 1
+                left -= take
         # shelves per profile, SKUs mixed on a shelf in sku-fit order; partial shelves allowed
         by_prof = defaultdict(list)
-        for l in sorted(olines, key=lambda x: (-x["sku_fit"], x["sku_id"])):
+        for l in sorted((x for x in olines if x not in _ded), key=lambda x: (-x["sku_fit"], x["sku_id"])):
             by_prof[pack[l["sku_id"]]["profile_id"]].append(l)
         shelves = []
         for pid, plist in by_prof.items():
@@ -1730,6 +1765,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 c["prof_ct"][pid] += 1
             else:
                 carts.append({"shelves": [(pid, items)], "height": h, "prof_ct": defaultdict(int, {pid: 1})})
+        carts = ded_carts + carts            # dedicated carts first; nothing else was packed onto them
         out = []
         for ci, c in enumerate(carts, 1):
             ordered = sorted(c["shelves"], key=lambda s: (PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
@@ -1783,6 +1819,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                              f"for best family grade {top_grade}) — demand-driven, shipped (cart caps off)",
                    store_id=store_id, severity="info", carts=len(out))
         orders[store_id] = {"lines": olines, "carts": out}
+    for store_id in prebuilt_alone:
+        if not any(l.get("alloc_trays", 0) > 0 for l in orders[store_id]["lines"]):
+            del orders[store_id]
 
     # STORE CAPACITY (§1 "AI may not override store-capacity limits", §4.1): when the store
     # master carries capacity_carts, the order never exceeds it. The lowest-wholesale carts are
