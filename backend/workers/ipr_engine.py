@@ -2157,7 +2157,33 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         _p["need_usd"] = round(_p["need_usd"])
         _p["short_units"] = max(0, _p["need_units"] - _p["available_units"])
         _p["surplus_units"] = max(0, _p["available_units"] - _p["need_units"])
+    # The same picture SKU by SKU, for the growing team's production review (2026-11-23).
+    # Every SKU stores sell is here, on this availability or not: a SKU that is not on it has
+    # weekly demand but no need_units (the engine only sizes orders for what it can ship).
+    _psku = defaultdict(lambda: {"weekly_demand_units": 0.0, "weekly_demand_usd": 0.0, "stores": 0,
+                                 "need_units": 0, "shipped_units": 0, "plannable": False})
+    for l in lines.values():
+        _p = _psku[l["sku_id"]]
+        _p["weekly_demand_units"] += l["fc"]
+        _p["weekly_demand_usd"] += l["fc"] * usd(l)
+        _p["stores"] += 1 if l["fc"] > 0 else 0
+        _p["need_units"] += l.get("trays_unreduced", l["trays"]) * l["upt"]
+        _p["plannable"] = _p["plannable"] or bool(l.get("plannable"))
+    for _o in orders.values():
+        for l in _o["lines"]:
+            _psku[l["sku_id"]]["shipped_units"] += l["alloc_units"]
+    _by_sku = {}
+    for _sk in set(_psku) | (set() if what_if_unlimited else set(supply)):
+        _p, _i = _psku[_sk], (sku_info.get(_sk) or {})
+        _by_sku[str(_sk)] = {
+            "description": (_i.get("description") or "").strip(), "family": _i.get("ipr_family") or "Unmapped",
+            "weekly_demand_units": round(_p["weekly_demand_units"], 1),
+            "weekly_demand_usd": round(_p["weekly_demand_usd"]), "stores": _p["stores"],
+            "need_units": int(_p["need_units"]), "shipped_units": int(_p["shipped_units"]),
+            "available_units": 0 if what_if_unlimited else int(supply.get(_sk, 0)),
+            "on_availability": (not what_if_unlimited) and _sk in supply, "plannable": _p["plannable"]}
     production = {
+        "by_sku": _by_sku,
         "by_family": {f: dict(v) for f, v in sorted(_prod.items())},
         "totals": {k: sum(v[k] for v in _prod.values()) for k in
                    ("weekly_demand_units", "weekly_demand_usd", "need_units", "need_usd",

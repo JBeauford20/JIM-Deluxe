@@ -4290,7 +4290,7 @@ function xRenderResults(){
 }
 function xReleaseBody(){
   var released=xStatus()==='exported',can=canRole('order_writer');
-  var em='<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-s xbtn-sm" id="xLeadBtn" onclick="xLeadReport()"><i class="bi bi-file-earmark-richtext"></i> Leadership report</button><button class="xbtn xbtn-s xbtn-sm" onclick="xRelEmail()"><i class="bi bi-envelope"></i> Preview the release email</button></div>';
+  var em='<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-s xbtn-sm" id="xLeadBtn" onclick="xLeadReport()"><i class="bi bi-file-earmark-richtext"></i> Leadership report</button><button class="xbtn xbtn-s xbtn-sm" id="xProdBtn" onclick="xLeadReport('production')"><i class="bi bi-flower1"></i> Production review</button><button class="xbtn xbtn-s xbtn-sm" onclick="xRelEmail()"><i class="bi bi-envelope"></i> Preview the release email</button></div>';
   if(released)return '<div class="xbanner ok" style="margin:0"><i class="bi bi-check-circle-fill"></i><span><b>Released.</b> It stays on record; later changes are logged as amendments.</span></div>'+em;
   if(!can)return '<p class="xsmall xmuted" style="margin:0">An order writer or manager releases the plan.</p>';
   if(X.releasing)return '<p class="xsmall" style="margin:0 0 10px">Release this plan? Every store order is locked and the files are ready for Aster and routing. Exceptions do not hold the release.</p>'+
@@ -4306,17 +4306,19 @@ function xReleaseBody(){
 /* Leadership report (2026-11-23): one-page HTML for leadership, same layout every week.
    GET /api/ipr/runs/{id}/leadership-report returns the finished document; it opens in a new
    tab and downloads, so it can be attached to an email as is. */
-async function xLeadReport(){
-  var b=document.getElementById('xLeadBtn'),old=b?b.innerHTML:'';
+async function xLeadReport(kind){
+  /* kind 'production' = the growing team's production review (same flow, different document) */
+  var prod=kind==='production';
+  var b=document.getElementById(prod?'xProdBtn':'xLeadBtn'),old=b?b.innerHTML:'';
   if(b){b.disabled=true;b.innerHTML='<i class="bi bi-hourglass-split"></i> Writing the report&hellip;';}
   try{
-    var blob=await apiBlob('/api/ipr/runs/'+X.run+'/leadership-report');
+    var blob=await apiBlob('/api/ipr/runs/'+X.run+(prod?'/production-review':'/leadership-report'));
     var u=URL.createObjectURL(blob),a=document.createElement('a');
-    a.href=u;a.download='TPC_Home_Depot_Orders_Week_'+((X.ipr&&X.ipr.shipping_week)||'report')+'.html';a.click();
+    a.href=u;a.download=(prod?'TPC_Production_Review_Week_':'TPC_Home_Depot_Orders_Week_')+((X.ipr&&X.ipr.shipping_week)||'report')+'.html';a.click();
     window.open(u,'_blank');
     setTimeout(function(){URL.revokeObjectURL(u);},60000);
-    toast('Leadership report downloaded','ok');
-  }catch(e){toast('Could not build the leadership report: '+e.message,'err');}
+    toast((prod?'Production review':'Leadership report')+' downloaded','ok');
+  }catch(e){toast('Could not build the '+(prod?'production review':'leadership report')+': '+e.message,'err');}
   if(b){b.disabled=false;b.innerHTML=old;}
 }
 async function xRelEmail(){

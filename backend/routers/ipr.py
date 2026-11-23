@@ -340,6 +340,47 @@ def leadership_report(run_id: str, refresh: bool = False, user=Depends(get_curre
                              "X-Overview": "ai" if ai else "computed"})
 
 
+# ── Production review: the growing team's companion to the leadership report ──
+# What stores need against this week's availability, product by product. Same pattern: figures
+# computed from the saved order, AI writes only the recommendations (kind 'production_overview').
+@router.get("/runs/{run_id}/production-review")
+def production_review(run_id: str, refresh: bool = False, user=Depends(get_current_user)):
+    import json
+    from fastapi.responses import Response
+    from services import production_review as pr
+    with get_db() as conn:
+        cur = cursor(conn)
+        f = pr.facts(cur, run_id)
+        if not f:
+            raise HTTPException(404, "Run not found")
+        fp = pr.fingerprint(f)
+        cur.execute("""SELECT report FROM ipr_ai_reviews WHERE run_id = %s AND kind = 'production_overview'
+                       ORDER BY created_at DESC LIMIT 1""", (run_id,))
+        row = cur.fetchone()
+    ai = None
+    if not f.get("missing"):
+        if row and not refresh and (row["report"] or {}).get("fingerprint") == fp:
+            ai = row["report"].get("overview")
+        if ai is None:
+            try:
+                ai = pr.overview(f)      # no DB connection is held during the model call
+            except HTTPException:
+                ai = None
+            if ai:
+                from services import ipr_ai
+                with get_db() as conn:
+                    cursor(conn).execute(
+                        """INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
+                           VALUES (%s, 'production_overview', %s, NULL, %s::jsonb, %s)""",
+                        (run_id, ipr_ai.MODEL_MAIN, json.dumps({"fingerprint": fp, "overview": ai}, default=str),
+                         user.get("email") if isinstance(user, dict) else None))
+    html = pr.render(f, ai, generated_at=date.today())
+    name = f"TPC_Production_Review_Week_{f['week']}.html"
+    return Response(html, media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"',
+                             "X-Overview": "ai" if ai else "computed"})
+
+
 class ReactivationRequest(BaseModel):
     store_id: int
     ipr_family: str = Field(min_length=1, max_length=60)
