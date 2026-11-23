@@ -48,6 +48,13 @@ class Tee:
 
     def __call__(self, *parts):
         line = " ".join(str(p) for p in parts)
-        print(line, flush=True)
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            # Windows consoles (cp1252) cannot print every character a child script logs.
+            # A log line must never crash the ingest: 2026-11-22 the sales load committed and
+            # the wrapper then died here, skipping the manifest / velocity / response stages.
+            enc = getattr(__import__("sys").stdout, "encoding", None) or "ascii"
+            print(line.encode(enc, "replace").decode(enc), flush=True)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.now():%H:%M:%S}] [{self.name}] {line}\n")

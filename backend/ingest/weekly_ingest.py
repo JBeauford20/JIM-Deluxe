@@ -51,7 +51,9 @@ PY = sys.executable
 
 def run(cmd: list[str], log) -> bool:
     log(f"$ {' '.join(str(c) for c in cmd)}")
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # children write UTF-8 so their output decodes cleanly here whatever the console codepage
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     for stream in (r.stdout, r.stderr):
         for line in (stream or "").splitlines():
             log(f"    {line}")
