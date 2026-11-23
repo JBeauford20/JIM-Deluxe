@@ -321,7 +321,8 @@ def interpret(cur, text: str) -> dict:
     raw_adj = parsed.get("adjustments")
     adjustments, warns = _validate(raw_adj if isinstance(raw_adj, list) else [], cat)
     adjustments, w2 = _check_stores(cur, adjustments)
-    warns = [str(w) for w in (parsed.get("warnings") or [])] + warns + w2
+    warns = [str(w) for w in (parsed.get("warnings") or [])
+             if isinstance(w, str) and not w.lstrip().startswith(("{", "["))] + warns + w2
     for a in adjustments:
         a["stores_affected"] = _store_count(cur, a)
     return {"interpretation": parsed.get("interpretation", ""),
@@ -398,10 +399,18 @@ def pending_scenarios(user=Depends(get_current_user)):
         for s in rows:
             cur.execute("""SELECT adjustment_type, label, value_numeric, scope_merchant, scope_region,
                                   scope_state, scope_velocity_tier, scope_sku_id, scope_family,
-                                  scope_legacy_tier, stores_affected
+                                  scope_legacy_tier, scope_store_ids, stores_affected
                            FROM weekly_adjustments WHERE scenario_id = %s ORDER BY created_at""",
                         (s["id"],))
             s["adjustments"] = cur.fetchall()
+            # What the approver must know before saying yes: store conflicts as they stand NOW
+            # (a store may have gone do-not-ship since this was submitted) and overrides.
+            _adj, notes = _check_stores(cur, [dict(a) for a in s["adjustments"]])
+            if any(a["adjustment_type"] == "directed_shipment" for a in s["adjustments"]):
+                notes.insert(0, "Directed shipment: ships regardless of the stores' sales history and "
+                                "skips the due test, the 13-week review and the full-cart minimum. "
+                                "Do-not-ship and store-master restrictions still apply.")
+            s["notes"] = notes
     return {"pending": rows, "can_approve": user.get("role") in APPROVER_ROLES}
 
 

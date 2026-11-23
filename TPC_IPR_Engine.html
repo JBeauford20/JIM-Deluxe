@@ -5112,13 +5112,29 @@ async function xPdCompute(){
 
 /* ---------- Approvals (Mike's dashboard): scenarios + reactivations + service reviews ---------- */
 X.scnDraft=null;
+/* What a directive does, in the approver's words (type + value). */
+function xScnDoes(a){
+  var v=a.value_numeric,n=v!=null?Number(v):null,sh=function(x){return x+(x===1?' shelf':' shelves');};
+  switch(a.adjustment_type){
+    case 'directed_shipment':return 'Ship exactly '+sh(n)+' per store, whether or not the store has sold it';
+    case 'allocation_floor':return 'At least '+sh(n)+' per store, trimmed to what each store sells';
+    case 'allocation_cap':return 'No more than '+sh(n)+' per store';
+    case 'demand_multiplier':return n==null?'Change demand':(n>=1?'Raise':'Lower')+' demand '+Math.abs(Math.round((n-1)*100))+'%';
+    case 'exclusion':return 'Block this product from these stores';
+    case 'cart_target_override':return n===0?'Remove these stores from the week':'Set cart count (not supported)';
+    case 'priority_boost':return 'Serve these stores first when supply is short';
+    default:return xHuman(a.adjustment_type);
+  }
+}
 function xScnAdjRows(adjs){
-  return '<div class="xscroll"><table class="xdata"><thead><tr><th>Directive</th><th>What</th><th>Scope</th><th class="r">Value</th><th class="r">Stores</th></tr></thead><tbody>'+
+  return '<div class="xscroll"><table class="xdata"><thead><tr><th>What it does</th><th>Product</th><th>Stores</th><th class="r">Store count</th></tr></thead><tbody>'+
     (adjs||[]).map(function(a){
-      var scope=['scope_merchant','scope_region','scope_state','scope_velocity_tier','scope_family','scope_legacy_tier','scope_sku_id']
-        .map(function(k){return a[k]?String(a[k]):null;}).filter(Boolean).join(' &middot; ')||'all';
-      return '<tr><td>'+escH(xHuman(a.adjustment_type))+'</td><td>'+escH(a.label||'')+'</td><td>'+scope+'</td>'+
-        '<td class="r">'+(a.value_numeric!=null?a.value_numeric:'&mdash;')+'</td><td class="r">'+(a.stores_affected!=null?xN(a.stores_affected):'&mdash;')+'</td></tr>';}).join('')+
+      var prod=[a.scope_family,a.scope_legacy_tier,a.scope_sku_id?'SKU '+a.scope_sku_id:null].filter(Boolean).map(function(x){return escH(String(x));}).join(' &middot; ')||'every product';
+      var ids=a.scope_store_ids||[];
+      var who=[a.scope_merchant,a.scope_region,a.scope_state,a.scope_velocity_tier?a.scope_velocity_tier+' stores':null].filter(Boolean).map(function(x){return escH(String(x));});
+      if(ids.length)who.push('store'+(ids.length>1?'s ':' ')+ids.slice(0,12).map(function(x){return escH(String(x));}).join(', ')+(ids.length>12?' and '+(ids.length-12)+' more':''));
+      return '<tr><td><b>'+escH(xScnDoes(a))+'</b><div class="xwhy">'+escH(a.label||'')+'</div></td><td>'+prod+'</td><td>'+(who.join(' &middot; ')||'every store')+'</td>'+
+        '<td class="r">'+(a.stores_affected!=null?xN(a.stores_affected):'&mdash;')+'</td></tr>';}).join('')+
     '</tbody></table></div>';
 }
 async function xScnParse(){
@@ -5161,6 +5177,7 @@ async function xLoadAppr(){
         '<div><b>'+escH(s.name)+'</b> <span class="xwhy">&middot; week '+escH(String(s.shipping_week).slice(0,10))+' &middot; by '+escH(s.created_by||'')+'</span></div>'+
         (s.interpretation?'<div class="xsmall" style="margin:4px 0">Understood as: '+escH(s.interpretation)+'</div>':'')+
         xScnAdjRows(s.adjustments)+
+        ((s.notes||[]).length?'<div class="xbanner warn" style="margin:6px 0 0;align-items:flex-start;flex-direction:column;gap:2px">'+s.notes.map(function(n){return '<span>'+escH(n)+'</span>';}).join('')+'</div>':'')+
         (r.can_approve?('<div style="display:flex;gap:8px;margin-top:6px">'+
           (mine(s)?'<span class="xsmall xmuted">You submitted this — a second person approves it.</span>'
           :'<button class="xbtn xbtn-p xbtn-sm" onclick="xScnApprove(\''+escH(s.id)+'\')"><i class="bi bi-check2"></i>Approve</button>'+
