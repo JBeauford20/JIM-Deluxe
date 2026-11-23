@@ -298,6 +298,48 @@ def release_report_send_to_me(run_id: str, user=Depends(require_role("order_writ
         return {"to": to, "status": status, "smtp_configured": emails.smtp_configured()}
 
 
+# ── Leadership report: the weekly one-page HTML summary, same layout every week ──
+# Numbers and rule results are computed from the saved order; the AI writes only the overview.
+# The overview is kept per order (ipr_ai_reviews, kind 'leadership_overview') and rewritten
+# only when the order's figures change or refresh=true, so the document reads the same each
+# time it is downloaded.
+@router.get("/runs/{run_id}/leadership-report")
+def leadership_report(run_id: str, refresh: bool = False, user=Depends(get_current_user)):
+    import json
+    from fastapi.responses import Response
+    from services import leadership_report as lr
+    with get_db() as conn:
+        cur = cursor(conn)
+        f = lr.facts(cur, run_id)
+        if not f:
+            raise HTTPException(404, "Run not found")
+        fp = lr.fingerprint(f)
+        cur.execute("""SELECT report FROM ipr_ai_reviews WHERE run_id = %s AND kind = 'leadership_overview'
+                       ORDER BY created_at DESC LIMIT 1""", (run_id,))
+        row = cur.fetchone()
+    ai = None
+    if row and not refresh and (row["report"] or {}).get("fingerprint") == fp:
+        ai = row["report"].get("overview")
+    if ai is None:
+        try:
+            ai = lr.overview(f)          # no DB connection is held during the model call
+        except HTTPException:
+            ai = None                    # the document still generates, with computed text
+        if ai:
+            from services import ipr_ai
+            with get_db() as conn:
+                cursor(conn).execute(
+                    """INSERT INTO ipr_ai_reviews (run_id, kind, model, verdict, report, created_by)
+                       VALUES (%s, 'leadership_overview', %s, NULL, %s::jsonb, %s)""",
+                    (run_id, ipr_ai.MODEL_MAIN, json.dumps({"fingerprint": fp, "overview": ai}, default=str),
+                     user.get("email") if isinstance(user, dict) else None))
+    html = lr.render(f, ai, generated_at=date.today())
+    name = f"TPC_Home_Depot_Orders_Week_{f['week']}.html"
+    return Response(html, media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"',
+                             "X-Overview": "ai" if ai else "computed"})
+
+
 class ReactivationRequest(BaseModel):
     store_id: int
     ipr_family: str = Field(min_length=1, max_length=60)
