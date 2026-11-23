@@ -4290,7 +4290,7 @@ function xRenderResults(){
 }
 function xReleaseBody(){
   var released=xStatus()==='exported',can=canRole('order_writer');
-  var em='<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-s xbtn-sm" id="xLeadBtn" onclick="xLeadReport()"><i class="bi bi-file-earmark-richtext"></i> Leadership report</button><button class="xbtn xbtn-s xbtn-sm" id="xProdBtn" onclick="xLeadReport('production')"><i class="bi bi-flower1"></i> Production review</button><button class="xbtn xbtn-s xbtn-sm" onclick="xRelEmail()"><i class="bi bi-envelope"></i> Preview the release email</button></div>';
+  var em='<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-s xbtn-sm" id="xLeadBtn" onclick="xLeadReport()"><i class="bi bi-file-earmark-richtext"></i> Leadership report</button><button class="xbtn xbtn-s xbtn-sm" id="xProdBtn" onclick="xLeadReport(\'production\')"><i class="bi bi-flower1"></i> Production review</button><button class="xbtn xbtn-s xbtn-sm" onclick="xRelEmail()"><i class="bi bi-envelope"></i> Preview the release email</button></div>';
   if(released)return '<div class="xbanner ok" style="margin:0"><i class="bi bi-check-circle-fill"></i><span><b>Released.</b> It stays on record; later changes are logged as amendments.</span></div>'+em;
   if(!can)return '<p class="xsmall xmuted" style="margin:0">An order writer or manager releases the plan.</p>';
   if(X.releasing)return '<p class="xsmall" style="margin:0 0 10px">Release this plan? Every store order is locked and the files are ready for Aster and routing. Exceptions do not hold the release.</p>'+
