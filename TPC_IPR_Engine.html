@@ -5153,7 +5153,9 @@ function xScnDoes(a){
 function xScnAdjRows(adjs){
   return '<div class="xscroll"><table class="xdata"><thead><tr><th>What it does</th><th>Product</th><th>Stores</th><th class="r">Store count</th></tr></thead><tbody>'+
     (adjs||[]).map(function(a){
-      var prod=[a.scope_family,a.scope_legacy_tier,a.scope_sku_id?'SKU '+a.scope_sku_id:null].filter(Boolean).map(function(x){return escH(String(x));}).join(' &middot; ')||'every product';
+      var vt=String(a.value_text||''),vn=vt.indexOf('aster:')===0?(vt.split('|')[1]||'a named variety'):'';
+      var prod=vn?('<b>'+escH(vn)+' only</b><div class="xwhy">ships under SKU '+escH(String(a.scope_sku_id||''))+'; nothing substituted</div>')
+        :([a.scope_family,a.scope_legacy_tier,a.scope_sku_id?'SKU '+a.scope_sku_id:null].filter(Boolean).map(function(x){return escH(String(x));}).join(' &middot; ')||'every product');
       var ids=a.scope_store_ids||[];
       var who=[a.scope_merchant,a.scope_region,a.scope_state,a.scope_velocity_tier?a.scope_velocity_tier+' stores':null].filter(Boolean).map(function(x){return escH(String(x));});
       if(ids.length)who.push('store'+(ids.length>1?'s ':' ')+ids.slice(0,12).map(function(x){return escH(String(x));}).join(', ')+(ids.length>12?' and '+(ids.length-12)+' more':''));

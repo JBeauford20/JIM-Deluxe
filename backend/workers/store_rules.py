@@ -286,3 +286,25 @@ def assign_lines(total_by_group, lines, distribute, rank=None):
             cap[lid] -= q
         out[deny] = got
     return out
+
+
+def assign_sku_lines(by_group, lines, line_plant, distribute, rank=None):
+    """assign_lines plus named-variety groups.
+
+    by_group keys are either a deny frozenset (ordinary stores) or ("variety", frozenset of
+    Aster codes) for a directed shipment of one named variety. Named varieties are served
+    FIRST and only from lines whose plant code is in their set; what they take is removed
+    from those lines before anyone else is assigned. Returns {group: {line_id: qty}}.
+    line_plant: {line_id: Aster code}.
+    """
+    lines = [[lid, int(av), g] for lid, av, g in lines]
+    out = {}
+    for grp in sorted((g for g in by_group if isinstance(g, tuple)), key=lambda g: sorted(g[1])):
+        pool = [[lid, av] for lid, av, _g in lines if av > 0 and line_plant.get(lid) in grp[1]]
+        got = dict(distribute(int(by_group[grp] or 0), pool))
+        for x in lines:
+            x[1] -= got.get(x[0], 0)
+        out[grp] = got
+    rest = {g: u for g, u in by_group.items() if not isinstance(g, tuple)}
+    out.update(assign_lines(rest, lines, distribute, rank=rank))
+    return out

@@ -46,6 +46,9 @@ CASES = [
     ("send 1 shelf of 17cm rare collectors to Texas", dict(type="directed_shipment", value=1, scope={"scope_state": "TX", "scope_family": "17cm", "scope_legacy_tier": "Rare Collectors"})),
     ("no 12cm collector for the north", dict(type="exclusion", scope={"scope_region": "Northern", "scope_family": "12cm", "scope_legacy_tier": "Collectors"})),
     ("Give 627 2 shelves of Climb-itt 12cm", dict(type="directed_shipment", value=2, scope={"scope_store_ids": [627], "scope_family": "Climb-itt"})),
+    ("send 3 shelves of Monstera Bulbasaur 17cm to stores 121, 130, 140, 150, 160, 170, 180, 190, 200, 210", dict(type="directed_shipment", value=3, scope={"scope_sku_id": 1015519882, "scope_store_ids": [121, 130, 140, 160, 170, 210]})),   # the other four are not real stores and must be dropped
+    ("store 121 gets 2 shelves of Thai Constellation 12cm", dict(type="directed_shipment", value=2, scope={"scope_sku_id": 1012756226, "scope_store_ids": [121]})),
+    ("no Monstera Bulbasaur 17cm to the West", dict(none=True)),
     ("send 40 shelves of bowls to store 121", dict(none=True)),
     ("send 2 shelves to store 121", dict(none=True)),
     ("Give stores 121 and 608 at least 1 shelf of H2O bowls", dict(type="allocation_floor", value=1, scope={"scope_store_ids": [121, 608], "scope_family": BOWL})),

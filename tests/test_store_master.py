@@ -294,3 +294,29 @@ def test_grade_never_overrides_a_variety_restriction():
 def test_without_a_rank_assignment_is_unchanged():
     lines = [["A", 60, ""], ["B", 40, ""]]
     assert R.assign_lines({frozenset(): 50}, lines, _dist) == R.assign_lines({frozenset(): 50}, lines, _dist, rank=None)
+
+
+# ── a directed shipment of ONE named variety (e.g. Monstera Bulbasaur 17cm) ──
+PLANT = {"B1": "1001312", "B2": "3000668", "X": "1000999", "Y": "1000888"}
+BULBA = ("variety", frozenset({"1001312", "3000668", "3000696"}))
+
+
+def test_named_variety_draws_only_its_own_lines_and_is_served_first():
+    lines = [["X", 500, ""], ["B1", 100, ""], ["B2", 50, ""], ["Y", 300, ""]]
+    got = R.assign_sku_lines({BULBA: 126, frozenset(): 400}, lines, PLANT, _dist)
+    assert set(got[BULBA]) <= {"B1", "B2"} and sum(got[BULBA].values()) == 126
+    assert sum(got[frozenset()].values()) == 400
+    # everyone else only gets what the named shipment left on those lines
+    left = {"B1": 100 - got[BULBA].get("B1", 0), "B2": 50 - got[BULBA].get("B2", 0)}
+    assert all(got[frozenset()].get(k, 0) <= v for k, v in left.items())
+
+
+def test_named_variety_is_never_substituted_when_short():
+    got = R.assign_sku_lines({BULBA: 200}, [["X", 500, ""], ["B1", 60, ""]], PLANT, _dist)
+    assert got[BULBA] == {"B1": 60}                      # only what exists; no other variety
+
+
+def test_assign_sku_lines_without_varieties_matches_assign_lines():
+    lines = [["G2", 500, ""], ["G3a", 60, ""], ["G3b", 40, ""]]
+    grp = {frozenset(): 150, HED: 20}
+    assert R.assign_sku_lines(grp, lines, {}, _dist, rank=RANK) == R.assign_lines(grp, lines, _dist, rank=RANK)

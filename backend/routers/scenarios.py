@@ -25,7 +25,7 @@ After the run, the independent scenario audit (services/ipr_reviewer.run_scenari
 verifies every applied scenario against store pace — a different model pass, fed raw
 evidence, never the parser's or approver's reasoning.
 """
-import os, json
+import os, json, re
 from datetime import date, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends
@@ -120,6 +120,12 @@ RULES
 - Prefer scope_family for product groups (e.g. "bowls" -> family "H2O Bowl"); use scope_sku_id only
   when the user clearly means one specific SKU.
 - Give each adjustment a short human label.
+- A SPECIFIC PLANT VARIETY (e.g. "Monstera Bulbasaur 17cm", "Thai Constellation 12cm", "Hedera
+  Glacier") is not in the catalog: the catalog lists product groups. When the user names one,
+  put its name INCLUDING THE SIZE if given in "variety" and leave scope_family, scope_legacy_tier
+  and scope_sku_id null. The server finds the variety. Only directed_shipment may carry a variety.
+- "[STORE LIST]" in the scenario stands for a list of store numbers the user pasted. To use it
+  set "scope_store_ids": ["LIST"] exactly. Never invent or copy store numbers for it.
 - Product scopes COMBINE: scope_family and scope_legacy_tier set together mean "this size AND
   this tier". "12cm collectors" -> scope_family "12cm" + scope_legacy_tier "Collectors".
   "17cm rare collectors" -> "17cm" + "Rare Collectors". "collectors" alone -> tier only (all
@@ -137,6 +143,7 @@ Return STRICT JSON only, no prose:
   "interpretation": "one sentence restating what you understood, in plain English",
   "adjustments": [
     {"adjustment_type": "...", "label": "...", "value_numeric": number-or-null, "value_text": null,
+     "variety": null,
      "scope_merchant": null, "scope_region": null, "scope_state": null, "scope_velocity_tier": null,
      "scope_sku_id": null, "scope_family": null, "scope_legacy_tier": null, "scope_store_ids": null}
   ],
@@ -332,10 +339,75 @@ class RejectReq(BaseModel):
     reason: str
 
 
+_NUM = re.compile(r"(?<![\w.$#/-])(\d{3,5})(?![\w.%/-]|\s*(?:cm|units?|shelves|shelf|carts?|trays?)\b)")
+
+
+def _extract_store_list(text: str) -> tuple:
+    """A pasted list of store numbers is lifted out of the text deterministically, so the
+    model never has to copy 100 numbers (and cannot drop or invent one). Returns
+    (text with the list replaced by a marker, [store numbers]). Under 8 numbers the text is
+    left alone and the model reads them itself."""
+    found = _NUM.findall(text or "")
+    if len(found) < 8:
+        return text, []
+    ids, seen = [], set()
+    for x in found:
+        if int(x) not in seen:
+            seen.add(int(x))
+            ids.append(int(x))
+    out = _NUM.sub("\x00", text)
+    out = re.sub(r"(?:\x00[\s,;|/&]*(?:and\s+)?)+", " [STORE LIST] ", out)
+    return " ".join(out.split()), ids
+
+
+def _resolve_variety(cur, a: dict) -> list:
+    """'Monstera Bulbasaur 17cm' -> scope_sku_id (the assorted HD SKU it ships under) and
+    value_text 'aster:<codes>|<name>' so the engine ships ONLY that variety. Mutates `a`;
+    returns warnings. Ambiguous or unknown names leave the adjustment without a product, and
+    validation then drops it."""
+    name = str(a.pop("variety", "") or "").strip()
+    words = [w for w in re.findall(r"[a-z0-9']+", name.lower()) if len(w) >= 3 and w not in ("the", "and", "plant")]
+    if a.get("adjustment_type") != "directed_shipment":
+        a["adjustment_type"] = "named variety on a non-shipment"
+        return [f"A named variety ('{name}') can only be used to send product (a directed shipment). "
+                f"To block or limit, name the product group instead."]
+    a["scope_family"] = a["scope_legacy_tier"] = a["scope_sku_id"] = None
+    a["value_text"] = None
+    if not words:
+        return []
+    cur.execute("""SELECT v.aster_code::text AS code, v.product_name, m.hd_sku_id
+                   FROM variety_parsed_reference v
+                   JOIN aster_product_mapping m ON m.aster_code::text = v.aster_code::text
+                   WHERE m.active AND m.hd_sku_id IS NOT NULL AND """
+                + " AND ".join(["v.product_name ILIKE %s"] * len(words)),
+                [f"%{w}%" for w in words])
+    rows = cur.fetchall()
+    if not rows:
+        return [f"No plant variety matches '{name}'. Check the spelling, or name the product group instead."]
+    skus = sorted({r["hd_sku_id"] for r in rows})
+    if len(skus) > 1:
+        ex = sorted({r["product_name"] for r in rows})[:4]
+        return [f"'{name}' matches more than one product ({'; '.join(ex)}). Add the size, e.g. '{name} 17cm'."]
+    if a.get("adjustment_type") != "directed_shipment":
+        # never let it fall through with no product (an exclusion with no product would block
+        # everything for those stores): make it an unknown type so validation drops it
+        a["adjustment_type"] = "named variety on a non-shipment"
+        return [f"A named variety ('{name}') can only be used to send product (a directed shipment). "
+                f"To block or limit, name the product group instead."]
+    codes = sorted({r["code"] for r in rows})
+    label = min((r["product_name"] for r in rows), key=len)
+    label = re.sub(r"\s+(Everyday|Jute Kit|Ceramic Kit|Canopy)$", "", label, flags=re.I)
+    a["scope_sku_id"] = int(skus[0])
+    a["value_text"] = f"aster:{','.join(codes)}|{label}"
+    return [f"Only {label} will be sent (Aster {', '.join(codes)}). It ships only if this week's "
+            f"availability has that variety; nothing is substituted if it is short."]
+
+
 def interpret(cur, text: str) -> dict:
     """English -> {interpretation, adjustments, warnings}. Nothing is written. Shared by the
     /parse endpoint and tests/scenario_battery.py so the battery exercises the real path."""
     cat = _catalog(cur)
+    text, store_list = _extract_store_list(text)
     user_msg = (f"ADJUSTMENT TYPES (the only ones you may use):\n\n"
                 f"{_VOCAB}\n\n"
                 f"CATALOG (valid scope values):\n{json.dumps(cat)}\n\n"
@@ -350,7 +422,19 @@ def interpret(cur, text: str) -> dict:
     if not isinstance(parsed, dict):
         raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
     raw_adj = parsed.get("adjustments")
-    adjustments, warns = _validate(raw_adj if isinstance(raw_adj, list) else [], cat)
+    raw_adj = raw_adj if isinstance(raw_adj, list) else []
+    pre = []
+    for a in raw_adj:
+        if not isinstance(a, dict):
+            continue
+        if a.get("scope_store_ids") in (["LIST"], "LIST"):
+            a["scope_store_ids"] = list(store_list)
+        if a.get("variety"):
+            pre += _resolve_variety(cur, a)
+    adjustments, warns = _validate(raw_adj, cat)
+    warns = pre + warns
+    if store_list:
+        warns.insert(0, f"Read {len(store_list)} store numbers from your list. Check that count is right.")
     adjustments, w2 = _check_stores(cur, adjustments)
     warns = [str(w) for w in (parsed.get("warnings") or [])
              if isinstance(w, str) and not w.lstrip().startswith(("{", "["))] + warns + w2
@@ -430,7 +514,7 @@ def pending_scenarios(user=Depends(get_current_user)):
         for s in rows:
             cur.execute("""SELECT adjustment_type, label, value_numeric, scope_merchant, scope_region,
                                   scope_state, scope_velocity_tier, scope_sku_id, scope_family,
-                                  scope_legacy_tier, scope_store_ids, stores_affected
+                                  scope_legacy_tier, scope_store_ids, stores_affected, value_text
                            FROM weekly_adjustments WHERE scenario_id = %s ORDER BY created_at""",
                         (s["id"],))
             s["adjustments"] = cur.fetchall()

@@ -110,3 +110,20 @@ def test_combined_product_names_resolve_to_family_plus_tier():
     # a real family or tier is never rewritten
     ok, _w = SC._validate([{"adjustment_type": "exclusion", "label": "x", "scope_family": "12cm"}], cat)
     assert ok[0]["scope_family"] == "12cm" and not ok[0].get("scope_legacy_tier")
+
+
+def test_pasted_store_list_is_lifted_out_exactly():
+    ids = [101 + i for i in range(114)]
+    text = "Send 3 shelves (21 units each, 63 units) of Monstera Bulbasaur 17cm to stores " + ", ".join(map(str, ids))
+    out, found = SC._extract_store_list(text)
+    assert found == ids and "[STORE LIST]" in out
+    assert "17cm" in out and "63 units" in out and "3 shelves" in out          # sizes and counts are not stores
+    assert not any(str(i) in out for i in ids[:5])
+    # one per line, as pasted from a spreadsheet, with a repeat
+    nl = chr(10)
+    out, found = SC._extract_store_list("stores:" + nl + nl.join(map(str, ids + [101])) + nl + "get 3 shelves of littles")
+    assert found == ids
+    # a short list is left for the model to read
+    assert SC._extract_store_list("take stores 121, 608 and 664 off") == ("take stores 121, 608 and 664 off", [])
+    # a SKU number is not a store
+    assert SC._extract_store_list("skip SKU 1012138479 for store 121")[1] == []

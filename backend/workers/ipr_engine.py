@@ -353,6 +353,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     supply = defaultdict(int)
     avail_meta, aster_lines = {}, defaultdict(list)
     line_genus = {}
+    line_plant = {str(r["id"]): str(r["plant_id"] or "") for r in avail_rows}   # line -> Aster code
     for r in avail_rows:
         supply[r["sku_id"]] += int(r["units_available"] or 0)
         avail_meta.setdefault(r["sku_id"], {"code_level": r["code_level"],
@@ -447,7 +448,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     _scn_status = bool(cur.fetchone())
     cur.execute(f"""
         SELECT wa.id::text AS adj_id, wa.scenario_id::text AS scenario_id, wa.label,
-               wa.adjustment_type, wa.value_numeric,
+               wa.adjustment_type, wa.value_numeric, wa.value_text,
                wa.scope_merchant, wa.scope_region, wa.scope_state, wa.scope_velocity_tier,
                wa.scope_store_ids, wa.scope_sku_id, wa.scope_family, wa.scope_legacy_tier,
                ps.name AS scenario_name, ps.created_by AS requested_by
@@ -463,7 +464,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if preview and SCENARIO_OVERRIDES:
         for _i, _a in enumerate(SCENARIO_OVERRIDES):
             scn_all.append({**{k: None for k in (
-                "scenario_id", "value_numeric", "scope_merchant", "scope_region", "scope_state",
+                "scenario_id", "value_numeric", "value_text", "scope_merchant", "scope_region", "scope_state",
                 "scope_velocity_tier", "scope_store_ids", "scope_sku_id", "scope_family",
                 "scope_legacy_tier", "scenario_name", "requested_by", "approved_by")},
                 "adj_id": f"preview-{_i}", "label": f"preview {_i}", **_a})
@@ -623,8 +624,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # shelf at a time across the scoped SKUs this batch can pack (most supply first). Needs
     # both a store scope and a product scope; shelves are clamped to directed_max_shelves.
     dir_max = int(S.get("directed_max_shelves", DIRECTED_MAX_SHELVES) or DIRECTED_MAX_SHELVES)
-    dir_trays = {}                         # (store, sku) -> [trays, adj_id]
+    dir_trays = {}                         # (store, sku) -> [trays, adj_id, variety codes | None, name]
     for a in scn_directed:
+        # value_text "aster:1001312,3000668|Monstera Bulbasaur 17cm" = ship ONLY that variety.
+        # HD SKUs are assortments; the variety is the Aster plant code on the availability line.
+        _vt = str(a.get("value_text") or "")
+        _codes, _vname = None, None
+        if _vt.startswith("aster:"):
+            _c, _, _vname = _vt[6:].partition("|")
+            _codes = frozenset(x.strip() for x in _c.split(",") if x.strip()) or None
+        a["_codes"], a["_vname"] = _codes, (_vname or None)
         _sh = min(dir_max, int(round(float(a["value_numeric"] or 0))))
         _skus = sorted((k for k in supply
                         if k in sku_info and (pack.get(k) or {}).get("trays_per_shelf")
@@ -638,7 +647,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             for i in range(_sh):
                 k = _skus[i % len(_skus)]
                 t = int(pack[k]["trays_per_shelf"])
-                e_ = dir_trays.setdefault((sid, k), [0, a["adj_id"]])
+                e_ = dir_trays.setdefault((sid, k), [0, a["adj_id"], a["_codes"], a["_vname"]])
                 e_[0] += t
                 scn_fx[a["adj_id"]]["trays_requested"] += t
 
@@ -1121,6 +1130,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         l_ = lines[(store_id, sku_id)]
         if _dir:
             l_["directed_trays"], l_["directed_adj"] = _dir[0], _dir[1]
+            if _dir[2]:
+                l_["variety_codes"], l_["variety_name"] = _dir[2], (_dir[3] or "named variety")
             scn_fx[_dir[1]]["lines"] += 1
             scn_fx[_dir[1]]["stores"].add(store_id)
         tps = max(1, int(pk.get("trays_per_shelf") or 1))
@@ -1463,7 +1474,33 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     for sku_id, lst in by_sku.items():
         want = sum(l["trays"] * l["upt"] for l in lst)
         lst.sort(key=lambda x: (-x["priority"], x["store_id"]))
+        # Named-variety directed shipments first: they may only use that variety's lines, and
+        # what they take is removed from the SKU's general pool before anyone else draws.
+        _vleft = {}
         for l in lst:
+            vc = l.get("variety_codes")
+            if not vc:
+                continue
+            if vc not in _vleft:
+                _vleft[vc] = sum(av for lid, av in aster_lines.get(sku_id, []) if line_plant.get(lid) in vc)
+            deny = store_deny.get(l["store_id"], NO_DENY)
+            _vg = {line_genus.get(lid, "") for lid, _av in aster_lines.get(sku_id, []) if line_plant.get(lid) in vc}
+            can = 0 if (deny & _vg) else min(l["trays"], _vleft[vc] // l["upt"])
+            if can < l["trays"]:
+                can = 0          # all or nothing per store: a named shipment is not sent part-filled
+            l["alloc_trays"], l["alloc_units"] = int(can), int(can) * l["upt"]
+            _vleft[vc] -= l["alloc_units"]
+            for _g in sorted(_vg):                       # take it out of that genus's pool
+                _t = min(l["alloc_units"], pools.rem[sku_id].get(_g, 0))
+                pools.rem[sku_id][_g] -= _t
+            if can < l["trays"]:
+                short = (l["trays"] - can) * l["upt"]
+                unfilled[sku_id] += short
+                l["short_units"] = short
+                l["variety_short"] = True
+        for l in lst:
+            if l.get("variety_codes"):
+                continue
             # a store with a variety restriction draws only from the varieties it may receive
             deny = store_deny.get(l["store_id"], NO_DENY)
             can = min(l["trays"], pools.left(sku_id, deny) // l["upt"])
@@ -1496,6 +1533,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # (§17 tray caps), approved test quantities and unreliable-inventory lines are not used.
     fam_lines = defaultdict(list)
     for l in ship.values():
+        if l.get("directed_trays"):
+            # a directed shipment is exact: its shortfall is never made up with something
+            # else, and it is never topped up as a substitute for another line
+            continue
         fam_lines[(l["store_id"], l["family"])].append(l)
     gaps = []
     for fk, fl in fam_lines.items():
@@ -1547,6 +1588,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             f"{len(gaps):,} short store x families")
 
     directed_stores = set()
+    _vmiss = defaultdict(lambda: [0, 0, None])
+    for l in ship.values():
+        if l.get("variety_short"):
+            _vmiss[l["directed_adj"]][0] += 1
+            _vmiss[l["directed_adj"]][1] += l["short_units"]
+            _vmiss[l["directed_adj"]][2] = l["variety_name"]
+    for _aid, (_n, _u, _nm) in sorted(_vmiss.items()):
+        decide("validation", f"Directed shipment of {_nm}: {_u:,} units for {_n} store(s) could not be "
+                             f"filled — this availability does not have enough of that variety. Nothing "
+                             f"else was substituted.", severity="warning", variety=_nm, units=_u, stores=_n)
     for l in ship.values():
         if l.get("directed_trays"):
             _g = min(l.get("alloc_trays", 0), l["directed_trays"])
@@ -1705,6 +1756,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             for c in out:
                 if any(pools.denied_supply(x[1], _deny) > 0 for x in c["contents"]):
                     c["handling_tag"] = _tag
+        _vn = {l["sku_id"]: l["variety_name"] for l in olines if l.get("variety_codes")}
+        if _vn:
+            for c in out:
+                _names = sorted({_vn[x[1]] for x in c["contents"] if x[1] in _vn})
+                if _names:
+                    c["handling_tag"] = "; ".join(filter(None, [c.get("handling_tag"),
+                                                                 "ONLY " + " / ".join(_names).upper()]))
         grade_framework = {"AA": 3, "A": 3, "B": 2, "C+": 2, "C": 1, "C-": 1, "D": 1}
         top_grade = min((l["grade"] for l in olines), key=GRADE_ORDER.index)
         if len(out) > grade_framework[top_grade]:
@@ -2303,13 +2361,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # use up the restricted varieties first. line_remaining[(deny, line)] is that group's share.
     line_remaining, sku_lines_order = {}, {}
     sku_committed = defaultdict(lambda: defaultdict(int))       # sku -> deny set -> units
+    line_group = {}                                             # (store, sku) -> its line group
     for st_id2, o2 in orders.items():
         for l in o2["lines"]:
-            sku_committed[l["sku_id"]][store_deny.get(st_id2, NO_DENY)] += l["alloc_units"]
+            _grp = (("variety", l["variety_codes"]) if l.get("variety_codes")
+                    else store_deny.get(st_id2, NO_DENY))
+            line_group[(st_id2, l["sku_id"])] = _grp
+            sku_committed[l["sku_id"]][_grp] += l["alloc_units"]
     for sku_id, by_group in sku_committed.items():
         _lines = [[lid, av, line_genus.get(lid, "")] for lid, av in aster_lines.get(sku_id, [])]
-        for deny, got in store_rules.assign_lines(by_group, _lines, _distribute_units_across_lines,
-                                                  rank=line_rank).items():
+        for deny, got in store_rules.assign_sku_lines(by_group, _lines, line_plant,
+                                                      _distribute_units_across_lines,
+                                                      rank=line_rank).items():
             sku_lines_order[(sku_id, deny)] = [lid for lid, _av in aster_lines.get(sku_id, []) if got.get(lid)]
             for lid, q in got.items():
                 line_remaining[(deny, lid)] = line_remaining.get((deny, lid), 0) + q
@@ -2357,7 +2420,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                               f"WK{iso[0]}{iso[1]:02d}-C{cart_seq:04d}", code, True))
             if c.get("handling_tag"):
                 cart_tag_rows.append((c["handling_tag"], cid))
-            _deny = store_deny.get(store_id, NO_DENY)
+            _store_deny = store_deny.get(store_id, NO_DENY)
             t = template.setdefault(code, {"cart_count": 0, "stores": set(), "units": 0, "shelves": None})
             t["cart_count"] += 1
             t["stores"].add(store_id)
@@ -2373,6 +2436,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             t.setdefault("cart_ids", []).append(cid)
             for (pos, sk, tr, u, kt, pid) in c["contents"]:
                 need_u, trays_left, segs = u, tr, []
+                _deny = line_group.get((store_id, sk), _store_deny)    # deny set, or a named variety
                 for lid in sku_lines_order.get((sk, _deny), []):
                     if need_u <= 0:
                         break
