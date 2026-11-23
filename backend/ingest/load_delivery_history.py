@@ -114,6 +114,9 @@ def main():
     ap.add_argument("--year", type=int, default=date.today().year)
     ap.add_argument("--weeks", default="1-53")
     ap.add_argument("--shipments")
+    ap.add_argument("--replace", action="store_true",
+                    help="for the weeks read, also REMOVE rows this loader added earlier that are "
+                         "no longer in the workbook (stores taken off a load after routing changed)")
     a = ap.parse_args()
     lo, hi = (int(x) for x in a.weeks.split("-")) if "-" in a.weeks else (int(a.weeks), int(a.weeks))
     base = Path(a.shipments) if a.shipments else DEFAULT_DIR / str(a.year) / "shipments"
@@ -157,7 +160,16 @@ def main():
         f"| unknown stores skipped {sum(1 for k in found if k[1] not in known):,} ({len(unknown)} stores) "
         f"| to add {len(new):,} across {len({k[0] for k in new})} weeks, {len({k[1] for k in new}):,} stores")
     log(f"skipped while reading: {dict(skipped_all)} | week folders with no readable workbook: {no_wb}")
-    log(f"manifest rows before {len(have):,} -> after {len(have) + len(new):,}")
+    gone = []
+    if a.replace:
+        weeks_read = sorted({k[0] for k in found})
+        cur.execute("""SELECT week_number, store_id, load_code FROM delivery_manifest
+                       WHERE week_number = ANY(%s) AND source = 'workbook_tabs'""", (weeks_read,))
+        gone = [(r["week_number"], r["store_id"], r["load_code"]) for r in cur.fetchall()
+                if (r["week_number"], r["store_id"], r["load_code"]) not in found]
+        log(f"--replace: {len(gone)} row(s) loaded earlier are no longer in the workbook and will be "
+            f"removed: {gone[:40]}")
+    log(f"manifest rows before {len(have):,} -> after {len(have) + len(new) - len(gone):,}")
     if not a.apply:
         log("DRY RUN - nothing written. Re-run with --apply.")
         return
@@ -167,6 +179,9 @@ def main():
         VALUES (%s,%s,%s,%s,%s,%s,'workbook_tabs', now())""",
         [(str(uuid.uuid4()), sid, ship, dl, wk, load) for (wk, sid, load), (ship, dl) in new.items()],
         page_size=500)
+    for wk, sid, load in gone:
+        cur.execute("""DELETE FROM delivery_manifest WHERE week_number = %s AND store_id = %s
+                       AND load_code = %s AND source = 'workbook_tabs'""", (wk, sid, load))
     conn.commit()
     cur.execute("SELECT COUNT(*) AS n, COUNT(DISTINCT week_number) AS w FROM delivery_manifest")
     r = cur.fetchone()

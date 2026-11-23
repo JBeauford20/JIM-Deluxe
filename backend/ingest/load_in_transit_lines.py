@@ -114,7 +114,8 @@ def find_sources(folder: Path, week: int):
         return max(hits, key=lambda p: p.stat().st_mtime)
     compiled = pick([f"Week {week} Compiled.xlsx", f"Week {week}-2026 Workbook.xlsx",
                      f"WK {week}-2026 Workbook.xlsx"])
-    carts = pick([f"Week {week} Stores and Carts*.xlsx"], prefer=("updated",))
+    carts = pick([f"Week {week} Stores and Carts*.xlsx", f"Stores and Carts Week {week}*.xlsx",
+                  f"*Stores and Carts*{week}*.xlsx"], prefer=("updated",))
     pack = pick([f"Week {week} Pack Plan File*.xlsx"], prefer=("final", "revised"))
     missing = [n for n, p in (("Compiled", compiled), ("Stores and Carts", carts),
                               ("Pack Plan File", pack)) if p is None]
@@ -125,6 +126,18 @@ def find_sources(folder: Path, week: int):
 
 def read_compiled(path):
     wb = _wb(path)
+    if "Compiled" not in wb.sheetnames:
+        # No Compiled sheet (WK 48 was routed without one): stack the per-load tabs, which is
+        # all the Compiled sheet ever was. Same reader as the delivery-history backfill.
+        names = list(wb.sheetnames)
+        wb.close()
+        import load_delivery_history as _h
+        wk = next((int(m.group(1)) for m in map(_h.LOAD_RE.match, names) if m), None)
+        if wk is None:
+            raise SystemExit(f"{path}: no Compiled sheet and no load tabs (NN-N1 / NN-S2 ...)")
+        from datetime import date as _d
+        rows, _sk = _h.read_workbook(Path(path), wk, _d.today().year)
+        return [(s, load, dl) for s, load, _ship, dl in rows]
     ws = wb["Compiled"]
     it = ws.iter_rows(values_only=True)
     h = [str(x).strip() if x else "" for x in next(it)]
