@@ -248,29 +248,61 @@ def _validate(adjustments: list, cat: dict) -> tuple:
 
 
 def _check_stores(cur, adjustments: list) -> tuple:
-    """Drop store numbers that are not in the store master and say what handling each named
-    store carries (do not ship, store-master restriction) so the reviewer sees it."""
+    """Drop store numbers that are not in the store master and tell the reviewer what each
+    named store's handling means FOR THIS REQUEST: blocked stores, and a store-master product
+    rule that an approved directed shipment would override. A rule that does not touch the
+    product (a No Hedera store receiving a Monstera) is not mentioned."""
     ids = sorted({i for a in adjustments for i in (a.get("scope_store_ids") or [])})
     if not ids:
         return adjustments, []
     cur.execute("""SELECT column_name FROM information_schema.columns
-                   WHERE table_name = 'stores' AND column_name = 'sku_restriction'""")
-    extra = ", sku_restriction, master_status" if cur.fetchone() else ""
+                   WHERE table_name = 'stores' AND column_name = 'sku_rule'""")
+    extra = ", sku_restriction, sku_rule" if cur.fetchone() else ""
     cur.execute(f"SELECT store_id, store_name, store_status{extra} FROM stores WHERE store_id = ANY(%s)", (ids,))
     known = {r["store_id"]: r for r in cur.fetchall()}
-    directed_ids = {i for a in adjustments if a.get("adjustment_type") == "directed_shipment"
-                    for i in (a.get("scope_store_ids") or [])}
     warns = [f"Store {i} is not in the store master — ignored." for i in ids if i not in known]
-    for i, r in sorted(known.items()):
-        if (r.get("store_status") or "active") in ("do_not_ship", "paused", "inactive", "hold"):
-            warns.append(f"Store {i} is {r['store_status'].replace('_', ' ')}: nothing ships there "
-                         f"whatever this scenario says.")
-        elif r.get("sku_restriction") and i in directed_ids:
-            warns.append(f"OVERRIDE: store {i} has a store-master restriction ({r['sku_restriction']}). "
-                         f"Approving this directed shipment sends the product anyway.")
-        elif r.get("sku_restriction"):
-            warns.append(f"Store {i} has a store-master restriction ({r['sku_restriction']}); the "
-                         f"scenario cannot ship anything outside it.")
+    blocked = sorted(i for i, r in known.items()
+                     if (r.get("store_status") or "active") in ("do_not_ship", "paused", "inactive", "hold"))
+    for i in blocked:
+        warns.append(f"Store {i} is {known[i]['store_status'].replace('_', ' ')}: nothing ships there "
+                     f"whatever this scenario says.")
+    ruled = {i: r for i, r in known.items() if r.get("sku_rule") and i not in blocked}
+    if ruled:
+        from services.store_master import store_rules
+        cur.execute("SELECT value FROM ipr_settings WHERE key = 'store_sku_rules'")
+        row = cur.fetchone()
+        rules = store_rules.merged_rules(row["value"] if row else None)
+        cur.execute("""SELECT k.sku_id, k.family, k.program, k.legacy_product_group, k.is_holiday,
+                              fm.ipr_family FROM skus k LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
+                       WHERE k.active""")
+        skus = [dict(r) for r in cur.fetchall()]
+        over, limited = {}, {}
+        for a in adjustments:
+            if a.get("adjustment_type") in ("exclusion", "cart_target_override", "allocation_cap"):
+                continue                          # taking product away never conflicts with a rule
+            scoped = [k for k in skus
+                      if (not a.get("scope_sku_id") or k["sku_id"] == a["scope_sku_id"])
+                      and (not a.get("scope_family") or k["family"] == a["scope_family"])
+                      and (not a.get("scope_legacy_tier") or k["legacy_product_group"] == a["scope_legacy_tier"])]
+            for i in (a.get("scope_store_ids") or []):
+                if i not in ruled:
+                    continue
+                rule = store_rules.rule_for(ruled[i], rules)
+                if not scoped or all(store_rules.sku_allowed(rule, k)[0] for k in scoped):
+                    continue                      # the rule does not keep this product out
+                if a["adjustment_type"] == "directed_shipment" and store_rules.directed_overrides(rule):
+                    over.setdefault(ruled[i].get("sku_restriction") or rule.get("label"), []).append(i)
+                else:
+                    limited.setdefault(ruled[i].get("sku_restriction") or rule.get("label"), []).append(i)
+        for label, st in sorted(over.items()):
+            st = sorted(set(st))
+            warns.append(f"OVERRIDE: {len(st)} store(s) normally restricted to '{label}' will receive this "
+                         f"product if it is approved: {', '.join(map(str, st[:40]))}"
+                         + (f" and {len(st) - 40} more" if len(st) > 40 else "") + ".")
+        for label, st in sorted(limited.items()):
+            st = sorted(set(st))
+            warns.append(f"{len(st)} store(s) are restricted to '{label}', so this will not ship there: "
+                         f"{', '.join(map(str, st[:40]))}" + (f" and {len(st) - 40} more" if len(st) > 40 else "") + ".")
     out = []
     for a in adjustments:
         if a.get("scope_store_ids"):
