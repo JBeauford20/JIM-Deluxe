@@ -80,7 +80,18 @@ def _catalog(cur) -> dict:
     cur.execute("SELECT sku_id, description FROM skus WHERE active = true ORDER BY sku_id")
     skus = [{"sku_id": r["sku_id"], "description": (r["description"] or "").strip()[:48]}
             for r in cur.fetchall()]
+    # Combined product names people actually say ("12cm Collector", "17cm Rare Collector"):
+    # each maps to a size family AND a tier, which the engine matches together.
+    cur.execute("""SELECT fm.ipr_family AS name, MIN(k.family) AS family,
+                          MIN(k.legacy_product_group) AS tier
+                   FROM skus k JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
+                   WHERE k.active AND fm.ipr_family IS NOT NULL AND k.family IS NOT NULL
+                     AND k.legacy_product_group IS NOT NULL
+                   GROUP BY fm.ipr_family
+                   HAVING COUNT(DISTINCT k.family) = 1 AND COUNT(DISTINCT k.legacy_product_group) = 1""")
+    groups = {r["name"]: {"scope_family": r["family"], "scope_legacy_tier": r["tier"]} for r in cur.fetchall()}
     return {
+        "product_groups": groups,
         "regions":        col("SELECT DISTINCT region AS v FROM stores WHERE region IS NOT NULL ORDER BY 1"),
         "merchants":      col("SELECT DISTINCT merchant AS v FROM stores WHERE merchant IS NOT NULL ORDER BY 1"),
         "states":         col("SELECT DISTINCT UPPER(TRIM(state)) AS v FROM stores "
@@ -109,6 +120,10 @@ RULES
 - Prefer scope_family for product groups (e.g. "bowls" -> family "H2O Bowl"); use scope_sku_id only
   when the user clearly means one specific SKU.
 - Give each adjustment a short human label.
+- Product scopes COMBINE: scope_family and scope_legacy_tier set together mean "this size AND
+  this tier". "12cm collectors" -> scope_family "12cm" + scope_legacy_tier "Collectors".
+  "17cm rare collectors" -> "17cm" + "Rare Collectors". "collectors" alone -> tier only (all
+  sizes). CATALOG.product_groups lists the combined names and the family + tier each one means.
 - Specific stores: put their numbers in scope_store_ids as a JSON list of integers, e.g. [608, 664].
   Store numbers are checked after you answer, so do not warn that you cannot verify them.
 - "More" / "less" / a percentage of a product -> demand_multiplier. "At least N shelves" ->
@@ -149,6 +164,12 @@ Scenario: "Black Friday Bowls going to the South"
        "scope_store_ids":null}],"warnings":[]}"""
 
 
+def _pkey(v) -> str:
+    """'12cm Collectors' / '12 cm collector' -> '12cmcollector' (case, spaces, plural)."""
+    k = "".join(ch for ch in str(v or "").lower() if ch.isalnum())
+    return k[:-1] if k.endswith("s") else k
+
+
 def _validate(adjustments: list, cat: dict) -> tuple:
     """Return (clean_adjustments, warnings). Drops invalid types; nulls unknown scope values."""
     clean, warns = [], []
@@ -156,6 +177,7 @@ def _validate(adjustments: list, cat: dict) -> tuple:
              "scope_state": set(cat["states"]), "scope_velocity_tier": set(cat["velocity_tiers"]),
              "scope_family": set(cat["families"]), "scope_legacy_tier": set(cat["legacy_tiers"])}
     sku_ids = {s["sku_id"] for s in cat["skus"]}
+    groups = {_pkey(k): v for k, v in (cat.get("product_groups") or {}).items()}
     for a in adjustments:
         if not isinstance(a, dict):
             continue
@@ -185,6 +207,13 @@ def _validate(adjustments: list, cat: dict) -> tuple:
                 a["scope_sku_id"] = int(a["scope_sku_id"])
         except (TypeError, ValueError):
             a["scope_sku_id"] = None
+        # a combined name in either product field ("12cm Collectors") -> its family + tier
+        if isinstance(a, dict):
+            for f in ("scope_family", "scope_legacy_tier"):
+                g = groups.get(_pkey(a.get(f))) if a.get(f) and a.get(f) not in valid[f] else None
+                if g:
+                    a["scope_family"], a["scope_legacy_tier"] = g["scope_family"], g["scope_legacy_tier"]
+                    break
         for f, allowed in valid.items():
             v = a.get(f)
             if v and v not in allowed:

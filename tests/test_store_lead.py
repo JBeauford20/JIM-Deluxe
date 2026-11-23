@@ -94,3 +94,19 @@ def test_directed_shipment_needs_stores_product_and_a_sane_count():
                   {"scope_store_ids": [121], "scope_family": "H2O Bowl", "value_numeric": 40},
                   {"scope_store_ids": [121], "scope_family": "H2O Bowl", "value_numeric": 1.5}):
         assert SC._validate([{**base, **extra}], CAT)[0] == [], extra
+
+
+def test_combined_product_names_resolve_to_family_plus_tier():
+    cat = {**CAT, "families": ["12cm", "17cm", "H2O Bowl"], "legacy_tiers": ["Collectors", "Rare Collectors"],
+           "product_groups": {"12cm Collector": {"scope_family": "12cm", "scope_legacy_tier": "Collectors"},
+                              "17cm Rare Collector": {"scope_family": "17cm", "scope_legacy_tier": "Rare Collectors"}}}
+    for said in ("12cm Collectors", "12cm collector", "12 CM Collectors"):
+        ok, _w = SC._validate([{"adjustment_type": "directed_shipment", "label": "d", "value_numeric": 2,
+                                "scope_store_ids": [627], "scope_family": said}], cat)
+        assert len(ok) == 1 and ok[0]["scope_family"] == "12cm" and ok[0]["scope_legacy_tier"] == "Collectors", said
+    ok, _w = SC._validate([{"adjustment_type": "exclusion", "label": "x", "scope_region": "Northern",
+                            "scope_legacy_tier": "17cm Rare Collectors"}], cat)
+    assert ok[0]["scope_family"] == "17cm" and ok[0]["scope_legacy_tier"] == "Rare Collectors"
+    # a real family or tier is never rewritten
+    ok, _w = SC._validate([{"adjustment_type": "exclusion", "label": "x", "scope_family": "12cm"}], cat)
+    assert ok[0]["scope_family"] == "12cm" and not ok[0].get("scope_legacy_tier")
