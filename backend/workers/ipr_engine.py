@@ -2835,8 +2835,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         lns = o2["lines"]
         best = max(lns, key=lambda x: x["priority"])
         fk = (store_id, best["family"])
-        top_fam_vel = max(fam_vel[(store_id, l["family"])] for l in lns)
-        top_recency = max(rec[(l["store_id"], l["sku_id"])] for l in lns)
+        top_fam_vel = max(fam_vel.get((store_id, l["family"]), 0.0) for l in lns)
+        top_recency = max(rec.get((l["store_id"], l["sku_id"]), 0.0) for l in lns)
         order_rows.append((oid, run_id, store_id, "draft", round(best["priority"] * 100, 2),
                            round(top_fam_vel, 4), round(top_recency, 4),
                            service[fk][1], RISK_SCORE[best["risk"]],
@@ -2903,7 +2903,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         for l in lns:
             line_rows.append((oid, store_id, l["sku_id"], l["alloc_units"], l["alloc_units"], None,
                               avail_meta.get(l["sku_id"], {}).get("hard_good_type"),
-                              round(l["sku_fit"], 4), round(fam_vel[(store_id, l["family"])], 4)))
+                              round(l["sku_fit"], 4), round(fam_vel.get((store_id, l["family"]), 0.0), 4)))
 
     psycopg2.extras.execute_batch(cur, """
         INSERT INTO orders (id, run_id, store_id, status, priority_score, velocity_component,
