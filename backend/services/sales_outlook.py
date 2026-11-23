@@ -19,6 +19,10 @@ from __future__ import annotations
 
 DEFAULT_PCT = 0.60
 DEFAULT_WEEKS = 4
+# Sales dollars as the AGS feed reports them (what the team sees on the sales report); where a
+# row has no feed dollars (history before 2026) fall back to units x SKU wholesale price. Units x
+# price alone dropped SKUs with no wholesale price on file (three holiday SKUs, ~$50K a week).
+PRICE = "COALESCE(sa.dollars, sa.units_sold * COALESCE(k.wholesale_price_whl, 0))"
 
 
 def _setting(cur, key, default):
@@ -42,7 +46,7 @@ def _forecast_factor(cur, anchor) -> dict:
     Back-tested one week ahead over Aug 31 - Nov 16 2026: 7.2% average miss, 6.9% over the last
     five weeks, against 7.2% / 10.0% for "same as last week". Limited to -20% / +10% a week.
     """
-    price = "sa.units_sold * COALESCE(k.wholesale_price_whl, 0)"
+    price = PRICE
     cur.execute(f"""SELECT (%s::date - sa.sale_date) / 7 AS b, SUM({price}) AS usd
                     FROM sales sa JOIN skus k ON k.sku_id = sa.sku_id
                     WHERE sa.sale_date > %s::date - 35 AND sa.sale_date <= %s::date
@@ -79,12 +83,12 @@ def compute(cur, summary: dict) -> dict | None:
         return None
     o = summary.get("objective") or {}
     ce = summary.get("cart_economics") or {}
-    cur.execute("""SELECT COALESCE(SUM(sa.units_sold * COALESCE(k.wholesale_price_whl, 0)), 0) AS usd,
+    cur.execute(f"""SELECT COALESCE(SUM({PRICE}), 0) AS usd,
                           COALESCE(SUM(sa.units_sold), 0) AS units
                    FROM sales sa JOIN skus k ON k.sku_id = sa.sku_id
                    WHERE sa.sale_date > %s::date - 7 AND sa.sale_date <= %s::date""", (anchor, anchor))
     wk = cur.fetchone()
-    cur.execute("""SELECT COALESCE(SUM(sa.units_sold * COALESCE(k.wholesale_price_whl, 0)), 0) / 4.0 AS usd
+    cur.execute(f"""SELECT COALESCE(SUM({PRICE}), 0) / 4.0 AS usd
                    FROM sales sa JOIN skus k ON k.sku_id = sa.sku_id
                    WHERE sa.sale_date > %s::date - 28 AND sa.sale_date <= %s::date""", (anchor, anchor))
     avg4 = cur.fetchone()
@@ -107,6 +111,6 @@ def compute(cur, summary: dict) -> dict | None:
         "added": round(added), "expected": round(expected),
         "goal": round(goal), "gap": round(goal - expected),
         "demand_forecast": o.get("unconstrained_weekly_demand_retail"),
-        "basis": "units x SKU wholesale price",
+        "basis": "sales dollars from the AGS feed",
         "engine_trusted_inventory_estimate": o.get("expected_weekly_retail"),
     }
