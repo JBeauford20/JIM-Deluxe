@@ -4634,6 +4634,7 @@ xGo=function(n){go(n);
   if(n==='xrep')xRenderRep();
   if(n==='xhist')xLoadHist();
   if(n==='xpol')xLoadPol();
+  if(n==='xappr')xLoadAppr();   // was missing from this override: the queue never loaded on click (2026-11-23)
   window.scrollTo(0,0);};
 function xOpenNeeds(){X.exc.kind='needs';X.exc.page=0;xGo('exc');}
 
@@ -5382,7 +5383,11 @@ document.addEventListener('visibilitychange',function(){try{
   if(!document.hidden&&sc&&sc.classList.contains('active'))xLoadAppr();}catch(e){}});
 /* ---------- boot ---------- */
 var _xBoot0=xBoot;
-xBoot=async function(){xLoadRuns();await _xBoot0();xRenderSteps();};
+/* The Approvals count on the tab, known from sign-in on, not only after the tab is opened. */
+async function xApprCount(){try{
+  var r=await api('/api/scenarios/pending'),b=document.getElementById('xApprBadge'),n=(r.pending||[]).length;
+  if(b){b.textContent=n>99?'99+':n;b.classList.toggle('zero',!n);}}catch(e){}}
+xBoot=async function(){xLoadRuns();await _xBoot0();xRenderSteps();xApprCount();};
 </script>
 
 </body>
