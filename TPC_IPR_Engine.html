@@ -1036,6 +1036,24 @@ var SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZi
 function tokGet(){try{return JSON.parse(localStorage.getItem('tpc_ipr_auth')||localStorage.getItem('jim_auth')||'null');}catch(e){return null;}}
 function tokSet(d){try{localStorage.setItem('tpc_ipr_auth',JSON.stringify(d));localStorage.removeItem('jim_auth');}catch(e){}}
 function tokClear(){try{localStorage.removeItem('tpc_ipr_auth');localStorage.removeItem('jim_auth');}catch(e){}}
+/* Password-reset and invite links. Supabase sends the person back here with the session in
+   the address bar (#access_token=...&type=recovery). Take it, sign them in, clean the
+   address, and open "set a new password". An expired link gets a plain message. */
+(function(){try{
+  var h=(location.hash||'').replace(/^#/,'');if(!h)return;
+  var p={};h.split('&').forEach(function(kv){var i=kv.indexOf('=');if(i>0)p[decodeURIComponent(kv.slice(0,i))]=decodeURIComponent(kv.slice(i+1).replace(/\+/g,' '));});
+  if(p.error||p.error_code){sessionStorage.setItem('tpc_link_err',p.error_description||'That link is no longer valid.');history.replaceState(null,'',location.pathname+location.search);return;}
+  if(!p.access_token)return;
+  tokSet({access_token:p.access_token,refresh_token:p.refresh_token||null,token_type:'bearer',expires_in:+p.expires_in||3600});
+  if(p.type==='recovery'||p.type==='invite')sessionStorage.setItem('tpc_set_pw','1');
+  history.replaceState(null,'',location.pathname+location.search);
+}catch(e){}})();
+window.addEventListener('load',function(){try{
+  var er=sessionStorage.getItem('tpc_link_err');
+  if(er){sessionStorage.removeItem('tpc_link_err');setTimeout(function(){toast(er+' Ask for a new password reset link.','err');},600);}
+  if(sessionStorage.getItem('tpc_set_pw')){sessionStorage.removeItem('tpc_set_pw');
+    setTimeout(function(){openChangePw();toast('You are signed in from your reset link. Set a new password now.','ok');},900);}
+}catch(e){}});
 function authHdr(){var t=tokGet();return (t&&t.access_token)?{'Authorization':'Bearer '+t.access_token}:{};}
 /* ROLE GATING (UX only — server enforces real permissions) */
 var ROLE_RANK={viewer:0,order_writer:1,manager:2,admin:3};
