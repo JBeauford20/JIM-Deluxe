@@ -53,6 +53,7 @@ BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
 # Duplicate-run control (§1, §24, §28): run statuses that no longer represent live orders,
 # and statuses/pipeline stages meaning the week's orders have already left the building.
 CANCELLED_RUN_STATUSES = ("cancelled", "canceled", "failed", "rejected", "superseded", "deleted")
+IGNORE_RUN_IDS = set()      # PREVIEW ONLY: run ids left out of the duplicate-run control (what-ifs)
 RELEASED_RUN_STATUSES = ("exported", "released", "shipped")
 RELEASED_PIPELINE = ("Aster Exported", "Released", "Shipped", "Received or Estimated Received",
                      "Performance Matured", "Sent to Pin Routes", "Routing Response Received")
@@ -290,8 +291,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                      AND COALESCE(status, '') NOT IN %s""",
                 (shipping_week, CANCELLED_RUN_STATUSES))
     prior_runs = [r for r in cur.fetchall()
-                  if r["engine_version"] == ENGINE_VERSION or r["status"] in RELEASED_RUN_STATUSES
-                  or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
+                  if (r["engine_version"] == ENGINE_VERSION or r["status"] in RELEASED_RUN_STATUSES
+                      or (r["pipeline_status"] or "") in RELEASED_PIPELINE)
+                  and not (preview and str(r["id"]) in IGNORE_RUN_IDS)]
     released = [r for r in prior_runs
                 if r["status"] in RELEASED_RUN_STATUSES or (r["pipeline_status"] or "") in RELEASED_PIPELINE]
     if released:
@@ -1670,6 +1672,193 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                trays_trimmed=fx["trays_trimmed"], requested_by=a["requested_by"],
                approved_by=a.get("approved_by"))
 
+    # ══ 6c. CART COMPLETION — qualified gap-fill to one full cart (CEO review, 2026-11-23) ══
+    # "Keep the full-cart requirement, but add qualified gap-fill logic. A store should not be
+    # rejected because its initial demand calculation fills only part of the cart." A due store
+    # whose order would not fill one cart gets trays added, best product first, until one cart
+    # is full. Spec V2 §21 bounds it: the product must have forecast demand AT THAT STORE and
+    # the store may not exceed its approved selling window. Here that window is a weeks-of-supply
+    # ceiling by store-family grade (gap_fill_weeks_supply_by_grade: looser for AA/A, tighter for
+    # C/D), never past the freshness window or the §17 H2O/Terrarium 13-week limit. Products
+    # stopped at the 13-week review, store-rule blocks and variety bans stay out. If no qualified
+    # product can complete the cart, nothing is added and the order is pushed as before.
+    # Phase 1 uses the store's own selling SKUs; comparable-store and test items come later.
+    completion = {"stores_tried": 0, "stores": 0, "trays": 0, "units": 0, "wholesale": 0.0,
+                  "stores_short": 0, "enabled": False}
+    _cc_on = str(S.get("cart_completion", True)).lower() not in ("false", "0", "no")
+    if min_full_carts > 0 and _cc_on:
+        completion["enabled"] = True
+        _wos_set = S.get("gap_fill_weeks_supply_by_grade") or {}
+        _wos_def = {"AA": 10, "A": 10, "B": 8, "C+": 8, "C": 7, "C-": 6, "D": 6}
+        _cc_consol = str(S.get("cart_consolidate", True)).lower() not in ("false", "0", "no")
+
+        def _cc_best_fill(state):
+            """Fill of the fullest cart the §7 packer would build from {profile: [trays, cap,
+            height, max shelves]} — the same shelf and cart rules, on tray counts alone."""
+            shelves = []
+            for pid, (t, cap, h, pmax) in state.items():
+                full, rem = divmod(int(t), cap)
+                shelves += [(pid, 1.0, h, pmax)] * full
+                if rem:
+                    shelves.append((pid, rem / cap, h, pmax))
+            shelves.sort(key=lambda s: (PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
+            if _cc_consol:
+                shelves.sort(key=lambda s: (-s[2], PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
+            carts = []
+            for pid, frac, h, pmax in shelves:
+                fits = [c for c in carts if len(c["sh"]) < CART_SHELVES and c["h"] + h <= CART_CEILING_IN
+                        and c["pc"][pid] < pmax]
+                if fits:
+                    c = (min(fits, key=lambda c: (CART_CEILING_IN - c["h"] - h, len(c["sh"])))
+                         if _cc_consol else fits[0])
+                else:
+                    c = {"sh": [], "h": 0.0, "pc": defaultdict(int)}
+                    carts.append(c)
+                c["sh"].append(frac)
+                c["h"] += h
+                c["pc"][pid] += 1
+            best = 0.0
+            for c in carts:
+                hit = c["h"] + MIN_SHELF_CLEAR_IN > CART_CEILING_IN
+                slots = len(c["sh"]) if (hit and len(c["sh"]) < CART_SHELVES) else CART_SHELVES
+                best = max(best, sum(c["sh"]) / slots)
+            return best
+
+        def _cc_prof(sku_id):
+            pk = pack[sku_id]
+            return (pk["profile_id"], int(pk["trays_per_shelf"]),
+                    float(pk["clear_height_in"] or MIN_SHELF_CLEAR_IN), int(pk["max_shelves"] or CART_SHELVES))
+
+        _cc_by_store = defaultdict(list)
+        for l in ship.values():
+            if (l["plannable"] and not l.get("variety_codes") and l["sku_id"] in pack
+                    and (sku_info[l["sku_id"]].get("family") or "") != "Prebuilt Cart"):
+                _cc_by_store[l["store_id"]].append(l)
+
+        def _cc_state(ls, trays_of):
+            state = {}
+            for l in ls:
+                t = trays_of(l)
+                if t > 0:
+                    pid, cap, h, pmax = _cc_prof(l["sku_id"])
+                    state.setdefault(pid, [0, cap, h, pmax])[0] += t
+            return state
+
+        # Short stores: the order as allocated would not fill one cart, so today all of it is
+        # pushed and the stock it was holding ships nowhere. Hand that stock back, then serve
+        # the short stores best first: each gets its own need back while stock lasts, then
+        # qualified gap-fill, and is kept only if one cart ends up full.
+        short = []
+        for st_id, ls in _cc_by_store.items():
+            if st_id in directed_stores or not any(l.get("alloc_trays", 0) > 0 for l in ls):
+                continue
+            if _cc_best_fill(_cc_state(ls, lambda l: l.get("alloc_trays", 0))) < min_cart_fill:
+                short.append(st_id)
+        short.sort(key=lambda st: (-max(l.get("priority", 0) for l in _cc_by_store[st]), st))
+        orig = {}
+        for st_id in short:
+            deny = store_deny.get(st_id, NO_DENY)
+            for l in _cc_by_store[st_id]:
+                if l.get("alloc_trays", 0) > 0:
+                    orig[(st_id, l["sku_id"])] = l["alloc_trays"]
+                    pools.give_back(l["sku_id"], l["alloc_units"], deny)
+        completion["stores_tried"] = len(short)
+        for st_id in short:
+            ls = _cc_by_store[st_id]
+            deny = store_deny.get(st_id, NO_DENY)
+            got = defaultdict(int)             # sku -> trays this store holds in this pass
+            for l in sorted(ls, key=lambda x: (-x.get("sku_fit", 0), x["sku_id"])):
+                o = orig.get((st_id, l["sku_id"]), 0)
+                if o:                          # its own allocation back, while stock lasts
+                    got[l["sku_id"]] = min(o, int(pools.left(l["sku_id"], deny) // l["upt"]))
+            state = _cc_state(ls, lambda l: got[l["sku_id"]])
+            fill = _cc_best_fill(state)
+            cands = sorted((l for l in ls if l["fc"] > 0 and not l.get("reactivation")),
+                           key=lambda x: (-x.get("sku_fit", 0), -x["fc"], x["sku_id"]))
+
+            def _room(l):
+                g = l.get("grade")
+                w = float(_wos_set.get(g) or _wos_def.get(g, 6))
+                w = min(w, fresh_of.get(l["sku_id"], fresh_days) / 7.0)
+                if l["family"] in H2O_TERR_FAMILIES:
+                    w = min(w, float(S["h2o_terrarium_window_weeks"]))
+                if l["conf"] == "UNUSABLE":
+                    w = min(w, 4.0)             # §5: unreliable inventory keeps a tight ceiling
+                have = got[l["sku_id"]]
+                ceiling = int((l["fc"] * w - max(0.0, l["projected"])) // l["upt"])
+                by_wos = max(l["trays"], ceiling) - have        # its own need always qualifies
+                by_supply = int(pools.left(l["sku_id"], deny) // l["upt"]) - have
+                return max(0, min(by_wos, by_supply)), w, by_wos, by_supply
+
+            for _ in range(600):
+                if fill >= min_cart_fill:
+                    break
+                pick = None
+                for l in cands:                # best product first; it must move the cart forward
+                    if _room(l)[0] <= 0:
+                        continue
+                    pid, cap, h, pmax = _cc_prof(l["sku_id"])
+                    trial = {k: list(v) for k, v in state.items()}
+                    trial.setdefault(pid, [0, cap, h, pmax])[0] += 1
+                    f2 = _cc_best_fill(trial)
+                    if f2 > fill + 1e-9:
+                        pick = (l, trial, f2)
+                        break
+                if not pick:
+                    break
+                got[pick[0]["sku_id"]] += 1
+                state, fill = pick[1], pick[2]
+            if fill < min_cart_fill:
+                completion["stores_short"] += 1     # nothing qualified completes the cart
+                _w = sum(1 for l in cands if _room(l)[2] <= 0)
+                _s = sum(1 for l in cands if _room(l)[2] > 0 and _room(l)[3] <= 0)
+                _why = ("no_selling_product" if not cands else "weeks_of_supply_limit" if _s == 0
+                        else "no_stock_available" if _w == 0 else "both_limits")
+                completion.setdefault("short_why", {}).setdefault(_why, 0)
+                completion["short_why"][_why] += 1
+                completion.setdefault("short_fill_bands", [0, 0, 0, 0])[min(3, int(fill / 0.25))] += 1
+                continue                       # lines keep their original figures; pushed below
+            parts, tr_gap, u_gap, w_gap, u_delta = [], 0, 0, 0.0, 0
+            for l in ls:
+                n, o = got[l["sku_id"]], orig.get((st_id, l["sku_id"]), 0)
+                if n <= 0 and o <= 0:
+                    continue
+                if n > 0:
+                    pools.take(l["sku_id"], n * l["upt"], deny)
+                u_delta += (n - o) * l["upt"]
+                l["alloc_trays"], l["alloc_units"] = n, n * l["upt"]
+                gap = max(0, n - max(l["trays"], o))            # trays beyond the store's own need
+                if gap:
+                    wos_after = (max(0.0, l["projected"]) + l["alloc_units"]) / l["fc"]
+                    l["completion_trays"], l["completion_wos"] = gap, round(wos_after, 1)
+                    tr_gap, u_gap, w_gap = tr_gap + gap, u_gap + gap * l["upt"], w_gap + gap * l["upt"] * usd(l)
+                    parts.append(f"{sku_info[l['sku_id']]['description'].strip()} +{gap} tray(s) "
+                                 f"({gap * l['upt']}u; sells {l['fc']:.1f}/wk here, {wos_after:.1f} wks of "
+                                 f"supply after delivery, limit {_room(l)[1]:.0f})")
+                orig.pop((st_id, l["sku_id"]), None)
+            alloc_units_total += u_delta
+            completion["stores"] += 1
+            completion["trays"] += tr_gap
+            completion["units"] += u_gap
+            completion["wholesale"] += w_gap
+            completion["primary_units"] = completion.get("primary_units", 0) + sum(
+                l["alloc_units"] for l in ls) - u_gap
+            decide("cart_completion",
+                   (f"Cart completed: this store's own need fills the cart once stock is taken from "
+                    f"lower-priority short orders" if not tr_gap else
+                    f"Cart completed with qualified gap-fill: {tr_gap} tray(s) / {u_gap}u beyond the "
+                    f"store's own need so one cart is full. Every product sells at this store and stays "
+                    f"inside its weeks-of-supply limit: " + "; ".join(parts)),
+                   store_id=st_id, severity="info", trays=tr_gap, units=u_gap, wholesale=round(w_gap, 2),
+                   skus=sorted(l["sku_id"] for l in ls if l.get("completion_trays")))
+        for sk in {k[1] for k in orig} | {l["sku_id"] for st in short for l in _cc_by_store[st]}:
+            if sk in sku_left:
+                sku_left[sk] = pools.left(sk)
+        completion["wholesale"] = round(completion["wholesale"], 2)
+        log(f"Cart completion: {completion['stores']:,} of {completion['stores_tried']:,} short stores completed "
+            f"with qualified gap-fill (+{completion['units']:,}u); {completion['stores_short']:,} had no "
+            f"qualified product to finish a cart")
+
     # ══ 7. TRAYS -> CART-LOADING PLAN (§17–19): physical fit only ═══════════
     # §19.1 cart economics — editable assumptions, not rules: delivered cart cost is roughly
     # $180–$300 (default $240); normal wholesale value per cart is roughly $1,700–$3,000.
@@ -1890,7 +2079,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                f"Order PUSHED to next week: {shelves} shelf(s) on {len(o['carts'])} cart(s), "
                f"{n_full} full — below the one-full-CC-cart minimum (${W:,.0f} wholesale, {units:,}u; "
                f"one-week sales at risk ${lost:,.0f}). Need recalculated next week with "
-               f"{streak + 1} extra coverage week(s); never padded (leadership decision 2026-11-20)",
+               f"{streak + 1} extra coverage week(s); no qualified gap-fill product could complete "
+               f"a cart inside the store's weeks-of-supply limit (leadership decision 2026-11-20)",
                store_id=store_id, severity="warning" if streak >= 2 else "info", action="push",
                order_wholesale=round(W, 2), carts=len(o["carts"]), shelves=shelves, full_carts=n_full,
                units=units, lost_sales_one_week=round(lost, 2), consecutive_pushes=streak + 1)
@@ -2220,6 +2410,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "availability_grades": grades,
         "production": production,
+        "cart_completion": completion,
         "sales_anchor": str(anchor), "arrival": str(arrival),
         "arrival_basis": ({"mode": "store delivery profile", **{k: lead_summary[k] for k in
                            ("network_days", "stores_with_history", "by_basis", "by_division", "deliveries")}}
@@ -2632,6 +2823,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                risk=l["risk"], need_units=round(l["need"], 1), need_trays=l["trays"],
                alloc_trays=l["alloc_trays"], upt=l["upt"], cap_note=l["cap_note"],
                conversion=l["conversion"], priority=round(l["priority"], 4), sku_fit=round(l["sku_fit"], 4),
+               primary_trays=max(0, l["alloc_trays"] - l.get("completion_trays", 0) - l.get("gap_fill_trays", 0)),
+               gap_fill_trays=min(l["alloc_trays"], l.get("completion_trays", 0) + l.get("gap_fill_trays", 0)),
+               gap_fill_reason=("cart completion: sells at this store, inside the weeks-of-supply limit"
+                                if l.get("completion_trays") else
+                                "same-family substitute for a short product" if l.get("gap_fill_trays") else None),
+               weeks_supply_after=l.get("completion_wos"),
                price=None if l["price"] is None else round(l["price"], 2), price_src=l["price_src"],
                cadence_grade=l.get("cadence_grade"), cadence_weeks=l.get("cadence_weeks"),
                coverage_weeks=round(l["cover_wk"], 2),

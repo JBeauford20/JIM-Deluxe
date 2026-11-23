@@ -19,6 +19,7 @@ from __future__ import annotations
 
 DEFAULT_PCT = 0.60
 DEFAULT_WEEKS = 4
+DEFAULT_GROWTH = 1200000        # CEO review 2026-11-23: $1.2M growth objective; $900K is the floor
 # Sales dollars as the AGS feed reports them (what the team sees on the sales report); where a
 # row has no feed dollars (history before 2026) fall back to units x SKU wholesale price. Units x
 # price alone dropped SKUs with no wholesale price on file (three holiday SKUs, ~$50K a week).
@@ -100,6 +101,7 @@ def compute(cur, summary: dict) -> dict | None:
     plan = float(ce.get("wholesale_value") or 0)
     added = plan * pct / weeks
     goal = float(o.get("minimum_weekly_retail") or 0)
+    growth = _setting(cur, "weekly_growth_objective", DEFAULT_GROWTH)
     expected = baseline + added
     return {
         "baseline": round(baseline), "baseline_units": int(wk["units"] or 0),
@@ -110,6 +112,7 @@ def compute(cur, summary: dict) -> dict | None:
         "plan_wholesale": round(plan), "sell_through_pct": pct, "sell_through_weeks": weeks,
         "added": round(added), "expected": round(expected),
         "goal": round(goal), "gap": round(goal - expected),
+        "growth_goal": round(growth), "gap_to_growth": round(growth - expected),
         "demand_forecast": o.get("unconstrained_weekly_demand_retail"),
         "basis": "sales dollars from the AGS feed",
         "engine_trusted_inventory_estimate": o.get("expected_weekly_retail"),

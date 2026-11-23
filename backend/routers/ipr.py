@@ -17,7 +17,8 @@ DECISION_TYPES = ("block", "review_hold", "allocation_shortfall", "validation", 
                   "assortment_block", "capacity_cap", "response_adjustment",
                   "scenario_applied", "scenario_exclusion",
                   "store_rule_block", "sku_restriction_block", "variety_restriction_block",
-                  "variety_restriction", "directed_shipment", "store_rule_override")
+                  "variety_restriction", "directed_shipment", "store_rule_override",
+                  "cart_completion")
 # Spec §11.3 / §27: commercial reactivation is approved by the assigned DSM and then the
 # Home Depot Sales Director — never by the IPR/development team. 'admin' may act as either
 # role (Josh), but one person can never sign both steps. 'manager' joined the director step

@@ -168,21 +168,56 @@ def facts(cur, run_id: str) -> dict | None:
 
     checks = []
 
-    def check(rule, status, result, detail=""):
-        checks.append({"rule": rule, "status": status, "result": result, "detail": detail})
+    def check(rule, status, result, detail="", tier="supporting"):
+        checks.append({"rule": rule, "status": status, "result": result, "detail": detail, "tier": tier})
+
+    # plants only: hardware and pre-built carts are counted as "units" on the availability
+    # sheet but are not plants (CEO review: 283,730 "available" against 135,687 on his summary)
+    cur.execute("""SELECT COALESCE(SUM(al.units_available), 0) AS total,
+                          COALESCE(SUM(al.units_available) FILTER (WHERE COALESCE(fm.ipr_family, '') = 'Prebuilt Cart'
+                              OR (COALESCE(fm.ipr_family, '') = 'Climb-ITT' AND COALESCE(k.program, '') = '')), 0) AS hard
+                   FROM availability_lines al JOIN skus k ON k.sku_id = al.sku_id
+                   LEFT JOIN ipr_family_map fm ON fm.sku_id = al.sku_id
+                   WHERE al.batch_id = (SELECT batch_id FROM recommendation_runs WHERE id = %s)""", (run_id,))
+    av = cur.fetchone()
+    cc = s.get("cart_completion") or {}
 
     if ol:
-        check(f"Weekly sales of at least {_usd(goal)} at wholesale",
+        check(f"Weekly sales of at least {_usd(goal)} (recovery floor)",
               "met" if _f(ol.get("gap")) <= 0 else "not_met",
               f"Expected {_usd(ol.get('expected'))}, {_usd(abs(_f(ol.get('gap'))))} "
-              f"{'above' if _f(ol.get('gap')) <= 0 else 'short of'} the goal",
-              f"Baseline forecast {_usd(ol.get('baseline'))} plus {_usd(ol.get('added'))} added by this order.")
+              f"{'above' if _f(ol.get('gap')) <= 0 else 'short of'} the floor",
+              f"Baseline forecast {_usd(ol.get('baseline'))} plus {_usd(ol.get('added'))} added by this order.",
+              tier="primary")
+        if ol.get("growth_goal"):
+            check(f"Weekly sales of {_usd(ol.get('growth_goal'))} (growth objective)",
+                  "met" if _f(ol.get("gap_to_growth")) <= 0 else "not_met",
+                  f"{_usd(abs(_f(ol.get('gap_to_growth'))))} "
+                  f"{'above' if _f(ol.get('gap_to_growth')) <= 0 else 'short of'} the objective",
+                  f"Store demand the system can identify is {_usd(ol.get('demand_forecast'))} a week; the "
+                  f"rest of the gap needs more demand found, not only more product shipped.", tier="primary")
+        _dem = _f(ol.get("demand_forecast"))
+        if _dem:
+            check("Identified store demand is being served",
+                  "met" if _f(ol.get("expected")) >= 0.9 * _dem else
+                  "partly" if _f(ol.get("expected")) >= 0.75 * _dem else "not_met",
+                  f"Expected sales are {_pct(_f(ol.get('expected')) / _dem)} of the {_usd(_dem)} demand forecast",
+                  f"Sales at risk this week: {_usd(o.get('lost_minimum_cart_pushes_one_week'))} from orders held "
+                  f"under the full-cart rule, {_usd(o.get('lost_unavailable_inventory'))} from product not "
+                  f"available, {_usd(o.get('lost_blocks_and_holds'))} from the sell-through review and store "
+                  f"rules.", tier="primary")
+        check("Estimated margin dollars", "info", "Not reported yet",
+              "Needs approved category margin estimates; none have been supplied.", tier="primary")
     check("No order ships without one full cart",
           "met" if int(_f(ce.get("min_order_full_carts"), 1)) > 0 else "not_met",
           f"{_n(split['routine'])} routine store order(s) ship, each with a full cart; "
           f"{_n(pushed.get('stores'))} lighter orders were pushed to next week",
           f"{_n(split['directed'])} more store(s) ship under an approved directed shipment, which is exempt "
-          f"from the minimum. A full cart means at least {_pct(ce.get('min_cart_fill_pct'))} of its shelf space is filled.")
+          f"from the minimum. A full cart means at least {_pct(ce.get('min_cart_fill_pct'))} of its shelf space is filled."
+          + (f" Qualified gap-fill completed a cart at {_n(cc.get('stores'))} of {_n(cc.get('stores_tried'))} "
+             f"short stores, adding {_n(cc.get('units'))} units beyond their own need; "
+             f"{_n(cc.get('stores_short'))} had no qualified product to finish a cart."
+             if cc.get("enabled") else " Gap-fill to complete carts was not in use for this order."))
     if per_cart is not None:
         check(f"Cart value between {_usd(low)} and {_usd(high)} at wholesale",
               ("met" if _f(ce.get("low_value_carts")) <= 0.25 * max(1.0, _f(ce.get("carts"))) else "partly")
@@ -237,6 +272,9 @@ def facts(cur, run_id: str) -> dict | None:
         "families": base["families"], "exceptions": exceptions, "rejected": rejected, "pending": pending,
         "overrides": overrides, "checks": checks, "manual_edits": base["manual_edits"],
         "policy_changes": len(base["policy_changes"]), "status_changes": len(base["status_changes"]),
+        "cart_completion": cc,
+        "availability": {"plant_units": int(_f(av["total"]) - _f(av["hard"])), "hard_goods_units": int(_f(av["hard"])),
+                         "note": "hard goods are Climb-itt hardware and pre-built carts, not plants"},
         "data": base["data"], "allocation": {"available_units": a.get("available_units"),
                                              "allocated_units": a.get("allocated_units"),
                                              "unfilled_demand_units": a.get("unfilled_demand_units")},
@@ -255,6 +293,9 @@ busy, and not technical. They want to know why the order looks the way it does.
 
 Use ONLY the facts in the JSON below. Every number you write must appear in the facts or be a
 simple sum, difference or share of numbers that do. Never invent a cause the facts do not show.
+Revenue and sell-through are the controlling results; cart and operating rules support them. Lead
+with revenue against the floor and the growth objective. When you compare what shipped with what
+was available, use availability.plant_units (allocation.available_units also counts hardware).
 Plain business English: no section numbers, no system names, no words like "gate", "run",
 "directive", "allocation", "engine" or "pipeline" (say "the system" if you must). Be direct, and
 say plainly when something is weak or needs a decision: do not defend the order.
@@ -276,6 +317,7 @@ def overview(f: dict) -> dict:
     slim = {k: f[k] for k in ("week", "headline", "trucks", "split", "outlook", "not_shipped", "divisions",
                               "exceptions", "rejected", "pending", "overrides", "checks", "manual_edits",
                               "allocation", "cadence_by_grade", "data")}
+    slim["availability"], slim["cart_completion"] = f.get("availability"), f.get("cart_completion")
     slim["families"] = f["families"][:10]
     raw = ipr_ai.call_model(OVERVIEW_PROMPT, "FACTS (JSON):\n" + json.dumps(slim, default=str), max_tokens=6000)
     try:
@@ -441,16 +483,28 @@ def render(f: dict, ai: dict | None, generated_at=None) -> str:
     p.append(f'<p class="note">{E(" ".join(extra))}</p>')
 
     # 5. leadership rules
-    p.append('<h2>How the order holds up against the leadership rules</h2><table><tr><th>Rule</th><th>Result</th>'
-             '<th>Status</th></tr>'
-             + "".join(f'<tr><td><b>{E(c["rule"])}</b></td><td>{E(c["result"])}'
-                       + (f'<div class="muted">{E(c["detail"])}</div>' if c["detail"] else "")
-                       + f'</td><td><span class="pill {c["status"]}">{PILL[c["status"]]}</span></td></tr>'
-                       for c in f["checks"]) + "</table>")
-    met = sum(1 for c in f["checks"] if c["status"] == "met")
-    scored = sum(1 for c in f["checks"] if c["status"] != "info")
-    p.append(f'<p class="muted">{met} of {scored} rules met. Results are computed from the order itself, '
-             f'not written by the AI.</p>')
+    def _rules(rows):
+        return ('<table><tr><th>Requirement</th><th>Result</th><th>Status</th></tr>'
+                + "".join(f'<tr><td><b>{E(c["rule"])}</b></td><td>{E(c["result"])}'
+                          + (f'<div class="muted">{E(c["detail"])}</div>' if c["detail"] else "")
+                          + f'</td><td><span class="pill {c["status"]}">{PILL[c["status"]]}</span></td></tr>'
+                          for c in rows) + "</table>")
+
+    prim = [c for c in f["checks"] if c.get("tier") == "primary"]
+    supp = [c for c in f["checks"] if c.get("tier") != "primary"]
+    p.append('<h2>Does the order meet the business requirements?</h2>'
+             '<p class="muted">Revenue, sell-through and margin are the controlling requirements. The order '
+             'is judged on these first.</p>' + _rules(prim))
+    pm = sum(1 for c in prim if c["status"] == "met")
+    ps = sum(1 for c in prim if c["status"] != "info")
+    p.append(f'<p class="lead" style="margin-top:10px">{pm} of {ps} controlling requirements met.</p>')
+    p.append('<h3>Supporting rules: how the order was built</h3>'
+             '<p class="muted">These support the requirements above. Meeting them does not make up for '
+             'missing a controlling requirement.</p>' + _rules(supp))
+    met = sum(1 for c in supp if c["status"] == "met")
+    scored = sum(1 for c in supp if c["status"] != "info")
+    p.append(f'<p class="muted">{met} of {scored} supporting rules met. Results are computed from the order '
+             f'itself, not written by the AI.</p>')
 
     # 6. watch + breakdown
     if ai.get("watch"):

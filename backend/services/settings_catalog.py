@@ -79,6 +79,20 @@ CATALOG = [
          kind="money", default=900000, min=0, max=10000000,
          help="The goal the This Week readout measures against (wholesale dollars). Reporting only; "
               "it never adds product to orders."),
+    dict(key="cart_completion", group="Minimum order and carts", label="Complete a short cart with qualified gap-fill",
+         kind="bool", default=True,
+         help="When a due store's order does not fill one cart, add trays of products that sell at that "
+              "store, best first, until one cart is full. Off = a short order is always pushed."),
+    dict(key="gap_fill_weeks_supply_by_grade", group="Minimum order and carts",
+         label="Gap-fill ceiling: weeks of supply after delivery, by grade", kind="grade_int", min=1, max=12, allow_blank=True,
+         default={"AA": 10, "A": 10, "B": 8, "C+": 8, "C": 7, "C-": 6, "D": 6},
+         help="Gap-fill never takes a product past this many weeks of that store's sales (stock on hand "
+              "plus this delivery). Higher = more stores complete a cart, with more inventory risk. "
+              "Never past the freshness window or the 13-week H2O/Terrarium limit."),
+    dict(key="weekly_growth_objective", group="Demand and goal", label="Weekly growth objective",
+         kind="money", default=1200000, min=100000, max=5000000,
+         help="The weekly sales the business is growing toward. The weekly minimum is the recovery "
+              "floor; reports show the gap to both. Reporting only."),
     dict(key="plan_sell_through_pct", group="Demand and goal", label="Share of a shipment we expect to sell",
          kind="pct", default=0.6, min=0.1, max=1.0,
          help="Used for 'Added by this plan' on This Week: order value x this share, spread over the "

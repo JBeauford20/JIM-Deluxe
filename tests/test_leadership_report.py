@@ -23,7 +23,7 @@ FACTS = {
                     "stores_served": 80, "units_shipped": 5040, "trays_requested": 2394, "trays_granted": 1680,
                     "request": "Send one cart", "notes": ["34 stores short"], "followed": 80 / 114}],
     "rejected": [{"name": "x"}], "pending": 0, "overrides": 5, "manual_edits": 0,
-    "checks": [{"rule": "Goal", "status": "not_met", "result": "short", "detail": "d"},
+    "checks": [{"rule": "Goal", "status": "not_met", "result": "short", "detail": "d", "tier": "primary"},
                {"rule": "Full cart", "status": "met", "result": "ok", "detail": ""},
                {"rule": "Freight", "status": "info", "result": "14%", "detail": ""}],
     "data": {"sales_through": "2026-11-22"},
@@ -33,7 +33,7 @@ FACTS = {
 def test_renders_every_section_without_ai():
     html = lr.render(FACTS, None, generated_at=date(2026, 11, 23))
     for text in ("ship week of Nov 30, 2026", "Draft, not yet released", "about 6", "$577,665",
-                 "Short of goal", "80 of 114 stores", "70%", "1 of 2 rules met", "17cm &lt;Rare&gt;",
+                 "Short of goal", "80 of 114 stores", "70%", "1 of 1 supporting rules met", "0 of 1 controlling requirements met", "17cm &lt;Rare&gt;",
                  "could not be generated"):
         assert text in html, text
     assert "Nothing" not in html                      # empty not-shipped rows are left out
