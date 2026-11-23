@@ -4258,12 +4258,43 @@ function xRenderResults(){
 }
 function xReleaseBody(){
   var released=xStatus()==='exported',can=canRole('order_writer');
-  if(released)return '<div class="xbanner ok" style="margin:0"><i class="bi bi-check-circle-fill"></i><span><b>Released.</b> It stays on record; later changes are logged as amendments.</span></div>';
+  var em='<div style="margin-top:10px"><button class="xbtn xbtn-s xbtn-sm" onclick="xRelEmail()"><i class="bi bi-envelope"></i> Preview the release email</button></div>';
+  if(released)return '<div class="xbanner ok" style="margin:0"><i class="bi bi-check-circle-fill"></i><span><b>Released.</b> It stays on record; later changes are logged as amendments.</span></div>'+em;
   if(!can)return '<p class="xsmall xmuted" style="margin:0">An order writer or manager releases the plan.</p>';
   if(X.releasing)return '<p class="xsmall" style="margin:0 0 10px">Release this plan? Every store order is locked and the files are ready for Aster and routing. Exceptions do not hold the release.</p>'+
     '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="xbtn xbtn-p" id="twRelGo" onclick="xRelease()"><i class="bi bi-send-check"></i>Yes, release</button><button class="xbtn xbtn-s" onclick="X.releasing=false;xRefreshRelease()">Cancel</button></div>';
   return '<p class="xsmall xmuted" style="margin:0 0 10px">Open exceptions do not hold the release. Overrides (with manager approval) come in a later release.</p>'+
-    '<button class="xbtn xbtn-p" onclick="X.releasing=true;xRefreshRelease()"><i class="bi bi-send"></i>Release this plan</button>';
+    '<button class="xbtn xbtn-p" onclick="X.releasing=true;xRefreshRelease()"><i class="bi bi-send"></i>Release this plan</button>'+em;
+}
+/* ## Screen contract: Release email preview (This Week -> Release)
+   - Purpose: see exactly what the team would receive for this run, before anyone gets it.
+   - Primary action: read it; "Send to me" mails a TEST copy to your own address only.
+   - Data: GET /api/ipr/runs/{id}/release-report, POST .../release-report/send-to-me.
+   - States: loading, shown, sending, error. Nothing goes to the team from here. */
+async function xRelEmail(){
+  if(!X.run)return;
+  var o=document.getElementById('xRelMail');if(o)o.remove();
+  o=document.createElement('div');o.id='xRelMail';o.setAttribute('role','dialog');o.setAttribute('aria-label','Release email preview');
+  o.style.cssText='position:fixed;inset:0;background:rgba(20,30,25,.55);z-index:3000;display:flex;align-items:center;justify-content:center;padding:18px';
+  o.innerHTML='<div style="background:#fff;border-radius:10px;width:min(860px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden">'+
+    '<div style="display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #dfe8e2"><b id="xRelMailSubj" style="flex:1;font-size:13px">Loading the release email&hellip;</b>'+
+    '<button class="xbtn xbtn-p xbtn-sm" id="xRelMailSend" disabled onclick="xRelEmailSend()">Send to me</button><button class="xbtn xbtn-s xbtn-sm" onclick="document.getElementById(\'xRelMail\').remove()">Close</button></div>'+
+    '<div id="xRelMailNote" class="xwhy" style="padding:6px 14px"></div><iframe id="xRelMailFrame" title="Release email" style="border:0;width:100%;height:70vh"></iframe></div>';
+  document.body.appendChild(o);
+  try{
+    var r=await api('/api/ipr/runs/'+X.run+'/release-report');
+    document.getElementById('xRelMailSubj').textContent=r.subject;
+    document.getElementById('xRelMailFrame').srcdoc='<div style="padding:14px">'+r.html+'</div>';
+    document.getElementById('xRelMailNote').textContent='Preview only. "Send to me" sends a TEST copy to '+(r.your_email||'your address')+' and nobody else.'+(r.smtp_configured?'':' Mail is not set up on the server yet, so it will wait in the outbox instead of sending.');
+    var b=document.getElementById('xRelMailSend');if(b&&canRole('order_writer'))b.disabled=false;
+  }catch(e){document.getElementById('xRelMailSubj').textContent='Could not build the release email: '+e.message;}
+}
+async function xRelEmailSend(){
+  var b=document.getElementById('xRelMailSend');if(!b||b.disabled)return;b.disabled=true;b.textContent='Sending\u2026';
+  try{var r=await api('/api/ipr/runs/'+X.run+'/release-report/send-to-me',{method:'POST'});
+    toast(r.status==='sent'?'Test copy sent to '+r.to:(r.status==='queued'?'Mail is not set up yet: the test copy is waiting in the outbox for '+r.to:'Could not send: it is recorded as failed in the outbox'),r.status==='sent'?'success':'warning');
+    b.textContent=r.status==='sent'?'Sent':'Queued';
+  }catch(e){b.disabled=false;b.textContent='Send to me';toast('Not sent: '+e.message,'danger');}
 }
 function xRefreshRelease(){var p=document.querySelector('#twRelease .xpad');if(!p)return;var tags=p.firstElementChild?p.firstElementChild.outerHTML:'';p.innerHTML=tags+xReleaseBody();var g=document.getElementById('twRelGo');if(g)g.focus();}
 async function xRelease(){

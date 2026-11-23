@@ -261,6 +261,41 @@ def update_setting(key: str, body: SettingChange, user=Depends(require_role("man
                 "applies": "next engine run"}
 
 
+# ── Release report (the email the team gets when a week's orders are final) ───
+# Preview for anyone signed in. "Send to me" mails it to the person asking, marked TEST, so
+# the report can be checked on a real run before the team list is switched on. Without SMTP
+# settings the message is queued in email_outbox, never lost.
+@router.get("/runs/{run_id}/release-report")
+def release_report(run_id: str, user=Depends(get_current_user)):
+    from services import release_report as rr
+    with get_db() as conn:
+        d = rr.build(cursor(conn), run_id)
+        if not d:
+            raise HTTPException(404, "Run not found")
+        out = rr.render(d, test=True)
+        from services import emails
+        out["smtp_configured"] = emails.smtp_configured()
+        out["your_email"] = user.get("email") if isinstance(user, dict) else None
+        return out
+
+
+@router.post("/runs/{run_id}/release-report/send-to-me")
+def release_report_send_to_me(run_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
+    from services import emails, release_report as rr
+    to = user.get("email") if isinstance(user, dict) else None
+    if not to:
+        raise HTTPException(400, "Your login has no email address")
+    with get_db() as conn:
+        cur = cursor(conn)
+        d = rr.build(cur, run_id)
+        if not d:
+            raise HTTPException(404, "Run not found")
+        out = rr.render(d, test=True)
+        status = emails.send_or_queue(cur, to, out["subject"], out["text"], "release_report_test",
+                                      {"run_id": run_id}, html=out["html"])
+        return {"to": to, "status": status, "smtp_configured": emails.smtp_configured()}
+
+
 class ReactivationRequest(BaseModel):
     store_id: int
     ipr_family: str = Field(min_length=1, max_length=60)

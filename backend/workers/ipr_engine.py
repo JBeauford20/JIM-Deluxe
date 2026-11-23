@@ -2012,8 +2012,40 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     for l in ship.values():
         price_srcs[l["price_src"]] += l.get("alloc_units", 0)
 
+    # IDEAL PRODUCTION by family (release report): what stores sell per week, what they need
+    # now before any gate, what the greenhouse has, what ships, and the gap either way.
+    _prod = defaultdict(lambda: {"weekly_demand_units": 0.0, "weekly_demand_usd": 0.0, "need_units": 0,
+                                 "need_usd": 0.0, "available_units": 0, "shipped_units": 0})
+    for l in lines.values():
+        _p = _prod[l["family"]]
+        _p["weekly_demand_units"] += l["fc"]
+        _p["weekly_demand_usd"] += l["fc"] * usd(l)
+        _u = l.get("trays_unreduced", l["trays"]) * l["upt"]
+        _p["need_units"] += _u
+        _p["need_usd"] += _u * usd(l)
+    if not what_if_unlimited:
+        for _sk, _u in supply.items():
+            _prod[(sku_info.get(_sk) or {}).get("ipr_family") or "Unmapped"]["available_units"] += int(_u)
+    for _o in orders.values():
+        for l in _o["lines"]:
+            _prod[l["family"]]["shipped_units"] += l["alloc_units"]
+    for _p in _prod.values():
+        _p["weekly_demand_units"] = round(_p["weekly_demand_units"])
+        _p["weekly_demand_usd"] = round(_p["weekly_demand_usd"])
+        _p["need_usd"] = round(_p["need_usd"])
+        _p["short_units"] = max(0, _p["need_units"] - _p["available_units"])
+        _p["surplus_units"] = max(0, _p["available_units"] - _p["need_units"])
+    production = {
+        "by_family": {f: dict(v) for f, v in sorted(_prod.items())},
+        "totals": {k: sum(v[k] for v in _prod.values()) for k in
+                   ("weekly_demand_units", "weekly_demand_usd", "need_units", "need_usd",
+                    "available_units", "shipped_units", "short_units", "surplus_units")},
+        "note": "need = units to fill every store's need this week before any gate; short / surplus "
+                "compare that need with this availability, family by family",
+    }
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
+        "production": production,
         "sales_anchor": str(anchor), "arrival": str(arrival),
         "arrival_basis": ({"mode": "store delivery profile", **{k: lead_summary[k] for k in
                            ("network_days", "stores_with_history", "by_basis", "by_division", "deliveries")}}

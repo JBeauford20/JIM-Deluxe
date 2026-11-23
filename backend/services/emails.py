@@ -15,12 +15,14 @@ def smtp_configured() -> bool:
     return bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_FROM"))
 
 
-def _smtp_send(to_email: str, subject: str, body: str):
+def _smtp_send(to_email: str, subject: str, body: str, html: str | None = None):
     msg = EmailMessage()
     msg["From"] = os.environ["SMTP_FROM"]
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
     host = os.environ["SMTP_HOST"]
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER", "")
@@ -33,13 +35,13 @@ def _smtp_send(to_email: str, subject: str, body: str):
 
 
 def send_or_queue(cur, to_email: str, subject: str, body: str, kind: str,
-                  context: dict | None = None) -> str:
+                  context: dict | None = None, html: str | None = None) -> str:
     """Send now if SMTP is configured, else queue. Returns the resulting status.
     `cur` is an open cursor inside the caller's transaction."""
     status, error = "queued", None
     if smtp_configured():
         try:
-            _smtp_send(to_email, subject, body)
+            _smtp_send(to_email, subject, body, html)
             status = "sent"
         except Exception as e:                      # record, never raise into the request
             status, error = "failed", str(e)[:500]
