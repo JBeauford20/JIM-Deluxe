@@ -4196,6 +4196,8 @@ function xRenderResults(){
   var so=X.ipr.sales_outlook||null,baseFoot='what stores sell from stock on hand',incFoot='incremental sales';
   if(so){base=so.baseline||0;inc=so.added||0;exp=so.expected||0;gap=so.gap;
     baseFoot='actual sales, week ending '+xDate(so.baseline_week_ending)+' ('+xN(so.baseline_units)+' units)';
+    if(so.baseline_is_forecast){var bf=Math.round((so.baseline_factor-1)*1000)/10;
+      baseFoot='forecast for next week: last week sold '+xUsd(so.last_week_actual)+', '+(bf>0?'+':'')+bf+'% from '+so.baseline_method;}
     incFoot=xUsd(so.plan_wholesale)+' shipped &times; '+Math.round(so.sell_through_pct*100)+'% sold over '+so.sell_through_weeks+' weeks';}
   var scale=Math.max(exp,min)*1.1||1;
   h+='<div class="xpanel"><div class="xph"><h2>Weekly sales objective</h2><span class="sub">Weekly sales at wholesale: what we sell with no new inventory, what this plan adds in a week, and the two together.</span><span class="act"><span class="xsrc">Sec 2 &middot; objective</span></span></div>'+

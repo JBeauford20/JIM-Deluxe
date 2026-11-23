@@ -191,6 +191,10 @@ def render(d: dict, test: bool = True) -> dict:
         sa = {"demand": ol["demand_forecast"], "baseline": ol["baseline"], "added": ol["added"],
               "expected": ol["expected"], "goal": ol["goal"], "gap": ol["gap"]}
         _b = f"Baseline, no new inventory (actual sales, week ending {ol['baseline_week_ending']})"
+        if ol.get("baseline_is_forecast"):
+            _b = (f"Baseline, no new inventory (forecast for next week; last week sold "
+                  f"{_usd(ol['last_week_actual'])}, {(ol['baseline_factor'] - 1) * 100:+.1f}% from "
+                  f"{ol['baseline_method']})")
         _a = (f"Added by this plan ({_usd(ol['plan_wholesale'])} shipped x {ol['sell_through_pct'] * 100:.0f}% "
               f"sold over {ol['sell_through_weeks']:g} weeks)")
     else:
