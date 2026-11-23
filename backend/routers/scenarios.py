@@ -90,7 +90,10 @@ def _catalog(cur) -> dict:
                    GROUP BY fm.ipr_family
                    HAVING COUNT(DISTINCT k.family) = 1 AND COUNT(DISTINCT k.legacy_product_group) = 1""")
     groups = {r["name"]: {"scope_family": r["family"], "scope_legacy_tier": r["tier"]} for r in cur.fetchall()}
+    cur.execute("SELECT sku_id, description FROM skus WHERE active AND family = 'Prebuilt Cart' ORDER BY 1")
+    prebuilt = [{"sku_id": r["sku_id"], "description": r["description"]} for r in cur.fetchall()]
     return {
+        "prebuilt_carts": prebuilt,
         "product_groups": groups,
         "regions":        col("SELECT DISTINCT region AS v FROM stores WHERE region IS NOT NULL ORDER BY 1"),
         "merchants":      col("SELECT DISTINCT merchant AS v FROM stores WHERE merchant IS NOT NULL ORDER BY 1"),
@@ -120,6 +123,9 @@ RULES
 - Prefer scope_family for product groups (e.g. "bowls" -> family "H2O Bowl"); use scope_sku_id only
   when the user clearly means one specific SKU.
 - Give each adjustment a short human label.
+- A PRE-BUILT CART (a SKU whose description is in CATALOG.prebuilt_carts, e.g. "Climb-itt Bundle")
+  is one whole cart per unit. "Send a Climb-itt Bundle to stores ..." -> directed_shipment with
+  value_numeric 1 and scope_sku_id set to that SKU. Never use scope_family for it.
 - A SPECIFIC PLANT VARIETY (e.g. "Monstera Bulbasaur 17cm", "Thai Constellation 12cm", "Hedera
   Glacier") is not in the catalog: the catalog lists product groups. When the user names one,
   put its name INCLUDING THE SIZE if given in "variety" and leave scope_family, scope_legacy_tier
@@ -231,6 +237,13 @@ def _validate(adjustments: list, cat: dict) -> tuple:
             a["scope_sku_id"] = None
         # checked LAST, after unknown scope values were cleared: a directed shipment whose
         # product name was not recognised must not survive as "send to this store, no product"
+        if atype == "directed_shipment" and a.get("scope_sku_id") in {p["sku_id"] for p in cat.get("prebuilt_carts") or []}:
+            if float(a.get("value_numeric") or 0) != 1:
+                warns.append("A pre-built cart is sent one per store; the quantity was set to 1.")
+                a["value_numeric"] = 1
+            a["scope_family"] = a["scope_legacy_tier"] = None
+            warns.append("Pre-built cart: one whole cart per store, limited to the number on this "
+                         "week's availability. It is not drawn from plant availability.")
         if atype == "directed_shipment":
             shelves = float(a.get("value_numeric") or 0)
             if not any(a.get(f) for f in _STORE_SCOPES) or not any(a.get(f) for f in _SKU_SCOPES):

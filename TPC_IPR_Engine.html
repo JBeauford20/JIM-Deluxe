@@ -5141,7 +5141,7 @@ X.scnDraft=null;
 function xScnDoes(a){
   var v=a.value_numeric,n=v!=null?Number(v):null,sh=function(x){return x+(x===1?' shelf':' shelves');};
   switch(a.adjustment_type){
-    case 'directed_shipment':return 'Ship exactly '+sh(n)+' per store, whether or not the store has sold it';
+    case 'directed_shipment':if(a.prebuilt)return 'Send one pre-built cart per store';return 'Ship exactly '+sh(n)+' per store, whether or not the store has sold it';
     case 'allocation_floor':return 'At least '+sh(n)+' per store, trimmed to what each store sells';
     case 'allocation_cap':return 'No more than '+sh(n)+' per store';
     case 'demand_multiplier':return n==null?'Change demand':(n>=1?'Raise':'Lower')+' demand '+Math.abs(Math.round((n-1)*100))+'%';

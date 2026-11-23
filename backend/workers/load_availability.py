@@ -49,6 +49,7 @@ FAMILY_TO_HARD_GOOD = {
     'Sm Terrarium':  'terrarium_kit',
     'Med Terrarium': 'terrarium_kit',
     'Lg Terrarium':  'terrarium_kit',
+    'Prebuilt Cart': 'prebuilt_cart',   # pseudo SKU for a whole pre-built cart (e.g. Climb-itt Bundle)
 }
 
 from db_conn import get_conn
@@ -226,6 +227,8 @@ def load_availability(filepath: str, shipping_week: date = None,
             # Derive code_level from Aster prefix; default 1M if no Aster code
             aster = line.get('aster_code')
             code_level = '3M' if aster and aster.startswith('3') else '1M'
+            if (sk['family'] or '') == 'Prebuilt Cart':
+                code_level = '3M'        # a pre-built cart is a finished good: no kit to choose
 
             # Derive hard_good_type from SKU family
             family = sk['family'] or ''

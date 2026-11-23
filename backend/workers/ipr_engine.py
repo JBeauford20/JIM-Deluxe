@@ -2429,6 +2429,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             cart_seq += 1
             cid = str(uuid.uuid4())
             code = sig_code[cart_sig[(store_id, c["cart_number"])]]
+            # a pre-built cart keeps its own name on Stores and Carts ("Climb-itt Bundle"),
+            # the way permanent carts do, instead of a numbered CC config
+            _pb = {(sku_info[x[1]].get("description") or "").strip() for x in c["contents"]
+                   if (sku_info[x[1]].get("family") or "") == "Prebuilt Cart"}
+            if len(_pb) == 1 and all((sku_info[x[1]].get("family") or "") == "Prebuilt Cart"
+                                     for x in c["contents"]):
+                code = "PC " + next(iter(_pb))
             cart_rows.append((cid, oid, store_id, c["cart_number"], "cc", c["shelves_used"], CART_SHELVES,
                               c["total_units"], c["is_full"], False, None, CART_SHELVES,
                               f"WK{iso[0]}{iso[1]:02d}-C{cart_seq:04d}", code, True))
