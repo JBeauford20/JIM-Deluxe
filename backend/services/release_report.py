@@ -99,7 +99,10 @@ def build(cur, run_id: str) -> dict | None:
                        WHERE sa.sale_date > %s::date - 7 AND sa.sale_date <= %s::date""",
                     (s["sales_anchor"], s["sales_anchor"]))
         actual = dict(cur.fetchone() or {})
+    from services import sales_outlook
+    outlook = sales_outlook.compute(cur, s)
     return {
+        "outlook": outlook,
         "actual_last_week": actual,
         "run": {"id": str(run["id"]), "shipping_week": run["shipping_week"], "status": run["status"],
                 "pipeline_status": run["pipeline_status"], "run_at": run["run_at"]},
@@ -183,11 +186,20 @@ def render(d: dict, test: bool = True) -> dict:
                  + _tile("Units", _n(h["units"]))
                  + _tile("Order value", _usd(h["value"]), f"{_usd(h['per_cart'])} per cart")
                  + _tile("Freight", _pct(h["freight_pct"]), "of order value") + "</tr></table>")
-    parts.append(_section("Expected sales in the arrival week", _table(
+    ol = d.get("outlook")
+    if ol:
+        sa = {"demand": ol["demand_forecast"], "baseline": ol["baseline"], "added": ol["added"],
+              "expected": ol["expected"], "goal": ol["goal"], "gap": ol["gap"]}
+        _b = f"Baseline, no new inventory (actual sales, week ending {ol['baseline_week_ending']})"
+        _a = (f"Added by this plan ({_usd(ol['plan_wholesale'])} shipped x {ol['sell_through_pct'] * 100:.0f}% "
+              f"sold over {ol['sell_through_weeks']:g} weeks)")
+    else:
+        _b, _a = "Sold from stock already in stores or on the way", "Added by this week's orders"
+    parts.append(_section("Expected weekly sales", _table(
         ["", "Dollars"],
-        [("Weekly demand across all stores (what could sell)", _usd(sa["demand"])),
-         ("Sold from stock already in stores or on the way", _usd(sa["baseline"])),
-         ("Added by this week's orders", _usd(sa["added"])),
+        [("Demand forecast (what stores could sell with every need filled)", _usd(sa["demand"])),
+         (_b, _usd(sa["baseline"])),
+         (_a, _usd(sa["added"])),
          ("Expected weekly sales with these orders", _usd(sa["expected"])),
          ("Weekly goal", _usd(sa["goal"])),
          ("Gap to goal", _usd(sa["gap"]))], right=(1,)),

@@ -92,6 +92,8 @@ def run_summary(run_id: str, user=Depends(get_current_user)):
                        WHERE run_id = %s GROUP BY 1""", (run_id,))
         r = dict(r)
         r["decision_counts"] = {x["decision_type"]: x["n"] for x in cur.fetchall()}
+        from services import sales_outlook
+        r["sales_outlook"] = sales_outlook.compute(cur, r.get("ipr_summary"))
         return r
 
 

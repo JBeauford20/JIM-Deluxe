@@ -4191,13 +4191,19 @@ function xRenderResults(){
      '<span class="act"><a class="xbtn xbtn-s xbtn-sm" href="#twFiles" onclick="event.preventDefault();document.getElementById(\'twFiles\').scrollIntoView({behavior:\'smooth\'})">Files</a></span></div>';
   /* objective */
   var min=o.minimum_weekly_retail||900000,exp=o.expected_weekly_retail||0,base=o.baseline_weekly_retail||0,inc=o.incremental_weekly_retail||0,gap=o.gap_to_minimum;
+  /* Sales outlook (2026-11-23): baseline = last full week of actual sales; added = order value x
+     the share we expect to sell, per week; expected = the two together. */
+  var so=X.ipr.sales_outlook||null,baseFoot='what stores sell from stock on hand',incFoot='incremental sales';
+  if(so){base=so.baseline||0;inc=so.added||0;exp=so.expected||0;gap=so.gap;
+    baseFoot='actual sales, week ending '+xDate(so.baseline_week_ending)+' ('+xN(so.baseline_units)+' units)';
+    incFoot=xUsd(so.plan_wholesale)+' shipped &times; '+Math.round(so.sell_through_pct*100)+'% sold over '+so.sell_through_weeks+' weeks';}
   var scale=Math.max(exp,min)*1.1||1;
-  h+='<div class="xpanel"><div class="xph"><h2>Weekly sales objective</h2><span class="sub">Expected sales in the arrival week at WHOLESALE (leadership, Nov 20), with and without this plan (Sec 2).</span><span class="act"><span class="xsrc">Sec 2 &middot; objective</span></span></div>'+
-    '<div class="xobj">'+xTile('Baseline, no new orders',xUsd(base),'what stores sell from stock on hand')+
-      xTile('Added by this plan','+'+xUsd(inc),'incremental sales')+
+  h+='<div class="xpanel"><div class="xph"><h2>Weekly sales objective</h2><span class="sub">Weekly sales at wholesale: what we sell with no new inventory, what this plan adds in a week, and the two together.</span><span class="act"><span class="xsrc">Sec 2 &middot; objective</span></span></div>'+
+    '<div class="xobj">'+xTile('Baseline, no new inventory',xUsd(base),baseFoot)+
+      xTile('Added by this plan','+'+xUsd(inc),incFoot)+
       '<div class="xob hero"><div class="v">'+xUsd(exp)+'</div><div class="l">Expected weekly sales</div><div class="f">baseline + this plan</div></div>'+
       xTile(gap>0?'Short of '+xUsd(min)+' minimum':'Above '+xUsd(min)+' minimum',(gap>0?'-':'+')+xUsd(Math.abs(gap||0)),gap>0?'below the weekly minimum':'growth territory',gap>0?'bad':'ok')+
-      xTile('Store demand, unlimited supply',xUsd(o.unconstrained_weekly_demand_retail),'if every need were filled')+'</div>'+
+      xTile('Demand forecast',xUsd(o.unconstrained_weekly_demand_retail),'what stores could sell with every need filled')+'</div>'+
     '<div class="xbar" role="img" aria-label="Baseline '+xUsdFull(base)+', plus '+xUsdFull(inc)+' from this plan, against the '+xUsdFull(min)+' minimum">'+
       '<i style="width:'+(base/scale*100).toFixed(1)+'%;background:var(--x-chart-1)"></i><i style="width:'+(Math.max(0,inc)/scale*100).toFixed(1)+'%;background:var(--x-chart-2)"></i>'+
       '<span class="mark" style="left:'+(min/scale*100).toFixed(1)+'%"></span></div>'+
@@ -5088,7 +5094,7 @@ function xRenderRep(){
   var S=X.ipr.ipr_summary||{},o=S.objective||{},a=S.allocation||{},se=S.shipping_efficiency||{},gf=S.gap_fill||{},pct=function(v){return Math.round(v*100)+'%';};
   var h='';
   if(X.rep==='r1'){
-    h='<div class="xobj">'+xTile('Store demand, unlimited supply',xUsd(o.unconstrained_weekly_demand_retail),'weekly wholesale if every need were filled','')+xTile('What stores need',xN(a.unconstrained_need_units),'units, before rules')+
+    h='<div class="xobj">'+xTile('Demand forecast',xUsd(o.unconstrained_weekly_demand_retail),'weekly wholesale if every need were filled','')+xTile('What stores need',xN(a.unconstrained_need_units),'units, before rules')+
       xTile('Eligible need',xN(a.eligible_need_units),'after 13-week stops, blocks and holds')+xTile('Available units',xN(a.available_units),'this week\'s greenhouse file')+'</div>'+
       '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Shipping efficiency by family</h2><span class="sub">Units sold &divide; units delivered, last 13 weeks. Below 60% is the Sec 11.3 bar.</span></div>'+
       xFamBars(se.by_family,pct,Math.max(1,Math.max.apply(null,Object.keys(se.by_family||{}).map(function(k){return se.by_family[k]||0;}))),'var(--x-chart-1)',0.6);
@@ -5096,7 +5102,8 @@ function xRenderRep(){
     var fill=a.eligible_need_units?a.allocated_units/a.eligible_need_units:null;
     h='<div class="xobj">'+xTile('Allocated',xN(a.allocated_units),'units shipping','ok')+xTile('Fill rate',fill!=null?pct(fill):'&mdash;','allocated &divide; eligible need',fill!=null&&fill<0.9?'warn':'')+
       xTile('Unfilled, no supply',xN(a.unfilled_demand_units),'units short',a.unfilled_demand_units?'warn':'')+xTile('Gap-filled',xN(gf.units),xN(gf.fills)+' fills')+
-      xTile('Expected weekly sales',xUsd(o.expected_weekly_retail),'baseline + this plan')+xTile(o.gap_to_minimum>0?'Short of minimum':'Above minimum',xUsd(Math.abs(o.gap_to_minimum||0)),'vs '+xUsd(o.minimum_weekly_retail||900000),o.gap_to_minimum>0?'bad':'ok')+'</div>'+
+      (function(){var so2=X.ipr.sales_outlook,e2=so2?so2.expected:o.expected_weekly_retail,g2=so2?so2.gap:o.gap_to_minimum;
+        return xTile('Expected weekly sales',xUsd(e2),'baseline + this plan')+xTile(g2>0?'Short of minimum':'Above minimum',xUsd(Math.abs(g2||0)),'vs '+xUsd(o.minimum_weekly_retail||900000),g2>0?'bad':'ok');})()+'</div>'+
       '<div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Where the need went</h2><span class="sub">Units, this run</span></div>'+
       xFamBars({'Allocated':a.allocated_units,'Unfilled (no supply)':a.unfilled_demand_units,'Stopped at 13 weeks':a.stopped_13wk_units,'Removed at 13-week reduce':a.reduced_13wk_units_removed,'Deferred':a.deferred_units,'Blocked':a.blocked_units,'Held for review':a.review_held_units},xN,null,'var(--x-chart-2)');
   }else{

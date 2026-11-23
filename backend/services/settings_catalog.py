@@ -79,6 +79,14 @@ CATALOG = [
          kind="money", default=900000, min=0, max=10000000,
          help="The goal the This Week readout measures against (wholesale dollars). Reporting only; "
               "it never adds product to orders."),
+    dict(key="plan_sell_through_pct", group="Demand and goal", label="Share of a shipment we expect to sell",
+         kind="pct", default=0.6, min=0.1, max=1.0,
+         help="Used for 'Added by this plan' on This Week: order value x this share, spread over the "
+              "weeks below. Reporting only; it never changes what is ordered."),
+    dict(key="plan_sell_through_weeks", group="Demand and goal", label="Weeks it takes to sell that share",
+         kind="int", default=4, min=1, max=13,
+         help="4 = the 60%-in-28-days target, so one week adds a quarter of it. Set to 1 to count the "
+              "whole share in the first week. Reporting only."),
     dict(key="min_weekly_rate_units", group="Demand and goal", label="Slowest seller the engine will plan (units per week)",
          kind="number", default=0.25, min=0, max=10,
          help="A store and SKU selling slower than this is left out of orders."),
