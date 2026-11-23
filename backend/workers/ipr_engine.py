@@ -1289,6 +1289,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # the grade threshold it ships a grade-reduced quantity (never an identical shipment).
     ship, held, held_kind, not_due_lines = {}, {}, {}, {}
     blocked_units = stopped_units = reduced_units = rule_blocked_units = 0.0
+    rule_overrides = defaultdict(list)       # store -> [(sku, the rule reason that was overridden)]
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
         if l["trays"] <= 0:
@@ -1314,6 +1315,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 and a not in scn_excl and a not in scn_unsupported and _scn_sku(a, l["sku_id"])
                 for a in scn_all)
             _ok, _why = store_rules.sku_allowed(_rule, sku_info.get(l["sku_id"]), directed=_directed)
+            if not _ok and l.get("directed_trays") and store_rules.directed_overrides(_rule):
+                # an approved directed shipment is an exception to the store's day-to-day
+                # product rule; the override is recorded per store (rule_overrides below)
+                _ok = True
+                rule_overrides[l["store_id"]].append((l["sku_id"], _why))
             if not _ok:
                 held[key] = _why
                 held_kind[key] = ("store_rule_block" if store_rules.routine_blocked(_rule)
@@ -1412,6 +1418,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         decide(held_kind[key], why, store_id=l["store_id"], sku_id=l["sku_id"],
                family=l["family"], grade=l.get("grade"), conversion=l.get("conversion"),
                proposed_trays=l["trays"], proposed_units=l["trays"] * l["upt"])
+    for st_id, ov in sorted(rule_overrides.items()):
+        _r = store_rule.get(st_id) or {}
+        decide("store_rule_override",
+               f"Store master rule '{_r.get('label')}' OVERRIDDEN for a manager-approved directed "
+               f"shipment of {len(ov)} SKU(s). The rule still applies to everything else at this store.",
+               store_id=st_id, severity="warning", rule=_r.get("code"), rule_label=_r.get("label"),
+               skus=sorted(s_ for s_, _w in ov))
     for (kind_, st_id), a_ in sorted(_rule_agg.items()):
         _r = store_rule.get(st_id) or {}
         _st = stores.get(st_id) or {}
@@ -2204,6 +2217,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                       if (s_.get("store_status") or "active") == "do_not_ship"),
             "stores_no_routine_order": len({k[0] for k, v in held_kind.items() if v == "store_rule_block"}),
             "stores_products_limited": len({k[0] for k, v in held_kind.items() if v == "sku_restriction_block"}),
+            "stores_rule_overridden_by_directed_shipment": len(rule_overrides),
             "units_not_shipped_by_rule": int(rule_blocked_units),
             "variety_restricted_stores_shipping": sum(1 for s_ in orders if s_ in store_deny),
             "variety_short_units": int(sum(v["units"] for v in variety_short.values())),

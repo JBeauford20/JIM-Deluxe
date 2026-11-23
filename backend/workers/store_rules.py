@@ -136,6 +136,16 @@ def sku_allowed(rule, sku, directed=False):
     return False, f"not in the store's allowed product list ({rule.get('label', rule.get('code'))})"
 
 
+def directed_overrides(rule):
+    """Does a manager-approved directed shipment override this store's PRODUCT restriction?
+    Yes (Josh 2026-11-23: "since this is an exception, if Mike approves it, it overrides the
+    day-to-day rule") — for the rules that say what a store normally receives. Never for a
+    rule this module does not know (fail closed), and never for a variety ban such as No
+    Hedera, which is enforced separately at allocation. Do-not-ship is a store status, not a
+    rule here, and is never overridden."""
+    return bool(rule) and not rule.get("unknown")
+
+
 def denied_genera(rule):
     """Lower-cased plant genera that may not ship to a store under `rule`."""
     return frozenset(g.strip().lower() for g in ((rule or {}).get("deny_genus") or []) if g and g.strip())

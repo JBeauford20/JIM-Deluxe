@@ -320,3 +320,12 @@ def test_assign_sku_lines_without_varieties_matches_assign_lines():
     lines = [["G2", 500, ""], ["G3a", 60, ""], ["G3b", 40, ""]]
     grp = {frozenset(): 150, HED: 20}
     assert R.assign_sku_lines(grp, lines, {}, _dist, rank=RANK) == R.assign_lines(grp, lines, _dist, rank=RANK)
+
+
+def test_an_approved_directed_shipment_overrides_product_rules_but_not_unknown_ones():
+    assert R.directed_overrides(R.rule_for({"sku_rule": "holiday_only_directed"}))
+    assert R.directed_overrides(R.rule_for({"sku_rule": "littles_collectors_only"}))
+    assert not R.directed_overrides(R.rule_for({"sku_rule": "something_new"}))
+    assert not R.directed_overrides(None)
+    # the variety ban is separate and untouched by the override
+    assert R.denied_genera(R.rule_for({"sku_rule": "no_hedera"})) == frozenset({"hedera"})

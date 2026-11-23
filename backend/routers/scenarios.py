@@ -241,7 +241,8 @@ def _validate(adjustments: list, cat: dict) -> tuple:
                              f"{DIRECTED_MAX_SHELVES} per store. Dropped.")
                 continue
             warns.append("Directed shipment: ships regardless of the stores' sales history and skips "
-                         "the full-cart minimum. Do-not-ship and store-master restrictions still apply.")
+                         "the full-cart minimum. Once approved it also overrides a store's product "
+                         "restriction. Do-not-ship and variety bans (No Hedera) still apply.")
         clean.append(a)
     return clean, warns
 
@@ -257,11 +258,16 @@ def _check_stores(cur, adjustments: list) -> tuple:
     extra = ", sku_restriction, master_status" if cur.fetchone() else ""
     cur.execute(f"SELECT store_id, store_name, store_status{extra} FROM stores WHERE store_id = ANY(%s)", (ids,))
     known = {r["store_id"]: r for r in cur.fetchall()}
+    directed_ids = {i for a in adjustments if a.get("adjustment_type") == "directed_shipment"
+                    for i in (a.get("scope_store_ids") or [])}
     warns = [f"Store {i} is not in the store master — ignored." for i in ids if i not in known]
     for i, r in sorted(known.items()):
         if (r.get("store_status") or "active") in ("do_not_ship", "paused", "inactive", "hold"):
             warns.append(f"Store {i} is {r['store_status'].replace('_', ' ')}: nothing ships there "
                          f"whatever this scenario says.")
+        elif r.get("sku_restriction") and i in directed_ids:
+            warns.append(f"OVERRIDE: store {i} has a store-master restriction ({r['sku_restriction']}). "
+                         f"Approving this directed shipment sends the product anyway.")
         elif r.get("sku_restriction"):
             warns.append(f"Store {i} has a store-master restriction ({r['sku_restriction']}); the "
                          f"scenario cannot ship anything outside it.")
@@ -524,7 +530,8 @@ def pending_scenarios(user=Depends(get_current_user)):
             if any(a["adjustment_type"] == "directed_shipment" for a in s["adjustments"]):
                 notes.insert(0, "Directed shipment: ships regardless of the stores' sales history and "
                                 "skips the due test, the 13-week review and the full-cart minimum. "
-                                "Do-not-ship and store-master restrictions still apply.")
+                                "Approving it also OVERRIDES a store's product restriction for this "
+                                "shipment. Do-not-ship and variety bans (No Hedera) still apply.")
             s["notes"] = notes
     return {"pending": rows, "can_approve": user.get("role") in APPROVER_ROLES}
 
