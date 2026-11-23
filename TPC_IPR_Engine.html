@@ -445,6 +445,10 @@ body{background:var(--x-bg);}
     </div>
   </div>
   <div class="xpanel">
+    <div class="xph"><h2>Approved and in effect</h2><span class="sub">Every approved scenario the orders account for, by ship week. A scenario applies to its one ship week only; it does not carry over to the next.</span></div>
+    <div id="apprActive"><div class="xempty">Loading&hellip;</div></div>
+  </div>
+  <div class="xpanel">
     <div class="xph"><h2>Waiting for approval</h2><span class="sub">A different set of eyes signs off &mdash; you cannot approve your own.</span><span class="act"><span class="xsrc">checks &amp; balances &middot; 11/20</span></span></div>
     <div id="apprScn"><div class="xempty">Loading&hellip;</div></div>
     <div class="xph" style="border-top:1px solid var(--x-border-soft)"><h2>Pending reactivations</h2><span class="sub">Step 1 the DSM, step 2 the approver &mdash; never the same person (Sec 27).</span></div>
@@ -5220,7 +5224,43 @@ async function xScnSubmit(){
   }catch(e){toast('Submit failed: '+e.message,'err');sb.disabled=false;return;}
   sb.disabled=false;
 }
+/* Approved and in effect (2026-11-23): approved scenarios used to vanish from this screen once
+   Mike approved them. GET /api/scenarios/active lists them by ship week with who approved,
+   whether the latest order for that week includes them, and a switch to turn one off. */
+async function xLoadActive(){
+  var el=document.getElementById('apprActive');if(!el)return;
+  try{
+    var r=await api('/api/scenarios/active'),list=r.active||[];
+    if(!list.length){el.innerHTML='<div class="xempty">No approved scenarios for this ship week or later.</div>';return;}
+    var wk='',h='';
+    list.forEach(function(s){
+      var w=String(s.shipping_week).slice(0,10),lr=s.latest_run,tag,note;
+      if(w!==wk){wk=w;h+='<div style="padding:8px 16px;background:var(--x-surface-2,#f4f8f5);border-bottom:1px solid var(--x-border-soft);font-weight:600">Ship week of '+escH(xDateT(w))+'</div>';}
+      if(s.week_passed){tag='<span class="xtag">Finished</span>';note='That ship week has passed. It is kept here for the record and does not apply to later weeks.';}
+      else if(!s.is_active){tag='<span class="xtag warn">Switched off</span>';note='Approved, but switched off: the next order built for this week will leave it out.';}
+      else{tag='<span class="xtag ok">In effect</span>';
+        note=!lr?'No order has been built for this week yet. It will be applied when one is.'
+          :(lr.applied?'Included in the current order (built '+escH(xWhen(lr.run_at))+').'
+            :'Approved after the current order was built ('+escH(xWhen(lr.run_at))+'). Build the orders again to include it.');}
+      h+='<div style="padding:10px 16px;border-bottom:1px solid var(--x-border-soft)">'+
+        '<div><b>'+escH(s.name)+'</b> '+tag+'</div>'+
+        '<div class="xwhy">Asked by '+escH(s.created_by||'')+' &middot; approved by '+escH(s.approved_by||'')+(s.approved_at?' '+escH(xWhen(s.approved_at)):'')+' &middot; applies to ship week '+escH(xDateT(w))+' only</div>'+
+        (s.interpretation?'<div class="xsmall" style="margin:4px 0">Understood as: '+escH(s.interpretation)+'</div>':'')+
+        xScnAdjRows(s.adjustments)+
+        '<div class="xsmall xmuted" style="margin-top:4px">'+note+'</div>'+
+        ((r.can_switch&&!s.week_passed)?'<div style="margin-top:6px"><button class="xbtn xbtn-s xbtn-sm" onclick="xScnSwitch(\''+escH(s.id)+'\','+(s.is_active?'true':'false')+')">'+(s.is_active?'Switch off':'Switch back on')+'</button></div>':'')+
+        '</div>';
+    });
+    el.innerHTML=h;
+  }catch(e){el.innerHTML='<div class="xempty">Could not load approved scenarios: '+escH(e.message)+'</div>';}
+}
+async function xScnSwitch(id,on){
+  if(on&&!confirm('Switch this scenario off? The next order built for its ship week will leave it out. The current order does not change until the orders are built again.'))return;
+  try{await api('/api/scenarios/'+id+'/toggle',{method:'PATCH'});toast(on?'Scenario switched off':'Scenario switched back on','ok');xLoadActive();}
+  catch(e){toast('Could not change the scenario: '+e.message,'err');}
+}
 async function xLoadAppr(){
+  xLoadActive();
   var el=document.getElementById('apprScn');if(!el)return;
   try{
     var myEmail=userEmail();

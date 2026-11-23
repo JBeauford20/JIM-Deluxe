@@ -581,6 +581,44 @@ def pending_scenarios(user=Depends(get_current_user)):
     return {"pending": rows, "can_approve": user.get("role") in APPROVER_ROLES}
 
 
+@router.get("/active")
+def active_scenarios(user=Depends(get_current_user)):
+    """Approved scenarios for the ship week in progress and every later one: what the engine is
+    accounting for, who approved it, and which ship week it applies to. A scenario belongs to ONE
+    ship week (the engine reads weekly_adjustments for that week only); it does not carry over.
+    Last week's stay listed, marked finished, so the record of what was live is on screen."""
+    with get_db() as conn:
+        cur = cursor(conn)
+        cur.execute("""
+            SELECT id, name, description, interpretation, shipping_week, is_active, created_by,
+                   created_at, approved_by, approved_at,
+                   shipping_week < date_trunc('week', CURRENT_DATE)::date AS week_passed
+            FROM planning_scenarios
+            WHERE status = 'approved' AND shipping_week >= date_trunc('week', CURRENT_DATE)::date - 7
+            ORDER BY shipping_week, approved_at
+        """)
+        rows = cur.fetchall()
+        for s in rows:
+            cur.execute("""SELECT adjustment_type, label, value_numeric, scope_merchant, scope_region,
+                                  scope_state, scope_velocity_tier, scope_sku_id, scope_family,
+                                  scope_legacy_tier, scope_store_ids, stores_affected, value_text
+                           FROM weekly_adjustments WHERE scenario_id = %s ORDER BY created_at""",
+                        (s["id"],))
+            s["adjustments"] = cur.fetchall()
+            # the latest live order for that ship week, and whether this scenario is in it
+            cur.execute("""SELECT r.id, r.run_at, r.status,
+                                  EXISTS (SELECT 1 FROM run_decisions d WHERE d.run_id = r.id
+                                          AND d.decision_type = 'scenario_applied'
+                                          AND d.data->>'scenario_id' = %s) AS applied
+                           FROM recommendation_runs r
+                           WHERE r.shipping_week = %s
+                             AND COALESCE(r.status, '') NOT IN ('cancelled', 'canceled', 'failed')
+                           ORDER BY r.run_at DESC LIMIT 1""", (str(s["id"]), s["shipping_week"]))
+            s["latest_run"] = cur.fetchone()
+    return {"active": rows,
+            "can_switch": user.get("role") in ("order_writer", "manager", "admin")}
+
+
 @router.post("/{scenario_id}/approve")
 def approve_scenario(scenario_id: str, user=Depends(require_role(*APPROVER_ROLES))):
     """Activate a pending scenario. The approver can never be the submitter."""
