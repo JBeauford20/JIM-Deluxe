@@ -280,6 +280,33 @@ class RejectReq(BaseModel):
     reason: str
 
 
+def interpret(cur, text: str) -> dict:
+    """English -> {interpretation, adjustments, warnings}. Nothing is written. Shared by the
+    /parse endpoint and tests/scenario_battery.py so the battery exercises the real path."""
+    cat = _catalog(cur)
+    user_msg = (f"ADJUSTMENT TYPES (the only ones you may use):\n\n"
+                f"{_VOCAB}\n\n"
+                f"CATALOG (valid scope values):\n{json.dumps(cat)}\n\n"
+                f"SCENARIO: {text.strip()}")
+    from services.ipr_ai import call_model
+    raw = call_model(_PARSE_SYSTEM, user_msg, max_tokens=1500)
+    try:
+        s_, e_ = raw.find("{"), raw.rfind("}") + 1
+        parsed = json.loads(raw[s_:e_])
+    except Exception:
+        raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
+    if not isinstance(parsed, dict):
+        raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
+    raw_adj = parsed.get("adjustments")
+    adjustments, warns = _validate(raw_adj if isinstance(raw_adj, list) else [], cat)
+    adjustments, w2 = _check_stores(cur, adjustments)
+    warns = [str(w) for w in (parsed.get("warnings") or [])] + warns + w2
+    for a in adjustments:
+        a["stores_affected"] = _store_count(cur, a)
+    return {"interpretation": parsed.get("interpretation", ""),
+            "adjustments": adjustments, "warnings": warns}
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @router.post("/parse")
 def parse_scenario(body: ParseReq,
@@ -288,28 +315,7 @@ def parse_scenario(body: ParseReq,
     if not body.text.strip():
         raise HTTPException(400, "Enter a scenario to interpret.")
     with get_db() as conn:
-        cur = cursor(conn)
-        cat = _catalog(cur)
-        user_msg = (f"ADJUSTMENT TYPES (the only ones you may use):\n{_VOCAB}\n\n"
-                    f"CATALOG (valid scope values):\n{json.dumps(cat)}\n\n"
-                    f"SCENARIO: {body.text.strip()}")
-        from services.ipr_ai import call_model
-        raw = call_model(_PARSE_SYSTEM, user_msg, max_tokens=1500)
-        try:
-            s, e = raw.find("{"), raw.rfind("}") + 1
-            parsed = json.loads(raw[s:e])
-        except Exception:
-            raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
-        if not isinstance(parsed, dict):
-            raise HTTPException(502, "Could not parse the scenario — try rephrasing.")
-        raw_adj = parsed.get("adjustments")
-        adjustments, warns = _validate(raw_adj if isinstance(raw_adj, list) else [], cat)
-        adjustments, w2 = _check_stores(cur, adjustments)
-        warns = [str(w) for w in (parsed.get("warnings") or [])] + warns + w2
-        for a in adjustments:
-            a["stores_affected"] = _store_count(cur, a)
-    return {"interpretation": parsed.get("interpretation", ""),
-            "adjustments": adjustments, "warnings": warns}
+        return interpret(cursor(conn), body.text)
 
 
 @router.post("/", status_code=201)
