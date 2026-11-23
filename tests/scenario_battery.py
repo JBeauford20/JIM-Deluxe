@@ -38,11 +38,16 @@ CASES = [
     ("Texas gets 20% less climb-itt", dict(type="demand_multiplier", value=0.8, scope={"scope_state": "TX", "scope_family": "Climb-itt"})),
     ("push collectors 50% harder in the West", dict(type="demand_multiplier", value=1.5, scope={"scope_region": "Western", "scope_legacy_tier": "Collectors"})),
     # ── shelves: at least / at most ──
-    ("send 2 shelves of collectors to Western stores", dict(type="allocation_floor", value=2, scope={"scope_region": "Western", "scope_legacy_tier": "Collectors"})),
+    ("send 2 shelves of collectors to Western stores", dict(type="directed_shipment", value=2, scope={"scope_region": "Western", "scope_legacy_tier": "Collectors"})),
+    ("ship 1 shelf of the holiday gnome 9cm to stores 901 and 902", dict(type="directed_shipment", value=1, scope={"scope_store_ids": [901, 902], "scope_sku_id": 1014628066})),
+    ("put 3 shelves of littles in every AA store", dict(type="directed_shipment", value=3, scope={"scope_velocity_tier": "AA", "scope_family": "9cm Littles"})),
+    ("send collectors to store 121", dict(type="directed_shipment", value=1, scope={"scope_store_ids": [121], "scope_legacy_tier": "Collectors"})),
+    ("send 40 shelves of bowls to store 121", dict(none=True)),
+    ("send 2 shelves to store 121", dict(none=True)),
     ("Give stores 121 and 608 at least 1 shelf of H2O bowls", dict(type="allocation_floor", value=1, scope={"scope_store_ids": [121, 608], "scope_family": BOWL})),
     ("no more than 1 shelf of dish gardens per store in New York", dict(type="allocation_cap", value=1, scope={"scope_state": "NY", "scope_family": "Dish Garden"})),
     ("cap rare collectors at 2 shelves for D stores", dict(type="allocation_cap", value=2, scope={"scope_velocity_tier": "D", "scope_legacy_tier": "Rare Collectors"})),
-    ("make sure every A store gets a shelf of venti", dict(type="allocation_floor", value=1, scope={"scope_velocity_tier": "A", "scope_family": "H2O Venti"})),
+    ("make sure every A store gets a shelf of venti", dict(type={"allocation_floor", "directed_shipment"}, value=1, scope={"scope_velocity_tier": "A", "scope_family": "H2O Venti"})),
     # ── block a product ──
     ("No collectors to the West this week", dict(type="exclusion", scope={"scope_region": "Western", "scope_legacy_tier": "Collectors"})),
     ("don't ship dish gardens to Florida", dict(type="exclusion", scope={"scope_state": "FL", "scope_family": "Dish Garden"})),
@@ -63,7 +68,7 @@ CASES = [
     # ── sloppy typing, abbreviations ──
     ("fl stores +25% h2o bowl", dict(type="demand_multiplier", value=1.25, scope={"scope_state": "FL", "scope_family": BOWL})),
     ("pls take 608 off", dict(type="cart_target_override", value=0, scope={"scope_store_ids": [608]})),
-    ("store #121 - xtra shelf littles", dict(type={"allocation_floor", "demand_multiplier"}, scope={"scope_store_ids": [121], "scope_family": "9cm Littles"})),
+    ("store #121 - xtra shelf littles", dict(type={"allocation_floor", "demand_multiplier", "directed_shipment"}, scope={"scope_store_ids": [121], "scope_family": "9cm Littles"})),
     ("NO BOWLS IN THE NORTH!!", dict(type="exclusion", scope={"scope_region": "Northern", "scope_family": BOWL})),
     # ── two instructions in one ──
     ("Take store 608 off and send 25% more bowls to Florida", dict(type={"cart_target_override", "demand_multiplier"}, n=2, any={"adjustment_type": {"cart_target_override", "demand_multiplier"}})),
@@ -76,7 +81,7 @@ CASES = [
     ("send bowls to store 99999", dict(none=True, warn="99999")),
     ("delete last week's run", dict(none=True)),
     # ── store-rule awareness ──
-    ("give store 664 two shelves of littles", dict(type="allocation_floor", scope={"scope_store_ids": [664]}, warn="do not ship")),
+    ("give store 664 two shelves of littles", dict(type={"allocation_floor", "directed_shipment"}, scope={"scope_store_ids": [664]}, warn="do not ship")),
     ("25% more 17cm for store 608", dict(type="demand_multiplier", scope={"scope_store_ids": [608]}, warn="restriction")),
 ]
 

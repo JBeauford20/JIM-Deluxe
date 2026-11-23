@@ -72,6 +72,8 @@ OFF_SEASON_MONTHS = {9, 10, 11, 12, 1, 2}
 DEFAULT_CADENCE_BUFFER_WEEKS = 1
 SETTINGS_OVERRIDE = {}           # preview-only what-if overrides of ipr_settings (scenario analysis)
 STORE_OVERRIDES = {}             # preview-only {store_id: {col: value}} (e.g. a store master not yet loaded)
+SCENARIO_OVERRIDES = []          # preview-only extra directives (what-if / tests); never written
+DIRECTED_MAX_SHELVES = 10        # ceiling on one directed shipment per store (setting directed_max_shelves)
 # Weekly DTS feeds repeat delivery rows from other weeks (25.5K duplicate units found 2026-11-20;
 # the loader now skips them, but the table has no unique key). Read deliveries through this
 # drop-in dedupe: first feed to report a (store, sku, delivery_date) wins. Rows up to 2026-10-01
@@ -446,6 +448,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         ORDER BY wa.created_at
     """, (shipping_week,))
     scn_all = [dict(r) for r in cur.fetchall()]
+    if preview and SCENARIO_OVERRIDES:
+        for _i, _a in enumerate(SCENARIO_OVERRIDES):
+            scn_all.append({**{k: None for k in (
+                "scenario_id", "value_numeric", "scope_merchant", "scope_region", "scope_state",
+                "scope_velocity_tier", "scope_store_ids", "scope_sku_id", "scope_family",
+                "scope_legacy_tier", "scenario_name", "requested_by", "approved_by")},
+                "adj_id": f"preview-{_i}", "label": f"preview {_i}", **_a})
+    # DIRECTED SHIPMENT (Josh 2026-11-23): "send N shelves of X to these stores", shipped whether
+    # or not the store has sold X before. It is a manager-approved override that sits outside
+    # the normal autonomous flow (§27), so it skips the pace trim, the 13-week gates, the due
+    # test and the full-cart minimum. It never skips a hard block: do-not-ship, store-master
+    # restrictions, variety restrictions, supply and an approved exclusion all still win.
+    scn_directed = [a for a in scn_all if a["adjustment_type"] == "directed_shipment"]
     scn_mult = [a for a in scn_all if a["adjustment_type"] == "demand_multiplier"]
     scn_excl = ([a for a in scn_all if a["adjustment_type"] == "exclusion"]
                 + [a for a in scn_all if a["adjustment_type"] == "cart_target_override"
@@ -578,6 +593,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             return False
         return True
 
+    def _has_store_scope(a):
+        return bool(a["scope_store_ids"] or a["scope_merchant"] or a["scope_region"]
+                    or a["scope_state"] or a["scope_velocity_tier"])
+
     def _scn_sku(a, sku_id):
         info = sku_info.get(sku_id) or {}
         if a["scope_sku_id"] and sku_id != a["scope_sku_id"]:
@@ -587,6 +606,29 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if a["scope_legacy_tier"] and (info.get("legacy_product_group") or "") != a["scope_legacy_tier"]:
             return False
         return True
+
+    # Directed shipments -> exact trays per store x SKU. A family / tier scope is spread a
+    # shelf at a time across the scoped SKUs this batch can pack (most supply first). Needs
+    # both a store scope and a product scope; shelves are clamped to directed_max_shelves.
+    dir_max = int(S.get("directed_max_shelves", DIRECTED_MAX_SHELVES) or DIRECTED_MAX_SHELVES)
+    dir_trays = {}                         # (store, sku) -> [trays, adj_id]
+    for a in scn_directed:
+        _sh = min(dir_max, int(round(float(a["value_numeric"] or 0))))
+        _skus = sorted((k for k in supply
+                        if k in sku_info and (pack.get(k) or {}).get("trays_per_shelf")
+                        and (pack.get(k) or {}).get("units_per_tray")
+                        and (sku_info[k]["ipr_family"] or "Unmapped") != "Unmapped"
+                        and (a["scope_sku_id"] or a["scope_family"] or a["scope_legacy_tier"])
+                        and _scn_sku(a, k)), key=lambda k: (-supply[k], k))
+        if _sh <= 0 or not _skus or not _has_store_scope(a):
+            continue
+        for sid in sorted(s_ for s_ in stores if _scn_store(a, s_)):
+            for i in range(_sh):
+                k = _skus[i % len(_skus)]
+                t = int(pack[k]["trays_per_shelf"])
+                e_ = dir_trays.setdefault((sid, k), [0, a["adj_id"]])
+                e_[0] += t
+                scn_fx[a["adj_id"]]["trays_requested"] += t
 
     # Freshness window by family (§4.5, Josh's dump cycle 2026-11-19): ipr_settings
     # freshness_days_by_family {family: days, "_default": 90} + freshness_days_by_sku overrides.
@@ -905,6 +947,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if l["conf"] == "UNUSABLE" and trays:
             trays = min(trays, max(1, int((l["fc"] * 2) // l["upt"])))    # §5: cap / review
             cap_note = (cap_note or "") + " inventory unreliable — capped at 2 wks"
+        if l.get("directed_trays"):                                       # exact, by approval
+            trays = l["directed_trays"]
+            cap_note = ((cap_note or "") + " directed shipment (manager-approved scenario)").strip()
         l.update(need=need, trays=trays, cap_note=cap_note, cover_wk=cov,
                  cadence_grade=cg, cadence_weeks=cw)
 
@@ -924,10 +969,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                              "d13": 0.0, "w13d": 0.0}
                 _seeded += 1
         log(f"Peak-floor seeding: {_seeded:,} store x SKU lines with Apr-Jul sales but none in 13 wks")
+    for _k in dir_trays:                    # a directed store x SKU needs no sales history
+        sales.setdefault(_k, {"w2": 0.0, "w4": 0.0, "w8": 0.0, "w10": 0.0, "w13": 0.0,
+                              "d13": 0.0, "w13d": 0.0})
     for (store_id, sku_id), sv in sales.items():
         if sku_id not in sku_info:
             continue
-        is_plannable = sku_id in plannable
+        _dir = dir_trays.get((store_id, sku_id))
+        is_plannable = sku_id in plannable or bool(_dir)
         st = stores.get(store_id)
         if not st:
             continue
@@ -959,7 +1008,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     method = f"{method} × scenario '{_a['label']}' ({_m:g}x)"
                     scn_fx[_a["adj_id"]]["lines"] += 1
                     scn_fx[_a["adj_id"]]["stores"].add(store_id)
-        if fc < min_rate:
+        if fc < min_rate and not _dir:
             continue                        # no velocity → not in scope (Josh: only ship velocity)
 
         # Sellable on-hand + confidence (§4.6, §5). DTS reported on-hand is NOT sellable
@@ -1058,6 +1107,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # cover limit otherwise. "Add 2 shelves of bowls in the South" never ships more than
         # the store's pace supports; the trim is counted and audited (scenario_applied).
         l_ = lines[(store_id, sku_id)]
+        if _dir:
+            l_["directed_trays"], l_["directed_adj"] = _dir[0], _dir[1]
+            scn_fx[_dir[1]]["lines"] += 1
+            scn_fx[_dir[1]]["stores"].add(store_id)
         tps = max(1, int(pk.get("trays_per_shelf") or 1))
         for _a in scn_cap:
             if _scn_store(_a, store_id) and _scn_sku(_a, sku_id):
@@ -1233,7 +1286,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         _rule = store_rule.get(l["store_id"])
         if _rule:
             # "when directed" = an approved scenario that names this store (not an exclusion)
-            _directed = bool(_rule.get("directed_only")) and any(
+            _directed = bool(l.get("directed_trays")) or bool(_rule.get("directed_only")) and any(
                 a["scope_store_ids"] and l["store_id"] in a["scope_store_ids"]
                 and a not in scn_excl and a not in scn_unsupported and _scn_sku(a, l["sku_id"])
                 for a in scn_all)
@@ -1272,6 +1325,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             scn_fx[_ex["adj_id"]]["lines"] += 1
             scn_fx[_ex["adj_id"]]["stores"].add(l["store_id"])
             blocked_units += l["trays"] * l["upt"]
+            continue
+        if l.get("directed_trays"):          # approved override: no due test, no 13-week gate
+            ship[key] = l
             continue
         if not store_due[l["store_id"]][0]:
             not_due_lines[key] = l
@@ -1373,7 +1429,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         l["priority"] = (sp_w["incremental_sales"] * inc[k] + sp_w["family_velocity"] * fv[k]
                          + sp_w["mature_delivery_sales"] * conv01 + sp_w["stockout_risk"] * RISK_SCORE[l["risk"]]
                          + sp_w["seasonal"] * 0.0 + sp_w["recency"] * rec[k])
-        l["sku_fit"] = (sf_w["sku_velocity"] * (l["fc"] / store_max_fc[l["store_id"]])
+        if l.get("directed_trays"):
+            l["priority"] += 10.0            # filled before routine need when supply is short
+        l["sku_fit"] = (sf_w["sku_velocity"] * (l["fc"] / max(1e-9, store_max_fc[l["store_id"]]))
                         + sf_w["mature_delivery_sales"] * conv01
                         + sf_w["projected_need"] * min(1.0, l["need"] / max(1e-9, l["fc"] * l["cover_wk"]))
                         + sf_w["seasonal"] * 0.0 + sf_w["comparable_fit"] * GRADE_SCORE[l["grade"]])
@@ -1476,6 +1534,26 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         log(f"Gap fill: {gap_fills:,} fills · {gap_fill_trays:,} trays · {gap_fill_units:,}u across "
             f"{len(gaps):,} short store x families")
 
+    directed_stores = set()
+    for l in ship.values():
+        if l.get("directed_trays"):
+            _g = min(l.get("alloc_trays", 0), l["directed_trays"])
+            scn_fx[l["directed_adj"]]["trays_granted"] += _g
+            scn_fx[l["directed_adj"]]["trays_trimmed"] += l["directed_trays"] - _g
+            if _g > 0:
+                directed_stores.add(l["store_id"])
+    for k_, why_ in held.items():           # a directed line a hard block stopped
+        if lines[k_].get("directed_trays"):
+            scn_fx[lines[k_]["directed_adj"]]["trays_trimmed"] += lines[k_]["directed_trays"]
+    for st_id in sorted(directed_stores):
+        _dl = [l for l in ship.values() if l["store_id"] == st_id and l.get("directed_trays")]
+        decide("directed_shipment",
+               f"Directed shipment (manager-approved scenario): {sum(l['alloc_trays'] for l in _dl)} "
+               f"tray(s) / {sum(l['alloc_units'] for l in _dl):,}u across {len(_dl)} SKU(s), shipped "
+               f"regardless of sales history; exempt from the due test, 13-week gates and the "
+               f"full-cart minimum",
+               store_id=st_id, severity="info", skus=sorted(l["sku_id"] for l in _dl),
+               trays=sum(l["alloc_trays"] for l in _dl), units=sum(l["alloc_units"] for l in _dl))
     for st_id, v in sorted(variety_short.items()):
         _r = store_rule.get(st_id) or {}
         decide("variety_restriction", f"{v['units']:,}u short on {len(v['skus'])} SKU(s): stock is "
@@ -1497,13 +1575,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    adjustment_type=a["adjustment_type"], requested_by=a["requested_by"],
                    approved_by=a.get("approved_by"))
             continue
+        _why_trim = ("held by hard blocks (do-not-ship, store-master rules) or short supply"
+                     if a["adjustment_type"] == "directed_shipment" else "to the stores' selling pace")
         trim = (f"; requested {fx['trays_requested']} trays, granted {fx['trays_granted']}, "
-                f"trimmed {fx['trays_trimmed']} to the stores' selling pace"
-                if a["adjustment_type"] in ("allocation_floor", "allocation_cap") else "")
+                f"trimmed {fx['trays_trimmed']} {_why_trim}"
+                if a["adjustment_type"] in ("allocation_floor", "allocation_cap", "directed_shipment") else "")
         decide("scenario_applied",
                f"Scenario '{a['label']}' ({a['adjustment_type']}): {fx['lines']} line(s) at "
                f"{len(fx['stores'])} store(s){trim}"
-               + ("" if fx["lines"] else " — matched nothing (no store in scope sells at pace)"),
+               + ("" if fx["lines"] else
+                  " — did nothing: it must name both stores and a product this availability can pack"
+                  if a["adjustment_type"] == "directed_shipment" else
+                  " — matched nothing (no store in scope sells at pace)"),
                severity="info" if fx["lines"] else "warning",
                scenario_id=a["scenario_id"], applied=fx["lines"] > 0,
                adjustment_type=a["adjustment_type"], lines=fx["lines"], stores=len(fx["stores"]),
@@ -1674,7 +1757,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             break
         o = orders[store_id]
         n_full = sum(1 for c in o["carts"] if c["phys_full"])
-        if n_full >= min_full_carts:
+        if n_full >= min_full_carts or store_id in directed_stores:
             continue
         W = sum(c["wholesale_value"] for c in o["carts"])
         units = sum(l["alloc_units"] for l in o["lines"])
@@ -1752,6 +1835,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         overdue = is_overdue(store_last_del.get(store_id), arrival_of(store_id), store_due[store_id][2])
         action = economic_action(W, n, lost, cart_cost, low_value_wh, bool(critical), prior_def, max_econ_def,
                                  overdue=overdue)
+        if store_id in directed_stores and action == "defer":
+            action = "release"               # an approved directed shipment is never deferred
         if min_full_carts > 0 and action == "defer":
             action = "release_min_cart"     # floor met: one full CC cart is the agreed minimum
         if action == "pass":
@@ -1961,6 +2046,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "shrink": shrink_summary,
         "scenarios": {
             "directives": len(scn_all),
+            "directed_shipment_stores": len(directed_stores),
+            "directed_shipment_units": int(sum(l["alloc_units"] for l in ship.values()
+                                               if l.get("directed_trays"))),
             "applied": sum(1 for a in scn_all if scn_fx[a["adj_id"]]["lines"] > 0),
             "unsupported": len(scn_unsupported),
             "by_directive": [{"label": a["label"], "type": a["adjustment_type"],

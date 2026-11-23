@@ -54,8 +54,17 @@ ADJUSTMENT_TYPES = {
                             "in scope. The engine trims it to what each store sells, never more.",
     "allocation_cap":       "Limit the stores in scope to at most value_numeric SHELVES of the "
                             "product in scope.",
+    "directed_shipment":    "Ship EXACTLY value_numeric SHELVES of the product in scope to the "
+                            "stores in scope, whether or not they have sold it before. Use this "
+                            "ONLY when the user clearly orders product to be sent ('send', 'ship', "
+                            "'put', 'they get', 'make sure they receive' + a shelf count) to named "
+                            "stores, a merchant, a state, a region or a grade. Needs BOTH a store "
+                            "scope and a product scope. For 'at least' / 'guarantee' use "
+                            "allocation_floor instead. If no shelf count is given, use 1 and say so "
+                            "in warnings.",
 }
 _ALLOWED = set(ADJUSTMENT_TYPES)
+DIRECTED_MAX_SHELVES = 10        # mirrors workers/ipr_engine.py
 _VOCAB = "\n".join(f"- {k}: {v}" for k, v in ADJUSTMENT_TYPES.items())
 
 # Scope fields the engine matches on (exact values only — see catalog)
@@ -104,6 +113,7 @@ RULES
   Store numbers are checked after you answer, so do not warn that you cannot verify them.
 - "More" / "less" / a percentage of a product -> demand_multiplier. "At least N shelves" ->
   allocation_floor. "No more than N shelves" -> allocation_cap. "Take X first" -> priority_boost.
+  "Send / ship N shelves of X to <stores>" -> directed_shipment (exact, ignores sales history).
 - If the request cannot be expressed with the types below, return no adjustment and say why in
   warnings, in one plain sentence.
 
@@ -153,6 +163,17 @@ def _validate(adjustments: list, cat: dict) -> tuple:
         if atype not in _ALLOWED:
             warns.append(f"Dropped unsupported directive '{atype}'.")
             continue
+        if atype == "directed_shipment":
+            shelves = float(a.get("value_numeric") or 0)
+            if not any(a.get(f) for f in _STORE_SCOPES) or not any(a.get(f) for f in _SKU_SCOPES):
+                warns.append("A directed shipment must name both the stores and the product. Dropped.")
+                continue
+            if shelves <= 0 or shelves != int(shelves) or shelves > DIRECTED_MAX_SHELVES:
+                warns.append(f"A directed shipment must be a whole number of shelves from 1 to "
+                             f"{DIRECTED_MAX_SHELVES} per store. Dropped.")
+                continue
+            warns.append("Directed shipment: ships regardless of the stores' sales history and skips "
+                         "the full-cart minimum. Do-not-ship and store-master restrictions still apply.")
         if atype == "cart_target_override" and float(a.get("value_numeric") or 0) != 0:
             warns.append("Setting an exact cart count is not supported; cart counts follow demand. "
                          "Dropped.")

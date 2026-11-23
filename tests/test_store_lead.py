@@ -61,7 +61,8 @@ CAT = {"merchants": ["Paul Haitsch"], "regions": ["Northern", "Southern", "Weste
 
 def test_parser_is_told_every_type_the_engine_applies():
     assert set(SC.ADJUSTMENT_TYPES) == {"cart_target_override", "demand_multiplier", "exclusion",
-                                        "priority_boost", "allocation_floor", "allocation_cap"}
+                                        "priority_boost", "allocation_floor", "allocation_cap",
+                                        "directed_shipment"}
     for t in SC.ADJUSTMENT_TYPES:
         assert t in SC._VOCAB
 
