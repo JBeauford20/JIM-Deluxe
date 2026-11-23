@@ -163,17 +163,6 @@ def _validate(adjustments: list, cat: dict) -> tuple:
         if atype not in _ALLOWED:
             warns.append(f"Dropped unsupported directive '{atype}'.")
             continue
-        if atype == "directed_shipment":
-            shelves = float(a.get("value_numeric") or 0)
-            if not any(a.get(f) for f in _STORE_SCOPES) or not any(a.get(f) for f in _SKU_SCOPES):
-                warns.append("A directed shipment must name both the stores and the product. Dropped.")
-                continue
-            if shelves <= 0 or shelves != int(shelves) or shelves > DIRECTED_MAX_SHELVES:
-                warns.append(f"A directed shipment must be a whole number of shelves from 1 to "
-                             f"{DIRECTED_MAX_SHELVES} per store. Dropped.")
-                continue
-            warns.append("Directed shipment: ships regardless of the stores' sales history and skips "
-                         "the full-cart minimum. Do-not-ship and store-master restrictions still apply.")
         if atype == "cart_target_override" and float(a.get("value_numeric") or 0) != 0:
             warns.append("Setting an exact cart count is not supported; cart counts follow demand. "
                          "Dropped.")
@@ -204,6 +193,19 @@ def _validate(adjustments: list, cat: dict) -> tuple:
         if a.get("scope_sku_id") and a["scope_sku_id"] not in sku_ids:
             warns.append(f"scope_sku_id={a['scope_sku_id']} not found — ignored.")
             a["scope_sku_id"] = None
+        # checked LAST, after unknown scope values were cleared: a directed shipment whose
+        # product name was not recognised must not survive as "send to this store, no product"
+        if atype == "directed_shipment":
+            shelves = float(a.get("value_numeric") or 0)
+            if not any(a.get(f) for f in _STORE_SCOPES) or not any(a.get(f) for f in _SKU_SCOPES):
+                warns.append("A directed shipment must name both the stores and the product. Dropped.")
+                continue
+            if shelves <= 0 or shelves != int(shelves) or shelves > DIRECTED_MAX_SHELVES:
+                warns.append(f"A directed shipment must be a whole number of shelves from 1 to "
+                             f"{DIRECTED_MAX_SHELVES} per store. Dropped.")
+                continue
+            warns.append("Directed shipment: ships regardless of the stores' sales history and skips "
+                         "the full-cart minimum. Do-not-ship and store-master restrictions still apply.")
         clean.append(a)
     return clean, warns
 

@@ -81,3 +81,16 @@ def test_validate_normalises_store_ids_state_and_drops_unsupported():
     assert clean[1]["scope_sku_id"] == 1012142347
     assert any("not a store number" in w for w in warns) and any("sku_push" in w for w in warns)
     assert any("exact cart count" in w for w in warns)
+
+
+def test_directed_shipment_needs_stores_product_and_a_sane_count():
+    base = {"adjustment_type": "directed_shipment", "label": "d", "value_numeric": 2}
+    ok, _w = SC._validate([{**base, "scope_store_ids": [121], "scope_family": "H2O Bowl"}], CAT)
+    assert len(ok) == 1
+    # an unrecognised product name is cleared, and the directive must then be dropped
+    bad, w = SC._validate([{**base, "scope_store_ids": [121], "scope_family": "12cm Collector"}], CAT)
+    assert bad == [] and any("both the stores and the product" in x for x in w)
+    for extra in ({"scope_family": "H2O Bowl"}, {"scope_store_ids": [121]},
+                  {"scope_store_ids": [121], "scope_family": "H2O Bowl", "value_numeric": 40},
+                  {"scope_store_ids": [121], "scope_family": "H2O Bowl", "value_numeric": 1.5}):
+        assert SC._validate([{**base, **extra}], CAT)[0] == [], extra

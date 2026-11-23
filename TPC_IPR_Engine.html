@@ -1058,6 +1058,11 @@ function authHdr(){var t=tokGet();return (t&&t.access_token)?{'Authorization':'B
 /* ROLE GATING (UX only — server enforces real permissions) */
 var ROLE_RANK={viewer:0,order_writer:1,manager:2,admin:3};
 function userRole(){try{var t=tokGet();var p=JSON.parse(atob(t.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));return (p.app_metadata&&p.app_metadata.role)||'viewer';}catch(e){return 'viewer';}}
+/* Signed-in email: from the login response, else from the token itself (a session that came
+   from a reset link has no user object, which let the Approvals tab offer Approve on your own
+   scenario; the server refused it, but the screen should not offer it). */
+function userEmail(){try{var t=tokGet()||{};if(t.user&&t.user.email)return t.user.email;
+  var p=JSON.parse(atob(t.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));return p.email||'';}catch(e){return '';}}
 function canRole(min){return (ROLE_RANK[userRole()]||0)>=(ROLE_RANK[min]||99);}
 function applyRoleVisibility(){var r=ROLE_RANK[userRole()]||0;document.querySelectorAll('[data-requires-role]').forEach(function(el){el.style.display=(r>=(ROLE_RANK[el.getAttribute('data-requires-role')]||99))?'':'none';});}
 function showLogin(){var o=document.getElementById('loginOverlay');if(o)o.style.display='flex';}
@@ -5187,7 +5192,7 @@ async function xScnSubmit(){
 async function xLoadAppr(){
   var el=document.getElementById('apprScn');if(!el)return;
   try{
-    var myEmail=((tokGet()||{}).user||{}).email||'';
+    var myEmail=userEmail();
     var r=await api('/api/scenarios/pending');
     var mine=function(s){return myEmail&&String(s.created_by||'').toLowerCase()===myEmail.toLowerCase();};
     el.innerHTML=(r.pending||[]).length?r.pending.map(function(s){
@@ -5370,6 +5375,11 @@ async function xLoadPol(){
   }catch(e){hi.innerHTML='<div class="xempty">Change history did not load: '+escH(e.message)+'</div>';}
 }
 
+/* The Approvals queue changes while a tab sits open (someone else submits or approves), so
+   refresh it whenever this tab comes back into view. */
+document.addEventListener('visibilitychange',function(){try{
+  var sc=document.getElementById('screen-xappr');
+  if(!document.hidden&&sc&&sc.classList.contains('active'))xLoadAppr();}catch(e){}});
 /* ---------- boot ---------- */
 var _xBoot0=xBoot;
 xBoot=async function(){xLoadRuns();await _xBoot0();xRenderSteps();};
