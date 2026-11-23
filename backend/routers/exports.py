@@ -129,7 +129,7 @@ def export_aster(
             ])
 
     week = str(run["shipping_week"]).replace("-", "")
-    filename = f"JIM_AsterImport_WK{week}_{run_id[:8]}.csv"
+    filename = f"TPC_IPR_AsterImport_WK{week}_{run_id[:8]}.csv"
     output.seek(0)
 
     return StreamingResponse(

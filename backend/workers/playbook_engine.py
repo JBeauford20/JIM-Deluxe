@@ -1,5 +1,5 @@
 """
-JIM Deluxe — Playbook Engine
+TPC IPR Engine — Playbook Engine
 ==============================
 Loads and applies weekly_adjustments to modify recommendation engine behavior.
 Called by recommendation_engine.py before Stage 1 and Stage 2.

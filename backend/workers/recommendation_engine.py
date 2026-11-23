@@ -1,5 +1,5 @@
 """
-JIM Deluxe — Recommendation Engine
+TPC IPR Engine — Recommendation Engine
 =====================================
 Given an availability batch, produces store-level orders with full
 cart-by-cart, shelf-by-shelf packing plans and truck load assignments.
@@ -564,7 +564,7 @@ def _run(conn, batch_id, shipping_week=None, preview=False, verbose=True):
         shipping_week = today + timedelta(days=days_ahead)
 
     log(f"\n{'='*62}")
-    log(f"JIM Recommendation Engine")
+    log(f"TPC IPR Recommendation Engine")
     log(f"Batch:   {batch_id}")
     log(f"Week:    {shipping_week}")
     log(f"Weights: vel={W_VELOCITY} rec={W_RECENCY} pace={W_PACE} brd={W_BREADTH}")

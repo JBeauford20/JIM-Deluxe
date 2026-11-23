@@ -134,7 +134,7 @@ def main():
 
     log = Tee("weekly")
     log("=" * 60)
-    log("JIM WEEKLY INGEST")
+    log("TPC IPR ENGINE WEEKLY INGEST")
     export_db_env()
     failures = []
 

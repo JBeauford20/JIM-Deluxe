@@ -1,5 +1,5 @@
 """
-JIM Deluxe — Availability Upload Handler
+TPC IPR Engine — Availability Upload Handler
 ==========================================
 Accepts a weekly availability Excel file and loads it into
 availability_batches + availability_lines.

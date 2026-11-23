@@ -1027,14 +1027,15 @@ body{background:var(--x-bg);}
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-/* JIM Deluxe - Complete JS - ASCII only - single block */
+/* TPC IPR Engine - Complete JS - ASCII only - single block */
 var B='', DH={'Content-Type':'application/json'};
 /* AUTH (Supabase email login; anon key is public/client-safe) */
 var SB_URL='https://ocfmqxtkhpjkkstylypk.supabase.co';
 var SB_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jZm1xeHRraHBqa2tzdHlseXBrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA4OTczNjgsImV4cCI6MjEwNjQ3MzM2OH0.vjCWPM9os4YFppHuHeFyGi8_Q4RW3-eSK4SO5pdnl1o';
-function tokGet(){try{return JSON.parse(localStorage.getItem('jim_auth')||'null');}catch(e){return null;}}
-function tokSet(d){try{localStorage.setItem('jim_auth',JSON.stringify(d));}catch(e){}}
-function tokClear(){try{localStorage.removeItem('jim_auth');}catch(e){}}
+/* Sign-in is stored under 'tpc_ipr_auth'. The pre-rename key 'jim_auth' is still read once so nobody is signed out by the rename. */
+function tokGet(){try{return JSON.parse(localStorage.getItem('tpc_ipr_auth')||localStorage.getItem('jim_auth')||'null');}catch(e){return null;}}
+function tokSet(d){try{localStorage.setItem('tpc_ipr_auth',JSON.stringify(d));localStorage.removeItem('jim_auth');}catch(e){}}
+function tokClear(){try{localStorage.removeItem('tpc_ipr_auth');localStorage.removeItem('jim_auth');}catch(e){}}
 function authHdr(){var t=tokGet();return (t&&t.access_token)?{'Authorization':'Bearer '+t.access_token}:{};}
 /* ROLE GATING (UX only — server enforces real permissions) */
 var ROLE_RANK={viewer:0,order_writer:1,manager:2,admin:3};
@@ -1692,7 +1693,7 @@ function exportPlanList(){
   var blob=new Blob([csv],{type:'text/csv'});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download='JIM_Plan_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.download='TPC_IPR_Plan_'+new Date().toISOString().slice(0,10)+'.csv';
   a.click();
   URL.revokeObjectURL(a.href);
   toast('Exported '+_ofs.length+' orders','ok');
@@ -1809,7 +1810,7 @@ async function doApproveLoad(){
 async function doExport(){
   if(!rId){toast('No plan to export','warn');return;}
   toast('Generating Aster import file...','ok');
-  try{var b=await apiBlob('/api/exports/runs/'+rId+'/aster-import');var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download='JIM_Aster_'+(wk||'export')+'.csv';a.click();URL.revokeObjectURL(u);toast('Downloaded','ok');}
+  try{var b=await apiBlob('/api/exports/runs/'+rId+'/aster-import');var u=URL.createObjectURL(b);var a=document.createElement('a');a.href=u;a.download='TPC_IPR_Aster_'+(wk||'export')+'.csv';a.click();URL.revokeObjectURL(u);toast('Downloaded','ok');}
   catch(e){toast('Export failed: '+e.message,'err');}
 }
 
@@ -2278,7 +2279,7 @@ function pcAllSkuOptions(){
     return '<optgroup label="'+escH(f)+'">'+fams[f].map(function(o){return '<option value="'+o.sku_id+'">'+escH(o.description||('SKU '+o.sku_id))+'</option>';}).join('')+'</optgroup>';
   }).join('');
 }
-/* ---- visual helpers (measurements from JIM packing_profiles + cart_types, same math as ShelfKit) ---- */
+/* ---- visual helpers (measurements from packing_profiles + cart_types, same math as ShelfKit) ---- */
 var PC_PAL=['#5FBF7F','#4FB3A8','#A9BFCB','#EFC777','#86C5A0','#D98C8C','#8CA0D9','#C9A24F'];
 function pcTrayColor(c){return {clear:'#bfe3d9',cardboard:'#d9b38a',white:'#eef0ee',black:'#6a6f73',bag:'#c8a878'}[c]||'#9ec9b0';}
 function pcCart(){return (_pcCat&&_pcCat.cart)||{shelf_width_in:50.5,shelf_depth_in:22.25,ceiling_in:95,base_height_in:5,max_shelves:5};}
@@ -2846,7 +2847,7 @@ function exportDrawAster(){
   var blob=new Blob([csv],{type:'text/csv'});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download='JIM_Aster_Detail_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.download='TPC_IPR_Aster_Detail_'+new Date().toISOString().slice(0,10)+'.csv';
   a.click();
   URL.revokeObjectURL(a.href);
   toast('Exported '+rows.length+' Aster code rows','ok');
@@ -2864,7 +2865,7 @@ async function exportCartConfigs(){
     var blob=await resp.blob();
     var cd=resp.headers.get('Content-Disposition')||'';
     var m=cd.match(/filename="([^"]+)"/);
-    var fname=m?m[1]:('JIM_CartConfigs_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    var fname=m?m[1]:('TPC_IPR_CartConfigs_'+new Date().toISOString().slice(0,10)+'.xlsx');
     var a=document.createElement('a');
     a.href=URL.createObjectURL(blob);a.download=fname;a.click();
     URL.revokeObjectURL(a.href);
@@ -3520,7 +3521,7 @@ async function doHistExport(runId){
   try{
     var b=await apiBlob('/api/exports/runs/'+runId+'/aster-import');
     var u=URL.createObjectURL(b);
-    var a=document.createElement('a');a.href=u;a.download='JIM_Aster_'+runId.slice(0,8)+'.csv';
+    var a=document.createElement('a');a.href=u;a.download='TPC_IPR_Aster_'+runId.slice(0,8)+'.csv';
     a.click();URL.revokeObjectURL(u);
     toast('Downloaded','ok');
   }catch(e){toast('Export failed: '+e.message,'err');}

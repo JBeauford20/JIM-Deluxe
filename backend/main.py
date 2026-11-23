@@ -1,5 +1,5 @@
 """
-JIM Deluxe — FastAPI Backend
+TPC IPR Engine — FastAPI Backend
 Runs on Railway. All edits go through here as single transactions.
 The browser never touches Supabase directly.
 """
@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TPC - IPR Engine API",
-    description="Josh Inventory Management Deluxe — TPC order recommendation system",
+    description="TPC IPR Engine — Home Depot order-writing system for The Plant Company",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -90,7 +90,7 @@ def serve_dsm_portal():
 @app.get("/")
 def serve_frontend():
     """Serve the frontend HTML. Railway reads from disk on every deploy — no embed step needed."""
-    html_path = Path(__file__).parent.parent / "JIM_Deluxe_Live.html"
+    html_path = Path(__file__).parent.parent / "TPC_IPR_Engine.html"
     return FileResponse(
         path=str(html_path),
         media_type="text/html",

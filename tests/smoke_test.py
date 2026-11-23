@@ -1,5 +1,5 @@
 """
-JIM Deluxe browser smoke suite (Playwright + live API).
+TPC IPR Engine browser smoke suite (Playwright + live API).
 
 Run:  python tests/smoke_test.py
 Env:  JIM_BASE_URL  (default: production Railway URL)

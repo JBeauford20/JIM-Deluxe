@@ -1,5 +1,5 @@
 """
-JIM Deluxe — SKU Group Velocity Engine
+TPC IPR Engine — SKU Group Velocity Engine
 =======================================
 Scores every store for each SKU group (12cm, H2O Bowl, Collectors, etc.)
 Uses same EWMA/percentile/hysteresis approach as the overall velocity engine

@@ -1,5 +1,5 @@
 """
-JIM Deluxe — Velocity Scoring Engine
+TPC IPR Engine — Velocity Scoring Engine
 =====================================
 Calculates dynamic store velocity tiers from sales history.
 

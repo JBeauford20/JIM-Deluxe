@@ -1,4 +1,4 @@
-# TPC — IPR Engine (JIM Deluxe)
+# TPC IPR Engine
 
 Weekly Home Depot order-recommendation system for The Plant Company. Scores ~2,000 HD
 stores from 2+ years of sales history, turns a weekly greenhouse availability upload into
@@ -6,7 +6,7 @@ shelf-by-shelf cart plans, exchanges store lists with the external routing team,
 exports pick/ship files for the Aster ERP.
 
 **Live:** https://jim-deluxe-production.up.railway.app (push to `main` = deploy)
-**Stack:** FastAPI (`backend/`) + single-file frontend (`JIM_Deluxe_Live.html`, served via
+**Stack:** FastAPI (`backend/`) + single-file frontend (`TPC_IPR_Engine.html`, served via
 FileResponse — edit it, push, done; there is NO embed step) + Supabase Postgres
 (project `ocfmqxtkhpjkkstylypk`, pooler connection) + Railway.
 

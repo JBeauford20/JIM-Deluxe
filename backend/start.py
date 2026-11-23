@@ -1,5 +1,5 @@
 """
-Start the JIM Deluxe backend.
+Start the TPC IPR Engine backend.
 
 Local dev:  reads jim.env from the JIM Deluxe folder
 Railway:    env vars already injected by Railway — jim.env not needed
