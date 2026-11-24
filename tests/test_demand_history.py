@@ -132,3 +132,10 @@ def test_aging_stock_stops_counting_on_the_lot_age_curve():
                                min_stock=40, curve=CURVE)
     assert [w for w in range(10) if av[w]] == [2, 3, 4, 5, 6, 7, 8, 9]   # 49 days: 42u left
     assert D.curve_share(CURVE, 35) == 0.25 + (0.14 - 0.25) * 7 / 14
+
+
+def test_selling_more_than_the_model_holds_is_a_real_selling_week():
+    # a new store sells 13 with no delivery on record: that week counts (stock was there)
+    av = D.weekly_availability({0: 13}, {}, ALL, fresh_weeks=10, n_weeks=4, sellable_share=0.6,
+                               min_stock=5, curve=CURVE)
+    assert av[0] and not av[1]

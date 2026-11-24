@@ -90,7 +90,9 @@ def weekly_availability(sold, delivered, reporting, fresh_weeks, n_weeks, sellab
             if unknown:
                 avail[wb] = s > 0 or wb in reporting
             elif min_stock > 0:
-                avail[wb] = sellable >= min_stock - 1e-9 and (s > 0 or wb in reporting)
+                # selling more than the model holds means the record understates stock: the
+                # week was a real selling week, not a picked-over one
+                avail[wb] = (s > sellable + 1e-9) or (sellable >= min_stock - 1e-9 and (s > 0 or wb in reporting))
             else:
                 avail[wb] = s > 0 or (sellable > 1e-9 and wb in reporting)
         while s > 0 and lots:            # sell oldest first
