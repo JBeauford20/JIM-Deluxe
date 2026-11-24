@@ -30,6 +30,7 @@ from datetime import date, timedelta
 import psycopg2
 import psycopg2.extras
 
+import config_merge
 import demand_history
 import store_lead
 import store_rules
@@ -2426,6 +2427,154 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"deferred ({econ['deferred_units']:,}u, ${econ['deferred_wholesale']:,.0f} wholesale) · "
         f"{len(deferred_stores):,} stores fully deferred")
 
+    # CART-CONFIG STREAMLINING across stores (leadership 2026-11-20 "consolidate carts when
+    # alike"; Josh 2026-11-24: as few configs as possible while every store gets what it needs,
+    # never a product it does not sell just to lower the config count). A cart in a rarer config
+    # takes on a more common one when at most `config_merge_max_changes` shelf items differ and
+    # every change passes, for THAT store: a product added is one the store sells (eligible line,
+    # selling history, 13-week gates passed, store rules and variety bans allow it), in the same
+    # family and pot size as what it replaces, with supply, inside the store's weeks-of-supply
+    # ceiling; trays removed outside a same-family swap only come from above the store's need;
+    # a full cart never becomes a less full one. Restricted, named-variety, directed and
+    # pre-built carts never change. Done before kits, Aster lines and the totals below.
+    merge = {"enabled": False, "configs_before": 0, "configs_after": 0, "carts_changed": 0,
+             "swaps": 0, "trays_added": 0, "trays_removed": 0, "units_net": 0}
+    if str(S.get("config_merge", True)).lower() not in ("false", "0", "no"):
+        merge["enabled"] = True
+        _mx = int(S.get("config_merge_max_changes", 2) or 0)
+        _wos_m = {**{"AA": 10, "A": 10, "B": 8, "C+": 8, "C": 7, "C-": 6, "D": 6},
+                  **{k: v for k, v in (S.get("gap_fill_weeks_supply_by_grade") or {}).items() if v}}
+
+        def _m_ceiling(l):
+            w = float(_wos_m.get(l.get("grade"), 6))
+            w = min(w, fresh_of.get(l["sku_id"], fresh_days) / 7.0)
+            if l["family"] in H2O_TERR_FAMILIES:
+                w = min(w, float(S["h2o_terrarium_window_weeks"]))
+            if l.get("conf") == "UNUSABLE":
+                w = min(w, 4.0)
+            return l["fc"] * w - max(0.0, l.get("projected", 0.0))
+
+        _mcarts, _rep = [], {}
+        for st_id in sorted(orders):
+            o = orders[st_id]
+            _locked_skus = {l["sku_id"] for l in o["lines"]
+                            if l.get("variety_codes") or l.get("directed_trays")}
+            for c in o["carts"]:
+                items = [(pid, sk, tr) for (_p, sk, tr, _u, _k, pid) in c["contents"]]
+                sig = config_merge.cart_sig(items)
+                locked = bool(c.get("handling_tag")) or any(
+                    sk in _locked_skus or (sku_info[sk].get("family") or "") == "Prebuilt Cart"
+                    for _, sk, _ in items)
+                mc = {"id": (st_id, c["cart_number"]), "store": st_id, "cart": c, "sig": sig,
+                      "locked": locked}
+                _mcarts.append(mc)
+                if not locked:
+                    # the config's representative: its layout is what a merged cart adopts
+                    cur_rep = _rep.get(sig)
+                    if cur_rep is None or (c["phys_full"] and not cur_rep["phys_full"]):
+                        _rep[sig] = c
+        merge["configs_before"] = len({m["sig"] for m in _mcarts})
+
+        def _m_line(st_id, by_sku, sk):
+            return by_sku.get(sk) or ship.get((st_id, sk))
+
+        _rej = Counter()
+
+        def _m_try(mc, target, removed, added):
+            st_id, o = mc["store"], orders[mc["store"]]
+            rep = _rep.get(target)
+            if rep is None or (mc["cart"]["phys_full"] and not rep["phys_full"]):
+                _rej["would make a full cart less full"] += 1
+                return False
+            deny = store_deny.get(st_id, NO_DENY)
+            by_sku = {l["sku_id"]: l for l in o["lines"]}
+            dt = defaultdict(int)                            # net trays per SKU
+            for _p, sk, tr in removed:
+                dt[sk] -= tr
+            for _p, sk, tr in added:
+                dt[sk] += tr
+            fam_units = defaultdict(int)
+            plan_ = []
+            for sk, d in dt.items():
+                if d == 0:
+                    continue
+                l = _m_line(st_id, by_sku, sk)
+                if l is None:
+                    _rej["store does not sell the product"] += 1
+                    return False
+                fam_units[l["family"]] += d * l["upt"]
+                plan_.append((sk, d, l))
+            fams_swapped = {f for f, u in fam_units.items() if u == 0}
+            rem_fp = {((_m_line(st_id, by_sku, r[1]) or {}).get("family"), r[0]) for r in removed}
+            for sk, d, l in plan_:
+                u = d * l["upt"]
+                if d > 0:
+                    why = ("store does not sell the product" if l.get("fc", 0) < min_rate else
+                           "product held or stopped at this store" if (st_id, sk) in held else
+                           "store rule" if (store_rule.get(st_id) and not store_rules.sku_allowed(
+                               store_rule[st_id], sku_info[sk], directed=False)[0]) else
+                           "no supply left" if pools.left(sk, deny) < u else
+                           "over the store's weeks of supply" if l.get("alloc_units", 0) + u > _m_ceiling(l) + 1e-9
+                           else "different family or pot size" if (l["family"], pack[sk]["profile_id"]) not in rem_fp
+                           else None)
+                    if why:
+                        _rej[why] += 1
+                        return False
+                elif (l["family"] not in fams_swapped and l.get("alloc_trays", 0) + d < l.get("trays", 0)
+                      and (l.get("alloc_units", 0) + u + max(0.0, l.get("projected", 0.0))
+                           < l["fc"] * float(l.get("cadence_weeks") or 1) - 1e-9)):
+                    # below the coverage target is allowed only while the store still has
+                    # enough to sell until its next scheduled delivery — never run short
+                    _rej["would leave the store short before its next delivery"] += 1
+                    return False
+            for sk, d, l in plan_:                            # commit
+                u = d * l["upt"]
+                if d > 0:
+                    pools.take(sk, u, deny)
+                    if l not in o["lines"]:
+                        l.setdefault("alloc_trays", 0)
+                        l.setdefault("alloc_units", 0)
+                        o["lines"].append(l)
+                        by_sku[sk] = l
+                    merge["trays_added"] += d
+                else:
+                    pools.give_back(sk, -u, deny)
+                    merge["trays_removed"] -= d
+                l["alloc_trays"] = l.get("alloc_trays", 0) + d
+                l["alloc_units"] = l.get("alloc_units", 0) + u
+                l["config_merge_trays"] = l.get("config_merge_trays", 0) + d
+                merge["units_net"] += u
+            c = mc["cart"]
+            new = [(pos, sk, tr, tr * by_sku[sk]["upt"], None, pid)
+                   for (pos, sk, tr, _u, _k, pid) in rep["contents"]]
+            c["contents"] = new
+            wh = sum(x[3] * float(sku_info[x[1]].get("wholesale_price_whl") or 0) for x in new)
+            c.update(total_units=sum(x[3] for x in new), wholesale_value=round(wh, 2),
+                     shelves_used=rep["shelves_used"], tray_fill=rep["tray_fill"],
+                     phys_full=rep["phys_full"], is_full=rep["is_full"], low_value=wh < low_value_wh,
+                     freight_pct=round(cart_cost / wh, 4) if wh else None,
+                     wholesale_incomplete=sorted({x[1] for x in new
+                                                  if not (sku_info[x[1]].get("wholesale_price_whl") or 0)}),
+                     config_merged=True)
+            if {x[1] for x in removed} != {x[1] for x in added}:
+                merge["swaps"] += 1
+            return True
+
+        _moves = config_merge.streamline(_mcarts, _mx, _m_try) if _mx > 0 else []
+        alloc_units_total += merge["units_net"]
+        merge["carts_changed"] = len({id(m[0]) for m in _moves})
+        merge["configs_after"] = len({m["sig"] for m in _mcarts})
+        merge["locked_carts"] = sum(1 for m in _mcarts if m["locked"])
+        merge["rejected_checks"] = dict(_rej.most_common())
+        for mc, _old, _new in _moves:
+            decide("config_merge", f"Cart {mc['cart']['cart_number']} matched to a common cart config "
+                                   f"(same family and pot size, products the store sells, within its "
+                                   f"weeks of supply)", store_id=mc["store"], severity="info")
+        log(f"Cart configs streamlined: {merge['configs_before']:,} -> {merge['configs_after']:,} configs · "
+            f"{merge['carts_changed']:,} carts changed ({merge['swaps']:,} with a same-family swap) · "
+            f"+{merge['trays_added']:,}/-{merge['trays_removed']:,} trays · net {merge['units_net']:+,}u · "
+            f"{merge['locked_carts']:,} special carts untouched · rejected: {merge['rejected_checks']}")
+
     # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
     # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
     # jute. Kit options per SKU come from every availability line: a grower-pot (1M) line can be
@@ -2443,10 +2592,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             kit_opts[r["sku_id"]].add(r["hard_good_type"])
     kit_units = defaultdict(lambda: {"jute_kit": 0, "ceramic_kit": 0})
     kit_tie = defaultdict(bool)
+    # Identical carts get identical kits: one decision per cart config, weighted by how many
+    # carts share it, so the kit never splits one config into two (Josh 2026-11-24).
+    _kgroups = defaultdict(list)
     for store_id in sorted(orders):
         for c in orders[store_id]["carts"]:
+            _kgroups[(tuple(sorted((p, sk, tr, pid) for (p, sk, tr, _u, _k, pid) in c["contents"])),
+                      c.get("handling_tag") or "")].append(c)
+    for _gk, _gcarts in sorted(_kgroups.items(), key=lambda kv: (-len(kv[1]), str(kv[0]))):
+        _n = len(_gcarts)
+        for c in _gcarts[:1]:
             new = []
             for (pos, sku_id, trays, units, _k, pid) in c["contents"]:
+                units = units * _n                  # decided for the whole config at once
                 opts = kit_opts.get(sku_id, set())
                 if len(opts) == 2:
                     t = kit_units[sku_id]
@@ -2464,8 +2622,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     kit_units[sku_id][kit] += units
                 else:
                     kit = avail_meta.get(sku_id, {}).get("hard_good_type", "ceramic_kit")
-                new.append((pos, sku_id, trays, units, kit, pid))
-            c["contents"] = new
+                new.append((pos, sku_id, kit))
+            _kit_at = {(p, sk): k for (p, sk, k) in new}
+            for cc in _gcarts:
+                cc["contents"] = [(p, sk, tr, u, _kit_at[(p, sk)], pid)
+                                  for (p, sk, tr, u, _k, pid) in cc["contents"]]
 
     # ══ 8. REVIEW (§24–25) + $900K OBJECTIVE (§2) + ALLOCATION OUTPUTS (§15) ══
     review = {}
@@ -2906,6 +3067,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             cart_sig[(store_id, c["cart_number"])] = sig
             sig_count[sig] += 1
     sig_code = {s: f"CC{i + 1}" for i, s in enumerate(sorted(sig_count, key=lambda s: (-sig_count[s], str(s))))}
+    merge["final_configs"] = len(sig_count)
+    log(f"Cart configs to build (with kits and handling tags): {len(sig_count):,} for "
+        f"{sum(sig_count.values()):,} carts")
     cur.execute("""SELECT 1 FROM information_schema.columns
                    WHERE table_name = 'order_carts' AND column_name = 'handling_tag'""")
     _has_tag_col = bool(cur.fetchone())

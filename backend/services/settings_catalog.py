@@ -43,6 +43,16 @@ CATALOG = [
          kind="bool", default=True,
          help="On: shelves are packed best-fit so a store uses as few carts as physically possible. "
               "Never changes what the store receives."),
+    dict(key="config_merge", group="Minimum order and carts",
+         label="Match carts to common cart configs across stores", kind="bool", default=True,
+         help="On (Josh 11/24): a cart takes on a more common config only when the store sells every "
+              "product in it, swaps stay in the same family and pot size, supply and the store's weeks "
+              "of supply allow it, and the store still has enough until its next delivery. Restricted, "
+              "named-variety, directed and pre-built carts never change. Identical carts always get the "
+              "same kit."),
+    dict(key="config_merge_max_changes", group="Minimum order and carts",
+         label="Most shelf items a cart may change to match a common config", kind="int", default=2,
+         min=0, max=4, help="0 turns matching off. Each change must still pass every store check."),
     # ── Delivery timing ─────────────────────────────────────────────────────
     dict(key="delivery_cadence_weeks", group="Delivery timing", label="Weeks between deliveries, by store grade",
          kind="grade_int", default={}, min=1, max=12, allow_blank=True,
