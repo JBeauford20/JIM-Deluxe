@@ -30,6 +30,7 @@ from datetime import date, timedelta
 import psycopg2
 import psycopg2.extras
 
+import demand_history
 import store_lead
 import store_rules
 from db_conn import get_conn
@@ -689,12 +690,31 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     pk_starve = str(S.get("peak_floor_require_starvation", False)).lower() in ("true", "1", "yes")
     pk_month = (shipping_week or anchor).month
     peak_rate = {}
-    if pk_month in pk_idx:
+    _dh_on = str(S.get("demand_history", "on")).lower() not in ("off", "false", "0", "no")
+    if pk_month in pk_idx and not _dh_on:
         cur.execute("""SELECT store_id, sku_id, SUM(units_sold)::float AS u FROM sales
                        WHERE sale_date BETWEEN %s AND %s GROUP BY 1, 2""", tuple(pk_win))
         _wk = ((date.fromisoformat(pk_win[1]) - date.fromisoformat(pk_win[0])).days + 1) / 7.0
         peak_rate = {(r["store_id"], r["sku_id"]): r["u"] / _wk for r in cur.fetchall() if r["u"]}
     peak_mult = pk_share * pk_idx.get(pk_month, 0.0)
+    # Demand by selling opportunity (CEO review 2026-11-24, workers/demand_history.py): 13 months
+    # of weekly history; rates over weeks the line could sell; the benchmark becomes June-July's
+    # typical week (fallback to another reliably stocked period); comparables for new lines.
+    # demand_history = "off" restores the calendar-week rates and the Apr-Jul peak window.
+    # lot-age sellable curve (calibration 2026-11-20; used below for on-hand credit too)
+    lot_curve = [tuple(x) for x in (S.get("sellable_share_by_age_days")
+                                    or [[0, 0.60], [28, 0.25], [42, 0.14], [56, 0.07], [63, 0.05], [70, 0.0]])]
+    H = None
+    peak_label = "Apr-Jul peak"
+    if _dh_on:
+        H = demand_history.load(
+            cur, anchor, fresh_of, fresh_days, DEDUP_DELIVERIES, stores,
+            {k: (v.get("ipr_family") or "Unmapped") for k, v in sku_info.items()},
+            (shipping_week or anchor).month, S, log,
+            lot_curve=lot_curve)
+        if pk_month in pk_idx:
+            peak_rate = {k: b[0] for k, b in H["bench"].items() if b[0] > 0}
+        peak_label = f"{H['periods'][0]} benchmark"
     cur.execute("""
         WITH fw AS (SELECT * FROM unnest(%s::bigint[], %s::int[]) AS t(sku_id, days))
         SELECT s.store_id, s.sku_id,
@@ -744,8 +764,6 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # Lot-age sellable credit (calibration 2026-11-20, 4,474 clean delivery cohorts, Apr-Jul 2026
     # + 2025 replicate): only ~60% of delivered units ever sell, and the sellable share left in a
     # lot falls with its age. Each delivery lot counts units x share(age at the sales anchor).
-    lot_curve = [tuple(x) for x in (S.get("sellable_share_by_age_days")
-                                    or [[0, 0.60], [28, 0.25], [42, 0.14], [56, 0.07], [63, 0.05], [70, 0.0]])]
 
     def sellable_share(age):
         if age <= lot_curve[0][0]:
@@ -991,7 +1009,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 sales[_k] = {"w2": 0.0, "w4": 0.0, "w8": 0.0, "w10": 0.0, "w13": 0.0,
                              "d13": 0.0, "w13d": 0.0}
                 _seeded += 1
-        log(f"Peak-floor seeding: {_seeded:,} store x SKU lines with Apr-Jul sales but none in 13 wks")
+        log(f"Peak-floor seeding: {_seeded:,} store x SKU lines with {peak_label} sales but none in 13 wks")
     for _k in dir_trays:                    # a directed store x SKU needs no sales history
         sales.setdefault(_k, {"w2": 0.0, "w4": 0.0, "w8": 0.0, "w10": 0.0, "w13": 0.0,
                               "d13": 0.0, "w13d": 0.0})
@@ -1004,21 +1022,63 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if not st:
             continue
         r2, r4, r10, r13 = sv["w2"] / 2, sv["w4"] / 4, sv["w10"] / 10, sv["w13"] / 13
-        fc = fw["w4"] * r4 + fw["w10"] * r10 + fw["w13"] * r13
         dv = dels.get((store_id, sku_id), {})
         last_del = dv.get("last_del")
-        method = "blend 4/10/13"
-        # Low recent sales must not become low demand when the store likely lacked product (§7)
-        if r4 < 0.5 * r13 and (last_del is None or (anchor - last_del).days > 42):
-            fc, method = r13, "13-wk baseline (likely stocked out — low recent sales not trusted)"
-        if store_id in edi_gap:
-            fc, method = r13, "13-wk baseline (EDI gap)"
+        hl = H["lines"].get((store_id, sku_id)) if H else None
+        if H:
+            # Rates over the weeks the line could sell (CEO 2026-11-24): before the product first
+            # reached the store, while the store was not reporting, or with no stock on hand, a
+            # week is not a selling opportunity. A window with too few selling weeks drops out
+            # of the 4/10/13 blend and the rest re-weight. This replaces the 42-day guess.
+            hl = hl or {}
+            parts = [(fw["w4"], hl.get("r4"), hl.get("a4", 0), 2),
+                     (fw["w10"], hl.get("r10"), hl.get("a10", 0), 3),
+                     (fw["w13"], hl.get("r13"), hl.get("a13", 0), 3)]
+            use = [(w, r) for w, r, a, need_ in parts if r is not None and a >= need_]
+            if not use and hl.get("r13") is not None:
+                use = [(1.0, hl["r13"])]
+            wsum = sum(w for w, _ in use)
+            fc = sum(w * r for w, r in use) / wsum if wsum else 0.0
+            r4 = hl.get("r4") if hl.get("r4") is not None else r4
+            r10 = hl.get("r10") if hl.get("r10") is not None else r10
+            r13 = hl.get("r13") if hl.get("r13") is not None else r13
+            a13 = hl.get("a13", 0)
+            method = ("blend 4/10/13 over selling weeks" if a13 >= 13 else
+                      f"blend over {a13} selling weeks of the last 13 (no stock, not reporting, "
+                      f"or not yet launched in the others)")
+            if store_id in edi_gap:
+                method += " · EDI gap weeks excluded"
+            # Limited history (new store or new SKU): size from comparable stores (same velocity
+            # code and region) for this SKU, else this family's typical SKU there; the store's
+            # own selling takes over one quarter per selling week until `limited_weeks`.
+            a_tot, lw = hl.get("a_total", 0), H["limited_weeks"]
+            if a_tot < lw and not _dir:
+                grp = H["group"].get(store_id)
+                fam_k = sku_info[sku_id].get("ipr_family") or "Unmapped"
+                cmp_r, cmp_src = H["cmp_sku"].get((grp, sku_id)), "this SKU"
+                if cmp_r is None:
+                    cmp_r, cmp_src = H["cmp_fam"].get((grp, fam_k)), f"{fam_k} family"
+                if cmp_r is not None:
+                    own_w = a_tot / lw
+                    fc = own_w * fc + (1 - own_w) * cmp_r
+                    method = (f"limited history ({a_tot} selling wk): {1 - own_w:.0%} comparable "
+                              f"stores' {cmp_src} rate {cmp_r:.1f}u/wk, {own_w:.0%} own sell-down")
+        else:
+            fc = fw["w4"] * r4 + fw["w10"] * r10 + fw["w13"] * r13
+            method = "blend 4/10/13"
+            # Low recent sales must not become low demand when the store likely lacked product (§7)
+            if r4 < 0.5 * r13 and (last_del is None or (anchor - last_del).days > 42):
+                fc, method = r13, "13-wk baseline (likely stocked out — low recent sales not trusted)"
+            if store_id in edi_gap:
+                fc, method = r13, "13-wk baseline (EDI gap)"
         pf = peak_rate.get((store_id, sku_id), 0.0) * peak_mult
         # Starvation evidence option (§7: the exception is for stores that LIKELY LACKED
         # INVENTORY): with peak_floor_require_starvation=true the floor binds only when 13-wk
         # deliveries could not have stocked floor-rate demand. Default false = 11/20 calibration.
         if pf > fc and (not pk_starve or float(dv.get("d13") or 0) < pf * 13):
-            fc, method = pf, (f"Apr-Jul peak floor ({peak_rate[(store_id, sku_id)]:.1f}u/wk x "
+            _bl = (f"{H['bench'][(store_id, sku_id)][1]} typical week" if H and (store_id, sku_id) in H["bench"]
+                   else "Apr-Jul peak")
+            fc, method = pf, (f"{_bl} floor ({peak_rate[(store_id, sku_id)]:.1f}u/wk x "
                               f"{peak_mult:.2f}) — recent sales held down by short supply")
         # approved scenario demand multipliers (clamped; the parser never touches the engine —
         # this deterministic application is the only path, and every hit is counted for audit)
@@ -2567,8 +2627,30 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                         "left_units": _ga[g] - _gs.get(g, 0)} for g in sorted(_ga, reverse=True)},
                   "note": "grade 3 = more mature plants and contract-grower stock; it is used before "
                           "grade 2 within each SKU. Grade never changes how much a store is sent."}
+    _dh_summary = None
+    if H:
+        _mc = Counter()
+        for _l in lines.values():
+            _m = _l.get("method") or ""
+            _mc["limited history (comparables)" if _m.startswith("limited history") else
+                "benchmark floor" if "floor" in _m else
+                "fewer than 13 selling weeks" if "selling weeks of the last 13" in _m else
+                "13 of 13 selling weeks" if _m.startswith("blend 4/10/13 over") else "other"] += 1
+        _md_units = sum(H["md_rate"].values())
+        _dh_summary = {
+            "basis": "13 months weekly; rates over selling weeks (launched, reporting, stock on hand)",
+            "benchmark_periods": H["periods"], "benchmark_index_to_primary": H["bench_index"],
+            "benchmark_lines": len(H["bench"]),
+            "benchmark_seasonal_multiplier": round(peak_mult, 3),
+            "mothers_day": {"date": str(H["md_date"]), "lines": len(H["md_rate"]),
+                            "units": round(_md_units),
+                            "note": "measured separately; never part of a routine benchmark"},
+            "lines_by_method": dict(_mc),
+            "growth_vs_coverage": H["growth"],
+        }
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
+        "demand_history": _dh_summary,
         "availability_grades": grades,
         "production": production,
         "cart_completion": completion,

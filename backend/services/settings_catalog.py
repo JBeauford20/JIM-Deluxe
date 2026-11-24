@@ -130,8 +130,16 @@ CATALOG = [
          help="How much each sales window counts in the weekly forecast. Must total 100%."),
     dict(key="peak_floor_share", group="Demand and goal", label="Peak-season floor",
          kind="pct", default=0.5, min=0.05, max=1,
-         help="Forecast is never below this share of the store's Apr-Jul rate (seasonally adjusted), "
-              "so lines starved of supply do not vanish."),
+         help="Forecast is never below this share of the store's benchmark rate (seasonally adjusted), "
+              "so lines starved of supply do not vanish. With selling-week history on, the benchmark is "
+              "June-July's typical week; otherwise the Apr-Jul average."),
+    dict(key="demand_history", group="Demand and goal",
+         label="Measure demand over weeks the product could sell (13 months)", kind="bool", default=True,
+         help="On (CEO review 11/24): rates count only weeks after the product reached the store, while "
+              "the store reported and had stock; June-July typical week is the benchmark (another "
+              "well-stocked period when June-July was short); Mother's Day measured separately; new "
+              "stores and SKUs sized from comparable stores until their own selling takes over. "
+              "Off: calendar-week rates and the Apr-Jul peak window."),
     dict(key="peak_floor_require_starvation", group="Demand and goal",
          label="Peak floor only where the store was short of product", kind="bool", default=False,
          help="On: the floor applies only when recent deliveries could not have covered that demand."),
