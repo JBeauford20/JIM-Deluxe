@@ -582,6 +582,15 @@ def export_report_v2(run_id: str, user=Depends(get_current_user)):
     return {"stores_and_carts": sc, "pack_plan": pp, "aster": ast}
 
 
+@router.get("/runs/{run_id}/reconcile")
+def reconcile_v2(run_id: str, user=Depends(get_current_user)):
+    """Order -> carts -> pack plan -> Stores & Carts -> Aster unit reconciliation (PASS/FAIL).
+    Release is refused while this FAILs. Read-only."""
+    from services.export_reconcile import reconcile_run
+    with get_db() as conn:
+        return reconcile_run(cursor(conn), run_id)
+
+
 @router.get("/runs/{run_id}/config-names")
 def config_names_v2(run_id: str, user=Depends(get_current_user)):
     """The run's cart config names (CC 1..n + permanent carts) — the same names the

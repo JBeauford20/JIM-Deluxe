@@ -19,6 +19,10 @@ def test_every_catalog_key_is_read_by_the_engine():
     outlook = open(os.path.join(os.path.dirname(__file__), "..", "backend", "services", "sales_outlook.py"),
                    encoding="utf-8").read()
     read |= set(re.findall(r'_setting\(cur, "([a-z0-9_]+)"', outlook))
+    # the release reconciliation reads its exemption list directly (services/export_reconcile.py)
+    rec = open(os.path.join(os.path.dirname(__file__), "..", "backend", "services", "export_reconcile.py"),
+               encoding="utf-8").read()
+    read |= set(re.findall(r"key = '([a-z0-9_]+)'", rec))
     assert {e["key"] for e in C.CATALOG} <= read
 
 

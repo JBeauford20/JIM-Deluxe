@@ -2114,7 +2114,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         orders.setdefault(l["store_id"], []).append(l)
 
     prebuilt_alone = []          # stores whose only product this week is a pre-built cart
-    for store_id, olines in orders.items():
+    def _pack_store(store_id, olines):
+        """Build one store's carts from its allocated lines (also used to re-pack a store
+        that received re-offered trays)."""
+        nonlocal alloc_units_total
         # A PRE-BUILT CART (e.g. the Climb-itt Bundle) only travels with at least one CC cart of
         # product (Josh 2026-11-23). A store with nothing else this week does not get it.
         _pbl = [l for l in olines if (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart"
@@ -2129,7 +2132,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 l["alloc_trays"] = l["alloc_units"] = 0
             prebuilt_alone.append(store_id)
             orders[store_id] = {"lines": olines, "carts": []}
-            continue
+            return
         # A NAMED-VARIETY directed shipment ("one full cart of Monstera Bulbasaur") rides on its
         # own cart(s): its trays are never mixed onto shelves with other product.
         _ded = [l for l in olines if l.get("variety_codes") and l.get("alloc_trays", 0) > 0]
@@ -2250,6 +2253,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                              f"for best family grade {top_grade}) — demand-driven, shipped (cart caps off)",
                    store_id=store_id, severity="info", carts=len(out))
         orders[store_id] = {"lines": olines, "carts": out}
+    for store_id, olines in list(orders.items()):
+        _pack_store(store_id, olines)
     for store_id in prebuilt_alone:
         if not any(l.get("alloc_trays", 0) > 0 for l in orders[store_id]["lines"]):
             del orders[store_id]
@@ -2299,6 +2304,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # Critical/overdue/lost-sales override, and trays are never added to fill a cart. Its need
     # is recalculated next week with coverage extended one week per consecutive push. Orders
     # that pass ship whole (a trailing partial cart rides on the same stop).
+    returned = defaultdict(int)     # sku -> units handed back by held (pushed/deferred) orders
     pushed = {"stores": 0, "carts": 0, "units": 0, "wholesale": 0.0, "lost_one_week": 0.0,
               "repeat_stores": 0, "review_stores": 0}
     # Escalation (audit F2, 2026-11-20): a store pushed this many consecutive due cycles has its
@@ -2343,7 +2349,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    store_id=store_id, severity="warning", consecutive_pushes=streak + 1,
                    lost_sales_one_week=round(lost, 2), order_wholesale=round(W, 2))
         alloc_units_total -= units
+        _deny_p = store_deny.get(store_id, NO_DENY)
         for l in o["lines"]:
+            if l.get("alloc_units", 0) > 0:          # trays go back to the pool (Jason point 4)
+                pools.give_back(l["sku_id"], l["alloc_units"], _deny_p)
+                returned[l["sku_id"]] += l["alloc_units"]
             l["deferred_units"] = l["alloc_units"]
             l["alloc_units"], l["alloc_trays"] = 0, 0
         del orders[store_id]
@@ -2434,7 +2444,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         econ["deferred_retail_one_week_at_risk"] += lost
         econ["deferred_single_cart" if n == 1 else "deferred_multi_cart"] += 1
         alloc_units_total -= data["units"]
+        _deny_d = store_deny.get(store_id, NO_DENY)
         for l in o["lines"]:
+            if l.get("alloc_units", 0) > 0:          # trays go back to the pool (Jason point 4)
+                pools.give_back(l["sku_id"], l["alloc_units"], _deny_d)
+                returned[l["sku_id"]] += l["alloc_units"]
             l["deferred_units"] = l["alloc_units"]
             l["alloc_units"], l["alloc_trays"] = 0, 0
         deferred_stores.append(store_id)
@@ -2442,6 +2456,80 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     log(f"Cart economics: {econ['released_low_value']:,} low-value carts released (whole orders) · {econ['deferred_carts']:,} "
         f"deferred ({econ['deferred_units']:,}u, ${econ['deferred_wholesale']:,.0f} wholesale) · "
         f"{len(deferred_stores):,} stores fully deferred")
+
+    # RE-OFFER HELD TRAYS (Jason's review point 4; Josh 2026-11-24). Trays allocated to orders that
+    # were then pushed (below the one-full-cart minimum) or deferred (cart economics) went back to
+    # the pool above. Offer them once, highest priority first, to stores whose orders ARE shipping
+    # and whose line for that SKU is still short of its own need (need trays − allocated trays).
+    # Never beyond need, never a new store order, never a directed line, never past supply or a
+    # store's variety restriction. A store that gains trays is re-packed (more product only adds
+    # to carts, so the full-cart minimum still holds) — but only into open space on carts already
+    # going to it: a grant that would add a cart is cut back tray by tray, or refused
+    # (reoffer_allow_new_carts = true lifts this). Stores with a cart-capacity limit are skipped.
+    # What is still left stays in the pool and is reported as unallocated.
+    reoffer = {"returned_units": int(sum(returned.values())), "skus_returned": len(returned),
+               "reoffered_units": 0, "reoffered_trays": 0, "stores": 0, "lines": 0}
+    if returned and str(S.get("reoffer_held_trays", True)).lower() not in ("false", "0", "no"):
+        _cands = []
+        for (st_id, sk), l in ship.items():
+            if (sk in returned and st_id in orders and not l.get("directed_trays")
+                    and not (stores.get(st_id) or {}).get("capacity_carts")
+                    and l.get("trays", 0) > l.get("alloc_trays", 0)):
+                _cands.append(l)
+        _cands.sort(key=lambda x: (-x.get("priority", 0), x["store_id"], x["sku_id"]))
+        _touched = set()
+        _new_carts_ok = str(S.get("reoffer_allow_new_carts", False)).lower() in ("true", "1", "yes")
+        reoffer["refused_would_add_cart"] = 0
+        for l in _cands:
+            deny = store_deny.get(l["store_id"], NO_DENY)
+            short_t = l["trays"] - l.get("alloc_trays", 0)
+            give_t = min(short_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
+            if give_t <= 0:
+                continue
+            o = orders[l["store_id"]]
+            _was_in, _old_carts = l in o["lines"], o["carts"]
+            _old_t, _old_u = l.get("alloc_trays", 0), l.get("alloc_units", 0)
+            _rel = any(c.get("econ_action") == "release" for c in _old_carts)
+            while give_t > 0:
+                # only into open space on carts already going to the store (no extra cart)
+                l["alloc_trays"], l["alloc_units"] = _old_t + give_t, _old_u + give_t * l["upt"]
+                if not _was_in:
+                    o["lines"].append(l)
+                _pack_store(l["store_id"], o["lines"])
+                o = orders[l["store_id"]]
+                if _new_carts_ok or len(o["carts"]) <= len(_old_carts):
+                    break
+                if not _was_in:
+                    o["lines"].remove(l)
+                orders[l["store_id"]]["carts"] = _old_carts
+                o = orders[l["store_id"]]
+                give_t -= 1
+            l["alloc_trays"], l["alloc_units"] = _old_t, _old_u
+            if give_t <= 0:
+                reoffer["refused_would_add_cart"] += 1
+                continue
+            if _rel:
+                for c in o["carts"]:
+                    c["econ_action"] = "release"
+            u = give_t * l["upt"]
+            pools.take(l["sku_id"], u, deny)
+            l["alloc_trays"] = _old_t + give_t
+            l["alloc_units"] = _old_u + u
+            l["reoffered_trays"] = l.get("reoffered_trays", 0) + give_t
+            alloc_units_total += u
+            reoffer["reoffered_units"] += u
+            reoffer["reoffered_trays"] += give_t
+            reoffer["lines"] += 1
+            _touched.add(l["store_id"])
+            decide("reoffer", f"{give_t} tray(s) ({u}u) re-offered from orders held this week; this line "
+                              f"was still {short_t} tray(s) short of its own need",
+                   store_id=l["store_id"], sku_id=l["sku_id"], severity="info", trays=give_t, units=u)
+        reoffer["stores"] = len(_touched)
+    reoffer["left_in_pool_units"] = reoffer["returned_units"] - reoffer["reoffered_units"]
+    log(f"Held trays: {reoffer['returned_units']:,}u returned by pushed/deferred orders · "
+        f"{reoffer['reoffered_units']:,}u re-offered to {reoffer['stores']:,} shipping stores "
+        f"({reoffer['lines']:,} lines still short of need; {reoffer.get('refused_would_add_cart', 0):,} refused, "
+        f"no open cart space) · {reoffer['left_in_pool_units']:,}u left unallocated")
 
     # CART-CONFIG STREAMLINING across stores (leadership 2026-11-20 "consolidate carts when
     # alike"; Josh 2026-11-24: as few configs as possible while every store gets what it needs,
@@ -2832,6 +2920,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "demand_history": _dh_summary,
+        "held_trays_reoffer": reoffer,
+        "config_merge": merge,
         "availability_grades": grades,
         "production": production,
         "cart_completion": completion,

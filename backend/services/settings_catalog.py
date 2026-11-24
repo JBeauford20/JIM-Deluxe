@@ -53,6 +53,11 @@ CATALOG = [
     dict(key="config_merge_max_changes", group="Minimum order and carts",
          label="Most shelf items a cart may change to match a common config", kind="int", default=2,
          min=0, max=4, help="0 turns matching off. Each change must still pass every store check."),
+    dict(key="aster_reconcile_exempt_families", group="Minimum order and carts",
+         label="Product families handled outside Aster (release check)", kind="list", default=[],
+         help="Release is blocked when any shipped line has no Aster code. List a family here only if "
+              "it is deliberately ordered outside Aster (for example a pre-built cart assembled from "
+              "components); its lines are then shown as exempt instead of blocking."),
     # ── Delivery timing ─────────────────────────────────────────────────────
     dict(key="delivery_cadence_weeks", group="Delivery timing", label="Weeks between deliveries, by store grade",
          kind="grade_int", default={}, min=1, max=12, allow_blank=True,

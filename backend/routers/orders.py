@@ -395,6 +395,20 @@ def finalize_run(run_id: str, user=Depends(require_role("manager", "admin", "ord
     """
     with get_db() as conn:
         cur = cursor(conn)
+        # RECONCILIATION GATE (Jason's review point 5, Josh 2026-11-24): every unit saved for a
+        # store x SKU must match the carts, the pack plan, Stores & Carts and the Aster file, and
+        # every line needs an Aster code. Any mismatch blocks release until it is fixed.
+        cur.execute("SELECT engine_version FROM recommendation_runs WHERE id = %s", (run_id,))
+        _r = cur.fetchone()
+        if _r and _r["engine_version"] == "v2":
+            from services.export_reconcile import reconcile_run
+            rec = reconcile_run(cur, run_id)
+            if rec["status"] != "PASS":
+                log_change(cur, run_id, "run", run_id,
+                           f"release BLOCKED by reconciliation: {rec.get('counts')}", user.get("email"))
+                raise HTTPException(409, {"message": "Release blocked: the order, carts, pack plan, "
+                                                     "Stores & Carts and Aster file do not reconcile.",
+                                          "reconciliation": rec})
         # Lock the run row first: a release serializes against any in-flight cart-config
         # consolidation (services/ipr_reviewer.py takes the same lock before mutating carts).
         cur.execute("SELECT status FROM recommendation_runs WHERE id = %s FOR UPDATE", (run_id,))
