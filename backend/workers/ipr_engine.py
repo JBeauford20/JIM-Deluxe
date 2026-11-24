@@ -54,6 +54,10 @@ BLOCK_STATUSES = ("do_not_ship", "paused", "inactive", "hold")
 # Duplicate-run control (§1, §24, §28): run statuses that no longer represent live orders,
 # and statuses/pipeline stages meaning the week's orders have already left the building.
 CANCELLED_RUN_STATUSES = ("cancelled", "canceled", "failed", "rejected", "superseded", "deleted")
+# Seasonal index vs a June-July typical week (measured 2026-11-24; same copy as
+# services/settings_catalog.py PEAK_SEASONAL_INDEX — tests keep them equal).
+PEAK_SEASONAL_INDEX = {"1": 0.79, "2": 1.01, "3": 1.28, "4": 1.39, "5": 1.33, "6": 1.0, "7": 1.0,
+                       "8": 1.14, "9": 0.91, "10": 0.65, "11": 0.65, "12": 0.56}
 IGNORE_RUN_IDS = set()      # PREVIEW ONLY: run ids left out of the duplicate-run control (what-ifs)
 RELEASED_RUN_STATUSES = ("exported", "released", "shipped")
 RELEASED_PIPELINE = ("Aster Exported", "Released", "Shipped", "Received or Estimated Received",
@@ -685,7 +689,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # demand on lines starved by short supply (back-test: -44% -> -4% on well-stocked lines where
     # it binds). Months without a calibrated index get no floor.
     pk_win = S.get("peak_window") or ["2026-04-01", "2026-07-31"]
-    pk_idx = {int(k): float(v) for k, v in (S.get("peak_seasonal_index") or {"10": 0.65, "11": 0.65}).items()}
+    pk_idx = {int(k): float(v) for k, v in (S.get("peak_seasonal_index") or PEAK_SEASONAL_INDEX).items()}
     pk_share = float(S.get("peak_floor_share", 0.5) or 0.5)
     pk_starve = str(S.get("peak_floor_require_starvation", False)).lower() in ("true", "1", "yes")
     pk_month = (shipping_week or anchor).month

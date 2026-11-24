@@ -102,3 +102,11 @@ def test_describe_merges_rows_defaults_and_advanced():
     assert flat["min_cart_fill_pct"]["value"] == 0.75 and not flat["min_cart_fill_pct"]["is_default"]
     assert flat["min_order_full_carts"]["value"] == 1 and flat["min_order_full_carts"]["is_default"]
     assert [r["key"] for r in d["advanced"]] == ["store_priority_weights"]
+
+
+def test_seasonal_index_default_matches_the_engine():
+    import ast
+    tree = ast.parse(ENGINE)
+    eng = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+               and getattr(n.targets[0], "id", None) == "PEAK_SEASONAL_INDEX")
+    assert eng == C.PEAK_SEASONAL_INDEX and set(eng) == {str(m) for m in range(1, 13)}

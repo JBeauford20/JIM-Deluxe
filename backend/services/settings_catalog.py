@@ -14,6 +14,10 @@ from __future__ import annotations
 GRADES = ["AA", "A", "B", "C+", "C", "C-", "D"]
 
 # kind: int | number | money | pct | bool | choice | grade_int | grade_pct | map_int | map_pct | list
+# Seasonal index vs a June-July typical week (measured 2026-11-24, same store x SKU, Jun-Jul
+# normalized to 1.00, May without Mother's Day week). Oct/Nov stay at the prior 0.65 pending Josh.
+PEAK_SEASONAL_INDEX = {"1": 0.79, "2": 1.01, "3": 1.28, "4": 1.39, "5": 1.33, "6": 1.0, "7": 1.0, "8": 1.14, "9": 0.91, "10": 0.65, "11": 0.65, "12": 0.56}
+
 CATALOG = [
     # ── Minimum order and cart economics ────────────────────────────────────
     dict(key="min_order_full_carts", group="Minimum order and carts", label="Minimum full carts per order",
@@ -133,6 +137,16 @@ CATALOG = [
          help="Forecast is never below this share of the store's benchmark rate (seasonally adjusted), "
               "so lines starved of supply do not vanish. With selling-week history on, the benchmark is "
               "June-July's typical week; otherwise the Apr-Jul average."),
+    dict(key="peak_seasonal_index", group="Demand and goal",
+         label="Normal selling by month, as a share of a June-July week", kind="map_pct",
+         default=PEAK_SEASONAL_INDEX, min=0, max=2,
+         key_labels={str(i): m for i, m in enumerate(
+             ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)},
+         help="How much a store x SKU normally sells in each month compared with its typical June-July "
+              "week (measured 11/24 on the same stores and SKUs, Dec 2025 - Nov 2026, Mother's Day week "
+              "left out of May). The benchmark floor = floor share x the line's June-July typical week x "
+              "this month's value. Example: 10 a week in June-July, November 65%, floor share 50% -> the "
+              "forecast is never below 3.25 a week."),
     dict(key="demand_history", group="Demand and goal",
          label="Measure demand over weeks the product could sell (13 months)", kind="bool", default=True,
          help="On (CEO review 11/24): rates count only weeks after the product reached the store, while "
