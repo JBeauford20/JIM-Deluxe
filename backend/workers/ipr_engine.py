@@ -480,8 +480,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # or not the store has sold X before. It is a manager-approved override that sits outside
     # the normal autonomous flow (§27), so it skips the pace trim, the 13-week gates, the due
     # test and the full-cart minimum. It never skips a hard block: do-not-ship, store-master
-    # restrictions, variety restrictions, supply and an approved exclusion all still win.
+    # restrictions, variety restrictions and supply all still win; an approved exclusion wins
+    # too, unless the directed shipment names the store by number and the exclusion does not.
     scn_directed = [a for a in scn_all if a["adjustment_type"] == "directed_shipment"]
+    _scn_by_id = {a["adj_id"]: a for a in scn_all}
     scn_mult = [a for a in scn_all if a["adjustment_type"] == "demand_multiplier"]
     scn_excl = ([a for a in scn_all if a["adjustment_type"] == "exclusion"]
                 + [a for a in scn_all if a["adjustment_type"] == "cart_target_override"
@@ -1430,6 +1432,20 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # approved scenario exclusions (incl. cart_target_override 0 = store removed this week)
         _ex = next((a for a in scn_excl
                     if _scn_store(a, l["store_id"]) and _scn_sku(a, l["sku_id"])), None)
+        # A directed shipment that names this store by number is the more specific instruction:
+        # it wins over a broader exclusion (territory, region, state, all stores) for its own
+        # product only (Josh 2026-11-24: "no Chris Rodriguez stores until 12/15 EXCEPT the
+        # stores listed on the Bulbasaur order"). Everything else at the store stays excluded,
+        # and an exclusion that itself lists the store by number still wins.
+        if _ex and l.get("directed_trays"):
+            _da = _scn_by_id.get(l.get("directed_adj"))
+            if (_da and l["store_id"] in (_da.get("scope_store_ids") or ())
+                    and l["store_id"] not in (_ex.get("scope_store_ids") or ())):
+                decide("scenario", f"Directed shipment '{_da['label']}' names this store, so it ships "
+                                   f"despite '{_ex['label']}' (that exclusion still applies to every "
+                                   f"other product here)", store_id=l["store_id"], sku_id=l["sku_id"],
+                       severity="info")
+                _ex = None
         if _ex:
             held[key] = (f"excluded by approved scenario '{_ex['label']}'"
                          + (f" (approved by {_ex['approved_by']})" if _ex.get("approved_by") else ""))
