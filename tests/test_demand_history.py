@@ -139,3 +139,27 @@ def test_selling_more_than_the_model_holds_is_a_real_selling_week():
     av = D.weekly_availability({0: 13}, {}, ALL, fresh_weeks=10, n_weeks=4, sellable_share=0.6,
                                min_stock=5, curve=CURVE)
     assert av[0] and not av[1]
+
+
+def test_last_lot_reads_madison_climb_itt_as_sold_out():
+    # Madison 4906 Climb-itt Climbing Pole 19": 72 delivered 36 wks ago, 69 sold by 21 wks ago
+    sold = {21: 2, 22: 7, 23: 1, 24: 3, 25: 6, 26: 5, 27: 2, 28: 2, 29: 4, 30: 2, 31: 5, 32: 8,
+            33: 7, 34: 10, 35: 5}
+    lot = D.last_lot(sold, {36: 72})
+    assert lot["delivered"] == 72 and lot["sold_since"] == 69
+    assert round(lot["sell_through"], 3) == 0.958
+    assert lot["weeks_since_delivery"] == 36 and lot["weeks_since_sale"] == 21
+
+
+def test_last_lot_groups_a_restock_and_ignores_older_deliveries():
+    # restock = deliveries within 4 weeks of the newest; sales before it do not count
+    lot = D.last_lot({0: 1, 5: 10, 9: 30, 20: 50}, {5: 20, 8: 20, 30: 100})
+    assert lot["delivered"] == 40 and lot["sold_since"] == 11
+    assert lot["weeks_since_delivery"] == 5 and lot["weeks_since_sale"] == 0
+
+
+def test_last_lot_caps_sold_at_delivered_and_handles_no_history():
+    lot = D.last_lot({1: 50}, {3: 12})
+    assert lot["sold_since"] == 12 and lot["sell_through"] == 1.0
+    assert D.last_lot({1: 5}, {}) is None
+    assert D.last_lot({}, {6: 12})["weeks_since_sale"] is None

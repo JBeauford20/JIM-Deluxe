@@ -168,6 +168,28 @@ CATALOG = [
               "get there. First it releases orders held below one full cart (highest priority first, each store's "
               "own demand), then tops up shipping stores' lines still short of demand. Never past a line's demand "
               "or the available supply; do-not-ship, store rules and exclusions still block. 0 = ship need only."),
+    dict(key="stockout_recovery", group="Demand and goal",
+         label="Plan sold-out products at their normal rate", kind="bool", default=True,
+         help="Jason's review 11/24 (Madison's Climb-itt accessories). A product that sold most of its "
+              "last delivery, has sold nothing for 4 weeks, shows no stock in DTS and has nothing on a "
+              "truck is out of stock, not dead: plan it at its June-July typical week x this month's "
+              "seasonal index instead of the reduced starved-line floor. Off = the floor only."),
+    dict(key="stockout_recovery_min_sellthrough", group="Demand and goal",
+         label="Share of the last delivery that must have sold to count as sold out", kind="pct",
+         default=0.6, min=0.3, max=1.0,
+         help="60% = the share of a delivery that normally ever sells (lot-age calibration 11/20)."),
+    dict(key="onhand_check", group="Demand and goal",
+         label="When DTS shows stock the deliveries say is gone and nothing sells", kind="choice",
+         default="cap", choices=["cap", "flag", "off"],
+         choice_labels={"cap": "Cap the line and list it for a DSM shelf check",
+                        "flag": "List it for a shelf check, ship the full quantity",
+                        "off": "Ignore (size as an empty shelf)"},
+         help="Jason's review 11/24 (Racine H2O Bowl: DTS 31 on hand, no sales for 3 weeks, planned 144). "
+              "Applies when DTS shows at least a week of stock, deliveries less sales say less than half "
+              "of it can be there, and the reporting store sold none in 2 weeks."),
+    dict(key="onhand_check_cap_weeks", group="Demand and goal",
+         label="Weeks of selling a shelf-check line may ship", kind="number", default=2, min=0.5, max=8,
+         help="Used when the shelf-check setting is Cap. At least one tray always ships."),
     dict(key="conversion_gate_mode", group="Demand and goal",
          label="What a weak 13-week result does", kind="choice", default="flag_only",
          choices=["flag_only", "enforce"],

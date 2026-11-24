@@ -123,6 +123,32 @@ def window_rate(sold, avail, weeks, min_weeks=MIN_RATE_WEEKS):
     return sum(max(0.0, float(sold.get(w, 0) or 0)) for w in weeks if avail[w]) / den, n
 
 
+LAST_LOT_SPAN_WEEKS = 4       # deliveries this close to the latest one form one restock
+
+
+def last_lot(sold, delivered, span=LAST_LOT_SPAN_WEEKS):
+    """The latest restock and how it sold (Jason 11/24: tell a sell-out from a dead line).
+
+    The restock is every delivery within `span` weeks before (and including) the most recent
+    one. Returns {delivered, sold_since, sell_through, weeks_since_delivery, weeks_since_sale}
+    (weeks back from the anchor), or None when nothing was delivered in the history.
+    sold_since counts sales from the restock's first week to now, capped at what was delivered.
+    """
+    d_weeks = sorted(w for w, u in delivered.items() if (u or 0) > 0)
+    if not d_weeks:
+        return None
+    newest = d_weeks[0]
+    lot_weeks = [w for w in d_weeks if w <= newest + span]
+    start = max(lot_weeks)
+    dlv = sum(float(delivered[w]) for w in lot_weeks)
+    sold_since = sum(max(0.0, float(u or 0)) for w, u in sold.items() if w <= start)
+    sale_weeks = [w for w, u in sold.items() if (u or 0) > 0]
+    return dict(delivered=dlv, sold_since=min(sold_since, dlv),
+                sell_through=min(1.0, sold_since / dlv) if dlv else 0.0,
+                weeks_since_delivery=newest,
+                weeks_since_sale=min(sale_weeks) if sale_weeks else None)
+
+
 def typical_week(values):
     """What sold repeatedly: the mean of available weeks with the single biggest week capped at
     the second biggest, so one spike (an ad, a holiday) never sets the routine rate."""
@@ -304,7 +330,7 @@ def load(cur, anchor, fresh_of, fresh_default_days, dedup_deliveries_sql, stores
         a_total = sum(av[:HISTORY_WEEKS])
         first = next((wb for wb in range(n_all - 1, -1, -1) if av[wb]), None)
         lines[k] = dict(r4=r4, a4=a4, r10=r10, a10=a10, r13=r13, a13=a13, a_total=a_total,
-                        first_avail_wb=first)
+                        first_avail_wb=first, last_lot=last_lot(s, deliv.get(k, {})))
 
     periods = benchmark_periods(anchor, ship_month)
     bench, index = benchmarks(hist, periods, min_w, min_share)

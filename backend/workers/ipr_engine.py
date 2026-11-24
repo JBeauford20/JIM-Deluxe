@@ -724,6 +724,37 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if pk_month in pk_idx:
             peak_rate = {k: b[0] for k, b in H["bench"].items() if b[0] > 0}
         peak_label = f"{H['periods'][0]} benchmark"
+    # Stockout recovery (Jason's review 11/24, Madison's Climb-itt accessories: 215 delivered in
+    # March, 188 sold by July, nothing since, and the engine planned 0 trays). The starved-line
+    # floor sizes every quiet line at peak_floor_share of its benchmark because a quiet line may
+    # be a dead line. A line whose history shows it SOLD THROUGH its last restock and has had
+    # nothing to sell since is not dead: it is out of stock. It is planned at its benchmark x
+    # this month's seasonal index (no floor-share haircut). Every gate after this still applies.
+    so_on = _dh_on and str(S.get("stockout_recovery", True)).lower() not in ("false", "0", "no")
+    so_min_st = float(S.get("stockout_recovery_min_sellthrough", 0.6) or 0.6)
+    so_idx = pk_idx.get(pk_month, 0.0)
+    # Shelf check (see the line loop): cap = ship at most oh_check_wk weeks; flag = report only.
+    oh_check = str(S.get("onhand_check", "cap") or "cap").lower()
+    oh_check_wk = float(S.get("onhand_check_cap_weeks", 2) or 2)
+
+    def sold_out(k):
+        """(last restock, benchmark) when the line sold >= so_min_st of its last restock, that
+        restock is at least 4 weeks old and nothing has sold for 4 weeks; else None. Judged on
+        sales and deliveries directly: the stock model counts a line "available" indefinitely
+        once it has sold past its plant lot life (hard goods), so its selling weeks cannot tell
+        a sell-out here. Shelf and inbound evidence is checked at the line (DTS stock or a truck
+        on the way means it is not a stockout)."""
+        if not (so_on and H and so_idx > 0):
+            return None
+        hl_ = H["lines"].get(k)
+        lot = (hl_ or {}).get("last_lot")
+        if (not lot or lot["sell_through"] < so_min_st or lot["weeks_since_delivery"] < 4
+                or (lot["weeks_since_sale"] is not None and lot["weeks_since_sale"] < 4)):
+            return None
+        b = H["bench"].get(k)
+        if not b or b[0] <= 0:
+            return None
+        return lot, b
     cur.execute("""
         WITH fw AS (SELECT * FROM unnest(%s::bigint[], %s::int[]) AS t(sku_id, days))
         SELECT s.store_id, s.sku_id,
@@ -1004,6 +1035,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if l["conf"] == "UNUSABLE" and trays:
             trays = min(trays, max(1, int((l["fc"] * 2) // l["upt"])))    # §5: cap / review
             cap_note = (cap_note or "") + " inventory unreliable — capped at 2 wks"
+        _oc = l.get("oh_conflict")
+        if _oc and trays and oh_check == "cap":
+            _ct = max(1, int((l["fc"] * oh_check_wk) // l["upt"]))
+            if trays > _ct:
+                _oc["trays_before_cap"] = trays
+                trays = _ct
+                cap_note = ((cap_note or "") + f" shelf check: DTS shows {_oc['dts_onhand']}u and no sales in "
+                            f"{_oc['quiet_weeks']} wks — capped at {oh_check_wk:g} wks until the DSM confirms "
+                            f"the shelf").strip()
         if l.get("directed_trays"):                                       # exact, by approval
             trays = l["directed_trays"]
             cap_note = ((cap_note or "") + " directed shipment (manager-approved scenario)").strip()
@@ -1021,7 +1061,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if peak_rate and peak_mult > 0:
         _seeded = 0
         for _k, _pk in peak_rate.items():
-            if _k not in sales and _pk * peak_mult >= min_rate:
+            if _k not in sales and (_pk * peak_mult >= min_rate
+                                    or (_pk * so_idx >= min_rate and sold_out(_k))):
                 sales[_k] = {"w2": 0.0, "w4": 0.0, "w8": 0.0, "w10": 0.0, "w13": 0.0,
                              "d13": 0.0, "w13d": 0.0}
                 _seeded += 1
@@ -1096,6 +1137,24 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    else "Apr-Jul peak")
             fc, method = pf, (f"{_bl} floor ({peak_rate[(store_id, sku_id)]:.1f}u/wk x "
                               f"{peak_mult:.2f}) — recent sales held down by short supply")
+        _so = None if _dir else sold_out((store_id, sku_id))
+        if _so:
+            _lot, _b = _so
+            _sn = snap.get((store_id, sku_id))
+            _dts = float(_sn["onhand_qty"] or 0) if _sn is not None and _sn["onhand_qty"] is not None else 0.0
+            _it = it_lines.get((store_id, sku_id))
+            _inb = ((_it[0] + _it[1]) if _it else 0) + inbound_known.get((store_id, sku_id), 0) \
+                + same_week_prior.get((store_id, sku_id), 0)
+            _rate = _b[0] * so_idx
+            if _dts <= 0 and _inb <= 0 and store_id not in edi_gap and _rate > fc:
+                fc = _rate
+                _ws = _lot["weeks_since_sale"]
+                method = (f"stockout recovery: sold {_lot['sold_since']:.0f} of the {_lot['delivered']:.0f} "
+                          f"delivered {_lot['weeks_since_delivery']} wks ago, nothing to sell since"
+                          f"{'' if _ws is None else f' (last sale {_ws} wks ago)'}; planned at {_b[1]} "
+                          f"typical week {_b[0]:.1f}u/wk x {so_idx:.2f} seasonal index")
+            else:
+                _so = None
         # approved scenario demand multipliers (clamped; the parser never touches the engine —
         # this deterministic application is the only path, and every hit is counted for audit)
         for _a in scn_mult:
@@ -1140,6 +1199,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # be a third stacked haircut (shrink x lot share x 0.70) — skip it (audit 2 N3).
         oh_adj = 0.0 if conf == "UNUSABLE" else max(0.0, oh) * (
             1.0 if (sn is not None or lot_bound) else float(conf_factor[conf]))
+        # Shelf check (Jason's review 11/24, Racine H2O Bowl: DTS 31 on hand for 3 weeks, no
+        # sales, the delivery ledger says 0 so the engine planned 144). When DTS reports at least
+        # a week of stock that the ledger says cannot be there AND the reporting store sold none
+        # of it for 2 weeks, the two sources disagree: phantom stock (ship) or stuck stock (do
+        # not). Neither is proven, so the line is capped at oh_check_wk weeks and listed for a
+        # DSM shelf check instead of being sized as an empty shelf.
+        oh_conflict = None
+        if (oh_check != "off" and conf != "UNUSABLE" and sn is not None and sn["onhand_qty"] is not None
+                and not _dir and store_id not in edi_gap and store_recent.get(store_id, 0) > 0):
+            _rep = float(sn["onhand_qty"])
+            if _rep >= max(1.0, fc) and fresh_est < 0.5 * _rep and sv["w2"] <= 0:
+                oh_conflict = {"dts_onhand": round(_rep), "ledger_onhand": round(fresh_est, 1),
+                               "snapshot": str(sn["period_end"]), "quiet_weeks": 2}
 
         if store_id in it_stores:
             med, low, how, *_ev = it_lines.get((store_id, sku_id), (0.0, 0.0, None, []))
@@ -1221,7 +1293,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             last_del=last_del, sales13=sv["w13"], cohort=float(dv.get("cohort") or 0),
             stock_at_arrival=stock_at_arrival, inbound_later=inbound_later, lost_before_arrival=lost_before,
             old_projected=max(0.0, oh_adj + inbound - before_arrival),
-            plannable=is_plannable)
+            plannable=is_plannable, oh_conflict=oh_conflict,
+            stockout_recovery=(dict(_so[0], benchmark=round(_so[1][0], 2), period=_so[1][1]) if _so else None))
         # scenario floor/cap, computed ONCE here (value_numeric is SHELVES) and pre-bounded to
         # the store's selling pace — §17's 13-week window for H2O/Terrarium, the sell-through
         # cover limit otherwise. "Add 2 shelves of bowls in the South" never ships more than
@@ -1750,7 +1823,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         short = sorted((l for l in fl if l.get("short_units")), key=lambda x: (-x["short_units"], x["sku_id"]))
         gdeny = store_deny.get(fk[0], NO_DENY)       # substitutes obey the variety restriction too
         cands = sorted((l for l in fl if not l.get("short_units") and not l.get("reactivation")
-                        and l["conf"] != "UNUSABLE" and l["need"] > 0
+                        and l["conf"] != "UNUSABLE" and not l.get("oh_conflict") and l["need"] > 0
                         and pools.left(l["sku_id"], gdeny) > 0),
                        key=lambda x: (-x["fc"], x["sku_id"]))
         for c in cands:
@@ -2003,6 +2076,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     w = min(w, float(S["h2o_terrarium_window_weeks"]))
                 if l["conf"] == "UNUSABLE":
                     w = min(w, 4.0)             # §5: unreliable inventory keeps a tight ceiling
+                if l.get("oh_conflict"):
+                    w = min(w, oh_check_wk)     # shelf check pending: never past the cap
                 have = got[l["sku_id"]]
                 ceiling = int((l["fc"] * w - max(0.0, l["projected"])) // l["upt"])
                 by_wos = max(l["trays"], ceiling) - have        # its own need always qualifies
@@ -2764,6 +2839,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 w = min(w, float(S["h2o_terrarium_window_weeks"]))
             if l.get("conf") == "UNUSABLE":
                 w = min(w, 4.0)
+            if l.get("oh_conflict"):
+                w = min(w, oh_check_wk)
             return l["fc"] * w - max(0.0, l.get("projected", 0.0))
 
         _mcarts, _rep = [], {}
@@ -2827,6 +2904,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                store_rule[st_id], sku_info[sk], directed=False)[0]) else
                            "no supply left" if pools.left(sk, deny) < u else
                            "over the store's weeks of supply" if l.get("alloc_units", 0) + u > _m_ceiling(l) + 1e-9
+                           # §17: H2O/Terrarium are sized rounding DOWN and never exceed their own
+                           # need; a config match is not a reason to send more (Racine 11/24)
+                           else "H2O/Terrarium above its own need" if (
+                               l["family"] in H2O_TERR_FAMILIES and l.get("alloc_trays", 0) + d > l.get("trays", 0))
                            else "different family or pot size" if (l["family"], pack[sk]["profile_id"]) not in rem_fp
                            else None)
                     if why:
@@ -3134,8 +3215,61 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "lines_by_method": dict(_mc),
             "growth_vs_coverage": H["growth"],
         }
+    # Stockout recovery and shelf checks (Jason's review 11/24): every shipped line is recorded
+    # with its evidence; shelf checks are the DSM's to-do list before release.
+    _shipped = [l for o in orders.values() for l in o["lines"] if l.get("alloc_trays", 0) > 0]
+    so_summary = {"enabled": so_on, "min_sellthrough": so_min_st, "seasonal_index": so_idx,
+                  "lines_found": sum(1 for l in lines.values() if l.get("stockout_recovery")),
+                  "lines_shipped": 0, "stores": 0, "units": 0, "wholesale": 0.0, "by_family": {}}
+    _so_st = set()
+    for l in _shipped:
+        r = l.get("stockout_recovery")
+        if not r:
+            continue
+        u = l["alloc_units"]
+        so_summary["lines_shipped"] += 1
+        so_summary["units"] += u
+        so_summary["wholesale"] += u * usd(l)
+        so_summary["by_family"][l["family"]] = so_summary["by_family"].get(l["family"], 0) + u
+        _so_st.add(l["store_id"])
+        decide("stockout_recovery", f"{l['alloc_trays']} tray(s) ({u}u): sold {r['sold_since']:.0f} of "
+                                    f"{r['delivered']:.0f} delivered {r['weeks_since_delivery']} wks ago, out of "
+                                    f"stock since; planned at {r['period']} {r['benchmark']:.1f}u/wk x "
+                                    f"{so_idx:.2f} = {l['fc']:.1f}u/wk",
+               store_id=l["store_id"], sku_id=l["sku_id"], severity="info", family=l["family"],
+               units=u, **{k: r[k] for k in ("delivered", "sold_since", "sell_through",
+                                             "weeks_since_delivery", "weeks_since_sale", "benchmark")})
+    so_summary["stores"] = len(_so_st)
+    so_summary["wholesale"] = round(so_summary["wholesale"], 2)
+    oc_summary = {"mode": oh_check, "cap_weeks": oh_check_wk,
+                  "lines_found": sum(1 for l in lines.values() if l.get("oh_conflict") and l["plannable"]),
+                  "lines_shipped": 0, "stores": 0, "units_shipped": 0, "units_capped_off": 0}
+    _oc_st = set()
+    for l in _shipped:
+        oc = l.get("oh_conflict")
+        if not oc:
+            continue
+        cut = max(0, oc.get("trays_before_cap", 0) - l["trays"]) * l["upt"]
+        oc_summary["lines_shipped"] += 1
+        oc_summary["units_shipped"] += l["alloc_units"]
+        oc_summary["units_capped_off"] += cut
+        _oc_st.add(l["store_id"])
+        decide("onhand_check", f"Shelf check: DTS shows {oc['dts_onhand']}u on hand ({oc['snapshot']}) but "
+                               f"deliveries less sales leave {oc['ledger_onhand']:.0f}u and nothing sold in "
+                               f"{oc['quiet_weeks']} wks. Shipping {l['alloc_units']}u"
+                               + (f" (capped from {oc['trays_before_cap'] * l['upt']}u)" if cut else "")
+                               + ". DSM: confirm the shelf before release.",
+               store_id=l["store_id"], sku_id=l["sku_id"], severity="warning", family=l["family"],
+               units=l["alloc_units"], units_capped_off=cut, **oc)
+    oc_summary["stores"] = len(_oc_st)
+    log(f"Stockout recovery: {so_summary['lines_found']:,} sold-out lines found · {so_summary['lines_shipped']:,} "
+        f"shipping ({so_summary['units']:,}u, ${so_summary['wholesale']:,.0f}) at {so_summary['stores']:,} stores · "
+        f"shelf checks: {oc_summary['lines_shipped']:,} shipping lines at {oc_summary['stores']:,} stores "
+        f"({oc_summary['units_capped_off']:,}u capped off)")
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
+        "stockout_recovery": so_summary,
+        "onhand_check": oc_summary,
         "demand_history": _dh_summary,
         "held_trays_reoffer": reoffer,
         "wholesale_target": tgt,
