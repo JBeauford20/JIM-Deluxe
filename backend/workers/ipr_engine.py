@@ -2360,6 +2360,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # is recalculated next week with coverage extended one week per consecutive push. Orders
     # that pass ship whole (a trailing partial cart rides on the same stop).
     returned = defaultdict(int)     # sku -> units handed back by held (pushed/deferred) orders
+    held_orders = {}                 # store -> its held order (lines keep deferred_units), for the target step
     pushed = {"stores": 0, "carts": 0, "units": 0, "wholesale": 0.0, "lost_one_week": 0.0,
               "repeat_stores": 0, "review_stores": 0}
     # Escalation (audit F2, 2026-11-20): a store pushed this many consecutive due cycles has its
@@ -2412,6 +2413,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 returned[l["sku_id"]] += l["alloc_units"]
             l["deferred_units"] = l["alloc_units"]
             l["alloc_units"], l["alloc_trays"] = 0, 0
+        held_orders[store_id] = o
         del orders[store_id]
     log(f"Minimum order (1 full CC cart): {pushed['stores']:,} stores pushed · {pushed['carts']:,} carts · "
         f"{pushed['units']:,}u · ${pushed['wholesale']:,.0f} wholesale")
@@ -2509,10 +2511,72 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             l["deferred_units"] = l["alloc_units"]
             l["alloc_units"], l["alloc_trays"] = 0, 0
         deferred_stores.append(store_id)
+        held_orders[store_id] = o
         del orders[store_id]
     log(f"Cart economics: {econ['released_low_value']:,} low-value carts released (whole orders) · {econ['deferred_carts']:,} "
         f"deferred ({econ['deferred_units']:,}u, ${econ['deferred_wholesale']:,.0f} wholesale) · "
         f"{len(deferred_stores):,} stores fully deferred")
+
+    # WEEKLY WHOLESALE TARGET (leadership 2026-11-24; replaces V2 doc §2 "the $900,000 minimum must not
+    # justify overloading stores"): ship at least `weekly_wholesale_target` wholesale and let the
+    # engine pick the best orders to get there. Josh's rules: a FLOOR (whole store orders finish, so
+    # the week can land above it); RELEASE HELD STORES FIRST (orders held below one full cart or
+    # deferred, highest priority first), then TOP UP shipping stores' lines still short of demand;
+    # quantities MATCH DEMAND (a released store ships its own calculated order, a top-up never goes
+    # past a line's need) with no extra weeks-of-supply padding. Hard blocks (do-not-ship, store
+    # rules, variety bans, approved exclusions) were applied upstream and still hold; stores with a
+    # cart-capacity limit are not touched. 0 = off (ship need only).
+    _tw = S.get("weekly_wholesale_target")
+    target_w = float(1200000 if _tw is None else (_tw or 0))
+    tgt = {"target": target_w, "plan_before": 0, "released_stores": 0, "released_units": 0,
+           "released_wholesale": 0.0, "topup_lines": 0, "topup_units": 0, "topup_wholesale": 0.0,
+           "final": 0, "reached": None}
+    _ship_w = lambda: sum(c["wholesale_value"] for o_ in orders.values() for c in o_["carts"])
+    _whl = lambda sk: float((sku_info.get(sk) or {}).get("wholesale_price_whl") or 0)
+    released_stores = set()
+    if target_w > 0:
+        tgt["plan_before"] = round(_ship_w())
+        cur_w = float(tgt["plan_before"])
+        _rank = sorted(held_orders, key=lambda s_: (-max((l.get("priority", 0) for l in held_orders[s_]["lines"]),
+                                                        default=0), s_))
+        for st_id in _rank:
+            if cur_w >= target_w:
+                break
+            if (stores.get(st_id) or {}).get("capacity_carts"):
+                continue
+            o = held_orders[st_id]
+            deny = store_deny.get(st_id, NO_DENY)
+            got = 0
+            for l in o["lines"]:
+                want_t = int((l.get("deferred_units") or 0) // max(1, l["upt"]))
+                t = min(want_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
+                if t > 0:
+                    pools.take(l["sku_id"], t * l["upt"], deny)
+                    returned[l["sku_id"]] -= t * l["upt"]
+                    l["alloc_trays"], l["alloc_units"] = t, t * l["upt"]
+                    l["deferred_units"], l["target_released"] = 0, True
+                    got += t * l["upt"]
+            if not got:
+                continue
+            _pack_store(st_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
+            add = sum(c["wholesale_value"] for c in orders[st_id]["carts"])
+            cur_w += add
+            alloc_units_total += got
+            released_stores.add(st_id)
+            tgt["released_stores"] += 1
+            tgt["released_units"] += got
+            tgt["released_wholesale"] += add
+            decide("target_release", f"Order released to reach the ${target_w:,.0f} weekly wholesale target "
+                                     f"(leadership 2026-11-24): {got:,}u, ${add:,.0f} wholesale on "
+                                     f"{len(orders[st_id]['carts'])} cart(s) — the store's own calculated "
+                                     f"demand, previously held below one full cart",
+                   store_id=st_id, severity="info", units=got, wholesale=round(add, 2))
+        if released_stores:
+            decisions[:] = [d for d in decisions if not (
+                d[0] in ("pushed_min_cart", "deferred_economics", "min_cart_service_review")
+                and d[1] in released_stores)]
+        log(f"Wholesale target ${target_w:,.0f}: plan ${tgt['plan_before']:,.0f} · released "
+            f"{tgt['released_stores']:,} held stores ({tgt['released_units']:,}u, ${tgt['released_wholesale']:,.0f})")
 
     # RE-OFFER HELD TRAYS (Jason's review point 4; Josh 2026-11-24). Trays allocated to orders that
     # were then pushed (below the one-full-cart minimum) or deferred (cart economics) went back to
@@ -2582,7 +2646,59 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                               f"was still {short_t} tray(s) short of its own need",
                    store_id=l["store_id"], sku_id=l["sku_id"], severity="info", trays=give_t, units=u)
         reoffer["stores"] = len(_touched)
+    reoffer["returned_units"] = int(sum(v for v in returned.values() if v > 0))
     reoffer["left_in_pool_units"] = reoffer["returned_units"] - reoffer["reoffered_units"]
+    # TARGET TOP-UP: still below the weekly wholesale target after releasing held stores and the
+    # re-offer -> fill shipping stores' lines still short of their own demand, highest priority first
+    # (carts may be added here: the target outranks the open-space rule). Never past need or supply.
+    if target_w > 0:
+        cur_w = _ship_w()
+        if cur_w < target_w:
+            _tc = [l for (st_id, sk), l in ship.items()
+                   if st_id in orders and not l.get("directed_trays")
+                   and not (stores.get(st_id) or {}).get("capacity_carts")
+                   and l.get("trays", 0) > l.get("alloc_trays", 0)]
+            _tc.sort(key=lambda x: (-x.get("priority", 0), x["store_id"], x["sku_id"]))
+            _tt, added = set(), 0.0
+            for l in _tc:
+                if cur_w + added >= target_w:
+                    break
+                deny = store_deny.get(l["store_id"], NO_DENY)
+                short_t = l["trays"] - l.get("alloc_trays", 0)
+                t = min(short_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
+                if t <= 0:
+                    continue
+                u = t * l["upt"]
+                pools.take(l["sku_id"], u, deny)
+                o = orders[l["store_id"]]
+                if l not in o["lines"]:
+                    l.setdefault("alloc_trays", 0)
+                    l.setdefault("alloc_units", 0)
+                    o["lines"].append(l)
+                l["alloc_trays"] = l.get("alloc_trays", 0) + t
+                l["alloc_units"] = l.get("alloc_units", 0) + u
+                l["target_topup_trays"] = l.get("target_topup_trays", 0) + t
+                alloc_units_total += u
+                added += u * _whl(l["sku_id"])
+                _tt.add(l["store_id"])
+                tgt["topup_lines"] += 1
+                tgt["topup_units"] += u
+                decide("target_topup", f"{t} tray(s) ({u}u) added toward the ${target_w:,.0f} weekly wholesale "
+                                       f"target; the line was {short_t} tray(s) short of its own demand",
+                       store_id=l["store_id"], sku_id=l["sku_id"], severity="info", trays=t, units=u)
+            for st_id in sorted(_tt):
+                _rel = any(c.get("econ_action") == "release" for c in orders[st_id]["carts"])
+                _pack_store(st_id, orders[st_id]["lines"])
+                if _rel:
+                    for c in orders[st_id]["carts"]:
+                        c["econ_action"] = "release"
+            tgt["topup_wholesale"] = round(added, 2)
+        tgt["final"] = round(_ship_w())
+        tgt["reached"] = tgt["final"] >= target_w
+        tgt["released_wholesale"] = round(tgt["released_wholesale"], 2)
+        log(f"Wholesale target ${target_w:,.0f}: final ${tgt['final']:,.0f} "
+            f"({'reached' if tgt['reached'] else 'NOT reached: no more demand-backed orders with supply'}) · "
+            f"top-up {tgt['topup_lines']:,} lines / {tgt['topup_units']:,}u")
     # SUPPLY INVARIANT: no SKU is ever allocated beyond its availability (checked, not assumed)
     _alloc_by = defaultdict(int)
     for o_ in orders.values():
@@ -2996,6 +3112,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "demand_history": _dh_summary,
         "held_trays_reoffer": reoffer,
+        "wholesale_target": tgt,
         "gate_13wk": flagged,
         "config_merge": merge,
         "availability_grades": grades,

@@ -162,6 +162,12 @@ CATALOG = [
               "left out of May). The benchmark floor = floor share x the line's June-July typical week x "
               "this month's value. Example: 10 a week in June-July, November 65%, floor share 50% -> the "
               "forecast is never below 3.25 a week."),
+    dict(key="weekly_wholesale_target", group="Demand and goal",
+         label="Weekly wholesale shipped target (floor)", kind="money", default=1200000, min=0, max=5000000,
+         help="Leadership 11/24: ship at least this much wholesale each week; the engine picks the best orders to "
+              "get there. First it releases orders held below one full cart (highest priority first, each store's "
+              "own demand), then tops up shipping stores' lines still short of demand. Never past a line's demand "
+              "or the available supply; do-not-ship, store rules and exclusions still block. 0 = ship need only."),
     dict(key="conversion_gate_mode", group="Demand and goal",
          label="What a weak 13-week result does", kind="choice", default="flag_only",
          choices=["flag_only", "enforce"],
