@@ -2559,6 +2559,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if not got:
                 continue
             _pack_store(st_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
+            # no sparse carts (Josh 2026-11-24): a released order must still fill at least one cart
+            # to the minimum fill (min_cart_fill_pct); otherwise it stays held and its trays go back
+            if min_full_carts > 0 and not any(c["phys_full"] for c in orders[st_id]["carts"]):
+                for l in o["lines"]:
+                    if l.get("target_released"):
+                        pools.give_back(l["sku_id"], l["alloc_units"], deny)
+                        returned[l["sku_id"]] += l["alloc_units"]
+                        l["deferred_units"] = l["alloc_units"]
+                        l["alloc_units"], l["alloc_trays"], l["target_released"] = 0, 0, False
+                del orders[st_id]
+                tgt["skipped_below_fill"] = tgt.get("skipped_below_fill", 0) + 1
+                continue
             add = sum(c["wholesale_value"] for c in orders[st_id]["carts"])
             cur_w += add
             alloc_units_total += got
@@ -2668,15 +2680,35 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 t = min(short_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
                 if t <= 0:
                     continue
+                # no sparse carts (Josh 2026-11-24): only into open space on carts already going to
+                # the store — a grant that would add a cart is cut back tray by tray, or refused
+                o = orders[l["store_id"]]
+                _was_in, _old_carts = l in o["lines"], o["carts"]
+                _ot, _ou = l.get("alloc_trays", 0), l.get("alloc_units", 0)
+                _rel = any(c.get("econ_action") == "release" for c in _old_carts)
+                while t > 0:
+                    l["alloc_trays"], l["alloc_units"] = _ot + t, _ou + t * l["upt"]
+                    if not _was_in:
+                        o["lines"].append(l)
+                    _pack_store(l["store_id"], o["lines"])
+                    o = orders[l["store_id"]]
+                    if len(o["carts"]) <= len(_old_carts):
+                        break
+                    if not _was_in:
+                        o["lines"].remove(l)
+                    orders[l["store_id"]]["carts"] = _old_carts
+                    o = orders[l["store_id"]]
+                    t -= 1
+                l["alloc_trays"], l["alloc_units"] = _ot, _ou
+                if t <= 0:
+                    continue
+                if _rel:
+                    for c in o["carts"]:
+                        c["econ_action"] = "release"
                 u = t * l["upt"]
                 pools.take(l["sku_id"], u, deny)
-                o = orders[l["store_id"]]
-                if l not in o["lines"]:
-                    l.setdefault("alloc_trays", 0)
-                    l.setdefault("alloc_units", 0)
-                    o["lines"].append(l)
-                l["alloc_trays"] = l.get("alloc_trays", 0) + t
-                l["alloc_units"] = l.get("alloc_units", 0) + u
+                l["alloc_trays"] = _ot + t
+                l["alloc_units"] = _ou + u
                 l["target_topup_trays"] = l.get("target_topup_trays", 0) + t
                 alloc_units_total += u
                 added += u * _whl(l["sku_id"])
@@ -2686,12 +2718,6 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 decide("target_topup", f"{t} tray(s) ({u}u) added toward the ${target_w:,.0f} weekly wholesale "
                                        f"target; the line was {short_t} tray(s) short of its own demand",
                        store_id=l["store_id"], sku_id=l["sku_id"], severity="info", trays=t, units=u)
-            for st_id in sorted(_tt):
-                _rel = any(c.get("econ_action") == "release" for c in orders[st_id]["carts"])
-                _pack_store(st_id, orders[st_id]["lines"])
-                if _rel:
-                    for c in orders[st_id]["carts"]:
-                        c["econ_action"] = "release"
             tgt["topup_wholesale"] = round(added, 2)
         tgt["final"] = round(_ship_w())
         tgt["reached"] = tgt["final"] >= target_w
