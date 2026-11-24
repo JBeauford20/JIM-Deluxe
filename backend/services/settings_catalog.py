@@ -196,6 +196,11 @@ CATALOG = [
     dict(key="in_transit_low_factor", group="Inventory in stores", label="How much to trust estimated in-transit units",
          kind="pct", default=0.5, min=0, max=1,
          help="In-transit units whose store was estimated (not confirmed) count at this share."),
+    dict(key="kit_ceramic_only_families", group="Inventory in stores", label="Families that ship in ceramic only",
+         kind="list", default=["12cm"],
+         help="Josh 11/24: no 12cm jute on hand, so every 12cm unit ships in its ceramic pot with the ceramic "
+              "3M kit code. Families listed here never get a jute kit; the ceramic share below applies to "
+              "the rest (17cm). Remove a family when its jute is back in stock."),
     dict(key="kit_split_ceramic_share", group="Inventory in stores", label="Ceramic share of 12cm and 17cm kits",
          kind="pct", default=0.5, min=0, max=1,
          help="When a plant can be kitted either way, this share goes ceramic and the rest jute."),

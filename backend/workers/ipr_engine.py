@@ -2760,6 +2760,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             kit_opts[r["sku_id"]] |= {"jute_kit", "ceramic_kit"}
         elif r["hard_good_type"] in ("jute_kit", "ceramic_kit"):
             kit_opts[r["sku_id"]].add(r["hard_good_type"])
+    # CERAMIC-ONLY FAMILIES (Josh 2026-11-24: "we don't have any 12cm jute on hand, so all 12cm
+    # units ship in their ceramic pot with ceramic kit codes"). Families listed in
+    # kit_ceramic_only_families never get a jute kit; every unit is ceramic_kit, so the Aster
+    # file carries the variety's 3M ceramic code.
+    _cer_only = {str(f).strip() for f in (S.get("kit_ceramic_only_families", ["12cm"]) or []) if str(f).strip()}
+    if _cer_only:
+        for _sk in list(kit_opts) + [l["sku_id"] for o_ in orders.values() for l in o_["lines"]]:
+            if (sku_info.get(_sk) or {}).get("family") in _cer_only:
+                kit_opts[_sk] = {"ceramic_kit"}
     kit_units = defaultdict(lambda: {"jute_kit": 0, "ceramic_kit": 0})
     kit_tie = defaultdict(bool)
     # Identical carts get identical kits: one decision per cart config, weighted by how many
