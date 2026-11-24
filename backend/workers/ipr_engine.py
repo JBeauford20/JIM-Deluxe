@@ -1404,6 +1404,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     ct = {"lines": 0, "units": 0, "units_held_back": 0, "top_grade_lines": 0, "near_miss_lines": 0,
           "alerts": 0, "enabled": ct_on}
     ct_alerted = set()
+    gate_mode = str(S.get("conversion_gate_mode", "flag_only") or "flag_only").lower()
+    flagged = {"mode": gate_mode, "stop": {"lines": 0, "units": 0}, "reduce": {"lines": 0, "units": 0}}
     rule_overrides = defaultdict(list)       # store -> [(sku, the rule reason that was overridden)]
     for key in sorted(lines, key=lambda k: (k[0], -lines[k]["fc"], k[1])):
         l = lines[key]
@@ -1501,6 +1503,24 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                        sku_id=l["sku_id"], reactivation_id=r["id"], conversion=conv, grade=g)
                 ship[key] = l
                 continue
+        if gate_mode == "flag_only" and svc in ("BLOCKED", "REVIEW"):
+            # FLAG ONLY (Jason's review point 2; Josh 2026-11-24, departs from V2 doc §11.3):
+            # a weak 13-week result is reported, not acted on. The line keeps its full quantity.
+            # Hard blocks above (inactive / do-not-ship, store rules, variety bans, approved
+            # exclusions, approved assortment) and the due test still apply.
+            _thr = hard_block if svc == "BLOCKED" else float(conv_thr[g])
+            decide("flag_13wk", f"{l['family']} sold {conv:.0%} of its last deliveries by 13 weeks "
+                                f"({'below the stop line' if svc == 'BLOCKED' else f'below the {g} threshold'} "
+                                f"{_thr:.0%}) — FLAGGED, not cut: ships the full {l['trays']} tray(s) "
+                                f"(13-week gate in flag-only mode)",
+                   store_id=l["store_id"], sku_id=l["sku_id"], family=l["family"], grade=g,
+                   conversion=conv, threshold=_thr, would_have=("stop" if svc == "BLOCKED" else "reduce"),
+                   need_trays=l["trays"], upt=l["upt"], severity="warning")
+            l["flag_13wk"] = "stop" if svc == "BLOCKED" else "reduce"
+            flagged[l["flag_13wk"]]["lines"] += 1
+            flagged[l["flag_13wk"]]["units"] += l["trays"] * l["upt"]
+            ship[key] = l
+            continue
         if svc == "BLOCKED" and ct_on:
             _top = g in ("AA", "A")
             _unfair = ("stocked out" in l["method"]) or ("EDI gap" in l["method"])
@@ -1609,7 +1629,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     n_stop = sum(1 for k in held_kind.values() if k == "stopped_13wk")
     n_reduced = sum(1 for l in ship.values() if l.get("reduced_13wk") is not None)
     log(f"Gates: {len(ship):,} lines eligible ({n_reduced:,} reduced, 13-wk band) · {n_block:,} blocked "
-        f"(store status) · {n_stop:,} stopped (13-wk < {hard_block:.0%})")
+        f"(store status) · {n_stop:,} stopped (13-wk < {hard_block:.0%}) · 13-wk gate mode {gate_mode}: "
+        f"{flagged['stop']['lines']:,} lines / {flagged['stop']['units']:,}u flagged instead of stopped, "
+        f"{flagged['reduce']['lines']:,} / {flagged['reduce']['units']:,}u flagged instead of reduced")
 
     # No fixed minimum-drop deferral (removed for the v2 live run): every store with justified
     # need ships its need; small orders surface as low-value carts (§19.1), never padded.
@@ -2951,6 +2973,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "demand_history": _dh_summary,
         "held_trays_reoffer": reoffer,
+        "gate_13wk": flagged,
         "config_merge": merge,
         "availability_grades": grades,
         "production": production,

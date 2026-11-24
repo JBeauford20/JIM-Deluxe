@@ -162,6 +162,13 @@ CATALOG = [
               "left out of May). The benchmark floor = floor share x the line's June-July typical week x "
               "this month's value. Example: 10 a week in June-July, November 65%, floor share 50% -> the "
               "forecast is never below 3.25 a week."),
+    dict(key="conversion_gate_mode", group="Demand and goal",
+         label="What a weak 13-week result does", kind="choice", default="flag_only",
+         choices=["flag_only", "enforce"],
+         choice_labels={"flag_only": "Flag only: ship the full quantity and report it",
+                        "enforce": "Enforce: stop below the stop line, reduce in the review band"},
+         help="Josh 11/24 (Jason's review): flag only at launch. Do-not-ship, store rules, variety bans, "
+              "approved exclusions and the due test still block in either mode."),
     dict(key="demand_history", group="Demand and goal",
          label="Measure demand over weeks the product could sell (13 months)", kind="bool", default=True,
          help="On (CEO review 11/24): rates count only weeks after the product reached the store, while "
