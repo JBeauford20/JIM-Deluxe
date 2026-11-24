@@ -32,6 +32,7 @@ import psycopg2.extras
 
 import config_merge
 import demand_history
+import inbound_timing
 import store_lead
 import store_rules
 from db_conn import get_conn
@@ -261,6 +262,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     conv_thr = S["conversion_thresholds"]
     hard_block = float(S["conversion_hard_block"])
     lag_days = int(S["conversion_delivery_lag_weeks"]) * 7
+    timing_on = str(S.get("inbound_by_arrival_date", True)).lower() not in ("false", "0", "no")
     conf_factor = S["onhand_confidence_factor"]
     sp_w = S["store_priority_weights"]
     sf_w = S["sku_fit_weights"]
@@ -892,8 +894,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     #   2. exported prior-run quantities (only for ship weeks with no loaded lines);
     #   3. manifest fallback — store has a manifest delivery after the anchor but no loaded
     #      lines: avg delivery size, flagged LOW.
-    cur.execute("SELECT DISTINCT store_id FROM delivery_manifest WHERE delivery_date > %s", (anchor,))
-    in_transit_stores = {r["store_id"] for r in cur.fetchall()}
+    cur.execute("""SELECT store_id, MIN(delivery_date) AS d FROM delivery_manifest
+                   WHERE delivery_date > %s GROUP BY 1""", (anchor,))
+    manifest_date = {r["store_id"]: r["d"] for r in cur.fetchall()}
+    in_transit_stores = set(manifest_date)
     it_lines, it_weeks = IN_TRANSIT_SOURCE(cur, anchor)   # (store, sku) -> (medium u, low u, methods)
     it_stores = {s for s, _ in it_lines}
     it_low = float(S.get("in_transit_low_factor", 0.5))      # LOW lines (pooled guesses) count at 50%
@@ -913,8 +917,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     #   and entered the delivery/on-hand data (audit 2 N2 — understated need).
     inbound_known = {(r["store_id"], r["sku_id"]): int(r["qty"] or 0) for r in cur.fetchall()}
     manifest_est_stores = set()
-    log(f"Inbound after {anchor}: loaded in-transit {sum(m + lo for m, lo, _ in it_lines.values()):,.0f}u "
-        f"({sum(lo for _, lo, _ in it_lines.values()):,.0f}u LOW at {it_low:.0%}) "
+    log(f"Inbound after {anchor}: loaded in-transit {sum(v[0] + v[1] for v in it_lines.values()):,.0f}u "
+        f"({sum(v[1] for v in it_lines.values()):,.0f}u LOW at {it_low:.0%}) "
         f"at {len(it_stores)} stores (weeks {', '.join(str(w) for w in sorted(it_weeks)) or 'none'}) · "
         f"manifest stores without loaded lines: {len(in_transit_stores - it_stores)}")
 
@@ -974,6 +978,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                       fresh_of.get(l["sku_id"], fresh_days) / 7.0)
         need = max(0.0, l["fc"] * cov - l["projected"])
         cap_note = None
+        if l.get("inbound_later") and l.get("stock_at_arrival") is not None:
+            # a later truck cannot cover the days before it lands (Jason point 3)
+            _gap = inbound_timing.gap_need(l["stock_at_arrival"], l["inbound_later"], l["fc"] / 7.0, cov * 7)
+            if _gap > need:
+                need, cap_note = _gap, f"sized to last until the next truck ({_gap:.0f}u)"
         if not l["plannable"]:
             trays = 0                                                     # objective-only line
         elif l["family"] in H2O_TERR_FAMILIES:                           # §17 tray control
@@ -1133,14 +1142,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             1.0 if (sn is not None or lot_bound) else float(conf_factor[conf]))
 
         if store_id in it_stores:
-            med, low, how = it_lines.get((store_id, sku_id), (0.0, 0.0, None))
+            med, low, how, *_ev = it_lines.get((store_id, sku_id), (0.0, 0.0, None, []))
             inbound = med + low * it_low
+            inbound_events = [((d_ - anchor).days, m_ + l_ * it_low) for d_, m_, l_ in (_ev[0] if _ev else [])
+                              if d_ is not None]
             inbound_src = (f"in transit (loaded, {how})" if how
                            else "in transit (loaded) — SKU not on the truck")
             if low:
                 inbound_src += (f" · LOW confidence {low:.0f}u counted at {it_low:.0%} "
                                 f"({low * it_low:.0f}u) — store assignment estimated")
         else:
+            inbound_events = None
             inbound, inbound_src = inbound_known.get((store_id, sku_id), 0), "prior exported run"
             if not inbound and store_id in in_transit_stores and dv.get("n_del"):
                 inbound = (float(dv.get("d26") or 0) / max(1, store_ndel.get(store_id, 0), int(dv["n_del"]))
@@ -1154,12 +1166,28 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                          "delivery size (LOW)", store_id=store_id, severity="warning")
 
         before_arrival = fc / 7.0 * dta_of(store_id)
+        _D = dta_of(store_id)
+        if inbound_events is None:
+            # undated inbound (prior exported run, manifest estimate): the store's manifest
+            # delivery date when known, else with our own truck (the old assumption)
+            _md = manifest_date.get(store_id)
+            _day = min(_D, (_md - anchor).days) if _md else _D
+            inbound_events = [(_day, inbound)] if inbound else []
         dup = same_week_prior.get((store_id, sku_id), 0)        # duplicate-run control (§24)
         if dup:
             inbound_src = (f"{inbound_src} + {dup}u earlier run, same ship week" if inbound
                            else f"{dup}u earlier run, same ship week (duplicate-run control)")
             inbound += dup
-        projected =max(0.0, oh_adj + inbound - before_arrival)
+            inbound_events = inbound_events + [(_D, float(dup))]
+        # Inbound by arrival date (Jason point 3): walk stock forward; lost sales never consume a
+        # later truck, and a truck after our delivery is kept separate for the gap check.
+        if timing_on:
+            stock_at_arrival, inbound_later, lost_before = inbound_timing.simulate(
+                oh_adj, fc / 7.0, _D, inbound_events)
+            projected = stock_at_arrival + sum(u for _, u in inbound_later)
+        else:
+            stock_at_arrival, inbound_later, lost_before = None, [], 0.0
+            projected = max(0.0, oh_adj + inbound - before_arrival)
         cover_days = projected / (fc / 7.0) if fc else 999
 
         if conf == "UNUSABLE" or store_id in edi_gap:
@@ -1191,6 +1219,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             projected=projected, cover_days=cover_days, risk=risk, need=0.0, upt=upt,
             trays=0, cap_note=None, price=unit_price, price_src=price_src,
             last_del=last_del, sales13=sv["w13"], cohort=float(dv.get("cohort") or 0),
+            stock_at_arrival=stock_at_arrival, inbound_later=inbound_later, lost_before_arrival=lost_before,
+            old_projected=max(0.0, oh_adj + inbound - before_arrival),
             plannable=is_plannable)
         # scenario floor/cap, computed ONCE here (value_numeric is SHELVES) and pre-bounded to
         # the store's selling pace — §17's 13-week window for H2O/Terrarium, the sell-through
@@ -3385,13 +3415,20 @@ def _in_transit_lines(cur, anchor):
         return {}, set()
     cur.execute("SELECT DISTINCT shipping_week FROM in_transit_lines")
     weeks = {r[0] for r in cur.fetchall()}
-    cur.execute("""SELECT store_id, sku_id,
+    cur.execute("""SELECT store_id, sku_id, delivery_date,
                           COALESCE(SUM(units) FILTER (WHERE confidence <> 'LOW'), 0) AS med,
                           COALESCE(SUM(units) FILTER (WHERE confidence = 'LOW'), 0) AS low,
                           string_agg(DISTINCT method, '+') AS m
                    FROM in_transit_lines WHERE delivery_date > %s
-                   GROUP BY store_id, sku_id""", (anchor,))
-    return {(r[0], r[1]): (float(r[2]), float(r[3]), r[4]) for r in cur.fetchall()}, weeks
+                   GROUP BY store_id, sku_id, delivery_date""", (anchor,))
+    out = {}
+    for r in cur.fetchall():
+        e = out.setdefault((r[0], r[1]), [0.0, 0.0, set(), []])
+        e[0] += float(r[3])
+        e[1] += float(r[4])
+        e[2].update((r[5] or "").split("+"))
+        e[3].append((r[2], float(r[3]), float(r[4])))     # (delivery date, medium u, low u)
+    return {k: (v[0], v[1], "+".join(sorted(x for x in v[2] if x)), v[3]) for k, v in out.items()}, weeks
 
 
 # Swappable for previews (feed loader output in memory without writing the table).
