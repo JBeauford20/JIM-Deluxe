@@ -2077,6 +2077,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 completion.setdefault("short_why", {}).setdefault(_why, 0)
                 completion["short_why"][_why] += 1
                 completion.setdefault("short_fill_bands", [0, 0, 0, 0])[min(3, int(fill / 0.25))] += 1
+                for l in ls:                   # their trays are ALREADY back in the pool (above)
+                    if l.get("alloc_trays", 0) > 0:
+                        l["alloc_in_pool"] = True
                 continue                       # lines keep their original figures; pushed below
             parts, tr_gap, u_gap, w_gap, u_delta = [], 0, 0, 0.0, 0
             for _sk, _med, _nc, _fam in tests:
@@ -2404,7 +2407,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         _deny_p = store_deny.get(store_id, NO_DENY)
         for l in o["lines"]:
             if l.get("alloc_units", 0) > 0:          # trays go back to the pool (Jason point 4)
-                pools.give_back(l["sku_id"], l["alloc_units"], _deny_p)
+                if not l.get("alloc_in_pool"):       # cart completion already returned these
+                    pools.give_back(l["sku_id"], l["alloc_units"], _deny_p)
                 returned[l["sku_id"]] += l["alloc_units"]
             l["deferred_units"] = l["alloc_units"]
             l["alloc_units"], l["alloc_trays"] = 0, 0
@@ -2499,7 +2503,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         _deny_d = store_deny.get(store_id, NO_DENY)
         for l in o["lines"]:
             if l.get("alloc_units", 0) > 0:          # trays go back to the pool (Jason point 4)
-                pools.give_back(l["sku_id"], l["alloc_units"], _deny_d)
+                if not l.get("alloc_in_pool"):       # cart completion already returned these
+                    pools.give_back(l["sku_id"], l["alloc_units"], _deny_d)
                 returned[l["sku_id"]] += l["alloc_units"]
             l["deferred_units"] = l["alloc_units"]
             l["alloc_units"], l["alloc_trays"] = 0, 0
@@ -2578,6 +2583,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    store_id=l["store_id"], sku_id=l["sku_id"], severity="info", trays=give_t, units=u)
         reoffer["stores"] = len(_touched)
     reoffer["left_in_pool_units"] = reoffer["returned_units"] - reoffer["reoffered_units"]
+    # SUPPLY INVARIANT: no SKU is ever allocated beyond its availability (checked, not assumed)
+    _alloc_by = defaultdict(int)
+    for o_ in orders.values():
+        for l in o_["lines"]:
+            _alloc_by[l["sku_id"]] += int(l.get("alloc_units", 0) or 0)
+    _over = {sk: (u, sum(pools.total[sk].values())) for sk, u in _alloc_by.items()
+             if sk in pools.total and sum(pools.total[sk].values()) and u > sum(pools.total[sk].values())}
+    if _over:
+        raise ValueError(f"Allocation exceeds supply for {len(_over)} SKU(s): {dict(list(_over.items())[:5])}")
     log(f"Held trays: {reoffer['returned_units']:,}u returned by pushed/deferred orders · "
         f"{reoffer['reoffered_units']:,}u re-offered to {reoffer['stores']:,} shipping stores "
         f"({reoffer['lines']:,} lines still short of need; {reoffer.get('refused_would_add_cart', 0):,} refused, "
