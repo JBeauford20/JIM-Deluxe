@@ -187,3 +187,77 @@ def test_parse_and_plan_split_stop():
     assert split == {"48-N1": ["a"], "48-N2": ["b", "c"]}
     legacy = X.plan_routes(p["entries"], {903: ["a", "b", "c"]}, allow_split=False)
     assert legacy["stores_on_multiple_routes"] == [903] and legacy["carts_assigned"] == 3
+
+
+# ── master + flex runs (order_carts.master_code / flex_positions) ────────────
+def _master_model(with_master=True):
+    def cart(cid, store, n):
+        c = {"id": cid, "order_id": f"o{store}", "store_id": store, "cart_number": n, "config_code": "CC1",
+             "cart_key": cid}
+        if with_master:
+            c.update(master_code="M 1", flex_positions=[1])
+        return c
+    def sh(cid, pos, sku, trays, units, line, prof):
+        return {"cart_id": cid, "shelf_position": pos, "sku_id": sku, "profile_id": prof, "kit_type": None,
+                "tray_count": trays, "unit_count": units, "availability_line_id": line}
+    carts = [cart("a", 903, 1), cart("b", 903, 2), cart("c", 111, 1)]
+    shelves = [sh("a", 1, 1, 2, 6, "L1", "box17"), sh("a", 2, 2, 7, 84, "L3", "littles"),
+               sh("b", 1, 1, 1, 3, "L2", "box17"), sh("b", 2, 2, 7, 84, "L3", "littles"),
+               sh("c", 1, 1, 2, 6, "L1", "box17"), sh("c", 2, 2, 7, 84, "L3", "littles")]
+    return {"run": {"id": "r", "batch_id": "b", "shipping_week": date(2026, 11, 30)},
+            "orders": [{"id": "o903", "store_id": 903, "status": "approved", "cart_count": 2},
+                       {"id": "o111", "store_id": 111, "status": "approved", "cart_count": 1}],
+            "carts": carts, "shelves": shelves,
+            "loads": [{"id": "l1", "load_name": "49-N1", "ship_date": date(2026, 11, 30)}],
+            "assignments": [{"load_id": "l1", "order_cart_id": c["id"], "store_id": c["store_id"],
+                             "stop_sequence": 1} for c in carts]}
+
+
+def test_master_runs_name_kits_by_base_build():
+    m = _master_model()
+    by_cart, names, _new = X.assign_config_names(m)
+    assert set(by_cart.values()) == {"CC 1"} and names == {"MASTER:M 1": "CC 1"}
+    old = _master_model(with_master=False)
+    by_cart_old, _, _ = X.assign_config_names(old)
+    assert by_cart_old == {"a": "CC 1", "c": "CC 1", "b": "CC 2"}     # exact signatures, as before
+
+
+def test_master_pack_plan_variations_reconcile_and_mark_flex():
+    m, ref = _master_model(), _ref()
+    rows, layouts, notes = X.pack_plan_rows(m, ref)
+    assert {r["KitDescription"] for r in rows} == {"CC 1"}
+    assert sorted({r["Variation"] for r in rows}) == [1, 2]
+    assert sum(r["Total Used"] for r in rows) == sum(s["unit_count"] for s in m["shelves"])
+    assert all(("Flex shelf" in (r["Notes"] or "")) == (r["Layer"] == 1) for r in rows)
+    # base shelf rows are identical across the variations (layer, sku, trays, eaches)
+    base = {v: sorted((r["Layer"], r["SKU"], r["Trays"], r["Eaches"]) for r in rows if r["Variation"] == v and not r["Flex"])
+            for v in (1, 2)}
+    assert base[1] == base[2]
+    wb, rep = X.build_pack_plan(m, ref)
+    assert rep["total_used"] == sum(s["unit_count"] for s in m["shelves"])
+    assert rep["base_builds"] == 1 and rep["kit_variations"] == 2 and rep["flex_variants_max"] == 2
+    chk = [[c.value for c in r] for r in wb["Checks"].iter_rows(min_row=2)]
+    assert any(r[2] == "Base cart configs <= 50" and r[0] == "OK" for r in chk)
+    sc, rep_sc = X.build_stores_and_carts(m, ref)
+    assert rep_sc["distinct_configs"] == 1
+    from services import floor_sheets as FS
+    data, frep = FS.build_floor_sheets(rows, ref, 49)
+    import zipfile
+    z = zipfile.ZipFile(io.BytesIO(data))
+    wbf = openpyxl.load_workbook(io.BytesIO(z.read(z.namelist()[0])))
+    assert wbf.sheetnames == ["CC 1"]
+    vals = [c.value for row in wbf["CC 1"].iter_rows() for c in row if c.value is not None]
+    assert "BASE SHELVES — build for all 3 carts" in vals
+    assert any(str(v).startswith("FLEX VARIANT 2 — add to 1 cart") for v in vals)
+
+
+def test_runs_without_master_code_export_as_before():
+    m, ref = _master_model(with_master=False), _ref()
+    rows, layouts, notes = X.pack_plan_rows(m, ref)
+    assert {r["KitDescription"] for r in rows} == {"CC 1", "CC 2"}
+    assert not any(r["Flex"] for r in rows) and notes["flex_rows"] == 0
+    wb, rep = X.build_pack_plan(m, ref)
+    assert rep["base_builds"] is None
+    assert [c.value for c in wb["Cart Layouts"][1]] == X.LAYOUT_HEADERS
+    assert not any(r[2] == "Base cart configs <= 50" for r in
+                   [[c.value for c in r] for r in wb["Checks"].iter_rows(min_row=2)])

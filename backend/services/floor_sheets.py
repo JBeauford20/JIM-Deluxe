@@ -6,17 +6,20 @@ box), then each shelf TOP SHELF FIRST: column headers, item rows, subtotal. Size
 Retail are plain values (no external formulas). Product / Items come from the Aster variety
 reference; an "Assorted" name is never printed (Items left blank and listed for the catalog).
 Mixed rows keep their own cart count, get a colour block, and count once in the subtotal.
+Master + flex runs: a tab per BASE build; base shelves are printed once with the cart count of
+the whole base build, then each flex variant with its own cart count and colour block.
 """
 import io
 import re
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 FS_HEADERS = ["# of carts", "Shelf #", "Size", "Product", "Items", "Aster Code", "Qty per display",
               "Total QT", "Upgrade", "Tray", "Tags", "SKU Label", "UPC Label", "Retail",
               "Label Requirements", "Notes"]
 FS_WIDTHS = [9, 7, 16, 18, 34, 11, 10, 10, 9, 13, 8, 12, 15, 9, 16, 30]
 MIX_FILLS = ["FFF2CC", "DDEBF7", "E2EFDA", "FCE4D6", "EDE7F6", "FFE6EE"]
+FLEX_FILLS = ["C6E0B4", "BDD7EE", "F8CBAD", "FFE699", "D9D2E9", "B4C6E7"]
 GLOBE_SKU = 1015258015            # Climb-itt Globe (3 per tray, 6 pack tray)
 
 
@@ -101,7 +104,13 @@ def build_route_workbook(route, rows, ref, week, ship_date, flagged):
             i += 1
         used.add(title)
         ws = wb.create_sheet(title)
-        n_carts = kit_cart_count(krows)
+        if any(r.get("Flex") for r in krows):
+            _vr = defaultdict(list)
+            for r in krows:
+                _vr[r["Variation"]].append(r)
+            n_carts = sum(kit_cart_count(rs) for rs in _vr.values())
+        else:
+            n_carts = kit_cart_count(krows)
         hdr = [("WEEK", week), ("CUSTOMER", "Home Depot"), ("SHIP DATE", ship_date), ("CART", kit),
                ("ROUTE", route), ("# OF CARTS", n_carts)]
         for j, (k, v) in enumerate(hdr, 1):
@@ -117,46 +126,86 @@ def build_route_workbook(route, rows, ref, week, ship_date, flagged):
         r0 = len(hdr) + 2
         if any("SOIL" in str(x.get("ItemDescription") or "").upper() for x in krows):
             ws.cell(r0 - 1, 5, "MUST INCLUDE SOIL PO").font = bold
-        by_layer = defaultdict(list)
-        for r in krows:
-            by_layer[int(r["Layer"])].append(r)
-        rr = r0
-        for layer in sorted(by_layer, reverse=True):              # top shelf first
-            for j, h in enumerate(FS_HEADERS, 1):
-                c = ws.cell(rr, j, h)
-                c.font = bold
-                c.fill = PatternFill("solid", fgColor="D9D9D9")
-                c.border = box
-            rr += 1
-            mix_seen, per_display, total = {}, 0, 0
-            for r in sorted(by_layer[layer], key=lambda x: (str(x.get("Notes") or ""), str(x.get("AsterCode") or ""))):
-                sku = int(r["SKU"])
-                info = skus.get(sku) or {}
-                size = info.get("size_category") or ""
-                prod, items = product_items(r.get("AsterCode"), ref, flagged)
-                note = r.get("Notes") or ""
-                m = re.match(r".*Mix\s+([A-Z])", str(note))
-                vals = [int(r["KitQuantity"] or 0), layer, size, prod, items, r.get("AsterCode"),
-                        int(r["Eaches"] or 0), int(r["KitQuantity"] or 0) * int(r["Eaches"] or 0),
-                        r.get("Upgrade"), tray_label(sku, size, int(r["Trays"] or 0), int(r["Eaches"] or 0)),
-                        None, str(sku), info.get("upc"), info.get("retail_price"), None, note or None]
-                for j, v in enumerate(vals, 1):
-                    c = ws.cell(rr, j, v)
+        def write_layers(rr, lrows, fill=None):
+            by_layer = defaultdict(list)
+            for r in lrows:
+                by_layer[int(r["Layer"])].append(r)
+            for layer in sorted(by_layer, reverse=True):              # top shelf first
+                for j, h in enumerate(FS_HEADERS, 1):
+                    c = ws.cell(rr, j, h)
+                    c.font = bold
+                    c.fill = PatternFill("solid", fgColor="D9D9D9")
                     c.border = box
-                    if m:
-                        c.fill = PatternFill("solid", fgColor=MIX_FILLS[(ord(m.group(1)) - 65) % len(MIX_FILLS)])
-                ws.cell(rr, 14).number_format = '"$"#,##0.00'
-                if m:
-                    mix_seen[m.group(1)] = max(mix_seen.get(m.group(1), 0), int(r["Eaches"] or 0))
-                else:
-                    per_display += int(r["Eaches"] or 0)
-                total += vals[7]
                 rr += 1
-            per_display += sum(mix_seen.values())                 # each mixed slot counts once
-            ws.cell(rr, 6, "Shelf total").font = bold
-            ws.cell(rr, 7, per_display).font = bold
-            ws.cell(rr, 8, total).font = bold
-            rr += 2
+                mix_seen, per_display, total = {}, 0, 0
+                for r in sorted(by_layer[layer], key=lambda x: (str(x.get("Notes") or ""), str(x.get("AsterCode") or ""))):
+                    sku = int(r["SKU"])
+                    info = skus.get(sku) or {}
+                    size = info.get("size_category") or ""
+                    prod, items = product_items(r.get("AsterCode"), ref, flagged)
+                    note = r.get("Notes") or ""
+                    m = re.match(r".*Mix\s+([A-Z])", str(note))
+                    vals = [int(r["KitQuantity"] or 0), layer, size, prod, items, r.get("AsterCode"),
+                            int(r["Eaches"] or 0), int(r["KitQuantity"] or 0) * int(r["Eaches"] or 0),
+                            r.get("Upgrade"), tray_label(sku, size, int(r["Trays"] or 0), int(r["Eaches"] or 0)),
+                            None, str(sku), info.get("upc"), info.get("retail_price"), None, note or None]
+                    for j, v in enumerate(vals, 1):
+                        c = ws.cell(rr, j, v)
+                        c.border = box
+                        if m:
+                            c.fill = PatternFill("solid", fgColor=MIX_FILLS[(ord(m.group(1)) - 65) % len(MIX_FILLS)])
+                        elif fill:
+                            c.fill = PatternFill("solid", fgColor=fill)
+                    ws.cell(rr, 14).number_format = '"$"#,##0.00'
+                    if m:
+                        mix_seen[m.group(1)] = max(mix_seen.get(m.group(1), 0), int(r["Eaches"] or 0))
+                    else:
+                        per_display += int(r["Eaches"] or 0)
+                    total += vals[7]
+                    rr += 1
+                per_display += sum(mix_seen.values())                 # each mixed slot counts once
+                ws.cell(rr, 6, "Shelf total").font = bold
+                ws.cell(rr, 7, per_display).font = bold
+                ws.cell(rr, 8, total).font = bold
+                rr += 2
+            return rr
+
+        if not any(r.get("Flex") for r in krows):
+            write_layers(r0, krows)
+        else:
+            # MASTER + FLEX: base shelves printed once for every cart of the base build (built in
+            # bulk), then each flex variant with its own cart count and colour block
+            var_rows = defaultdict(list)
+            for r in krows:
+                var_rows[r["Variation"]].append(r)
+            var_carts = {v: kit_cart_count(rs) for v, rs in var_rows.items()}
+            # the same base shelf can sit at a different height on different flex variants
+            # (tallest shelf at the bottom): printed once, at its most common shelf, with a note
+            base_agg, base_layers = {}, defaultdict(Counter)
+            for r in krows:
+                if r.get("Flex"):
+                    continue
+                k = (str(r["SKU"]), r.get("AsterCode"), int(r["Trays"] or 0),
+                     int(r["Eaches"] or 0), r.get("Notes") or "")
+                base_layers[k][int(r["Layer"])] += int(r["KitQuantity"] or 0)
+                if k in base_agg:
+                    base_agg[k]["KitQuantity"] = int(base_agg[k]["KitQuantity"] or 0) + int(r["KitQuantity"] or 0)
+                else:
+                    base_agg[k] = dict(r)
+            for k, r in base_agg.items():
+                lay = base_layers[k]
+                r["Layer"] = max(lay, key=lambda x: (lay[x], -x))
+                if len(lay) > 1:
+                    where = ", ".join(f"shelf {x} on {n}" for x, n in sorted(lay.items()))
+                    r["Notes"] = f"{r.get('Notes') + ' — ' if r.get('Notes') else ''}position varies: {where}"
+            ws.cell(r0, 1, f"BASE SHELVES — build for all {n_carts} carts").font = bold
+            rr = write_layers(r0 + 1, list(base_agg.values()))
+            for i, v in enumerate(sorted(var_rows), 1):
+                fill = FLEX_FILLS[(i - 1) % len(FLEX_FILLS)]
+                c = ws.cell(rr, 1, f"FLEX VARIANT {i} — add to {var_carts[v]} cart(s)")
+                c.font = bold
+                c.fill = PatternFill("solid", fgColor=fill)
+                rr = write_layers(rr + 1, [r for r in var_rows[v] if r.get("Flex")], fill)
         for j, w in enumerate(FS_WIDTHS, 1):
             ws.column_dimensions[get_column_letter(j)].width = w
     return wb

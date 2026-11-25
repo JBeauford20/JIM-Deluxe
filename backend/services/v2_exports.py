@@ -129,6 +129,11 @@ def load_run(cur, run_id: str) -> dict | None:
     cur.execute("""SELECT 1 AS ok FROM information_schema.columns
                    WHERE table_name = 'order_carts' AND column_name = 'handling_tag'""")
     tag_col = ", oc.handling_tag" if cur.fetchone() else ""
+    cur.execute("""SELECT count(*) AS n FROM information_schema.columns WHERE table_name = 'order_carts'
+                   AND column_name IN ('master_code', 'flex_positions')""")
+    _mrow = cur.fetchone()
+    if (_mrow["n"] if isinstance(_mrow, dict) else _mrow[0]) == 2:
+        tag_col += ", oc.master_code, oc.flex_positions"
     cur.execute(f"""SELECT oc.id, oc.order_id, oc.store_id, oc.cart_number, oc.config_code, oc.cart_key
                           {tag_col}
                    FROM order_carts oc JOIN orders o ON o.id = oc.order_id
@@ -245,6 +250,20 @@ def cart_signature(cart: dict, shelves: list) -> str:
     return f"{sig}|TAG:{tag}" if tag else sig
 
 
+def name_key(cart: dict, shelves: list) -> str:
+    """What a kit NAME is keyed on: the cart's master (base build) when the run carries one —
+    carts sharing a master share a name and differ only in their flex shelves — else the exact
+    content signature (runs written before master + flex export exactly as before)."""
+    code = (cart.get("master_code") or "").strip()
+    if code and not (cart.get("config_code") or "").strip().startswith("PC "):
+        return "MASTER:" + code
+    return cart_signature(cart, shelves)
+
+
+def has_masters(model: dict) -> bool:
+    return any((c.get("master_code") or "").strip() for c in model.get("carts", []))
+
+
 def _cc_number(name: str):
     m = re.fullmatch(r"CC (\d+)", name or "")
     return int(m.group(1)) if m else None
@@ -262,7 +281,7 @@ def assign_config_names(model: dict, existing: dict | None = None):
         by_cart[s["cart_id"]].append(s)
     sig_of, count, first = {}, Counter(), {}
     for c in model["carts"]:
-        sig = cart_signature(c, by_cart.get(c["id"], []))
+        sig = name_key(c, by_cart.get(c["id"], []))
         sig_of[c["id"]] = sig
         count[sig] += 1
         first[sig] = min(first.get(sig, 10 ** 9), int(c["store_id"]))
@@ -666,26 +685,31 @@ def pack_plan_rows(model: dict, ref: dict):
     for s in model["shelves"]:
         shelves_by_cart[s["cart_id"]].append(s)
 
-    groups = defaultdict(list)            # (ship, route, label) -> carts
+    groups = defaultdict(list)            # (ship, route, label, variant) -> carts
     tag_of = {}                           # config label -> handling tag (NO HEDERA ...)
+    masters = has_masters(model)
     for c in model["carts"]:
         route, ship = route_of.get(c["id"], (UNROUTED, None))
-        groups[(ship, route, names[c["id"]])].append(c)
+        # master runs: a kit name is a BASE build; each flex variant (exact content) on a route is
+        # its own Variation so every row group still describes identical carts
+        variant = cart_signature(c, shelves_by_cart.get(c["id"], [])) if masters else ""
+        groups[(ship, route, names[c["id"]], variant)].append(c)
         if (c.get("handling_tag") or "").strip():
             tag_of[names[c["id"]]] = c["handling_tag"].strip()
 
     def gkey(k):
-        ship, route, lab = k
-        return (ship or date.max, route == UNROUTED, route, _config_sort_key(lab))
+        ship, route, lab, variant = k
+        return (ship or date.max, route == UNROUTED, route, _config_sort_key(lab), -len(groups[k]), variant)
 
     variation_seq = defaultdict(int)
     rows, layouts, notes = [], [], Counter()
     for key in sorted(groups, key=gkey):
-        ship, route, lab = key
+        ship, route, lab, _variant = key
         carts = groups[key]
         K = len(carts)
         variation_seq[lab] += 1
         variation = variation_seq[lab]
+        flex_pos = {int(p) for p in (carts[0].get("flex_positions") or [])}
         # per-cart layer content (identical across carts sharing one config name, since
         # names are assigned per exact content signature)
         per_layer = defaultdict(lambda: {"trays": 0, "units": 0, "profile": None, "aster": defaultdict(int)})
@@ -732,6 +756,9 @@ def pack_plan_rows(model: dict, ref: dict):
                 if tag_of.get(lab):          # restricted build: say so on every row of the config
                     note = f"{tag_of[lab]} — {note}" if note else tag_of[lab]
                     notes["handling_tag_rows"] += 1
+                if int(pos) in flex_pos:     # store-specific shelf on a base build
+                    note = f"Flex shelf — {note}" if note else "Flex shelf"
+                    notes["flex_rows"] += 1
                 eaches = trays * upt if trays else (L["units"] // K if K else 0)
                 if code is None:
                     notes["rows_without_aster_code"] += 1
@@ -741,6 +768,7 @@ def pack_plan_rows(model: dict, ref: dict):
                     "ItemDescription": idesc, "ItemTrays": int(round(it)), "ItemEaches": int(round(ie)),
                     "ItemCustomerDescription": sk.get("description") or "", "SKU": str(sku_id),
                     "AsterCode": code, "Trays": trays, "Eaches": eaches, "Total Used": kq * eaches,
+                    "Flex": int(pos) in flex_pos,
                 })
         # Cart Layouts: shelf heights/widths from packing profiles (per cart)
         layer_prof = defaultdict(lambda: defaultdict(int))
@@ -757,11 +785,35 @@ def pack_plan_rows(model: dict, ref: dict):
                 w += math.ceil(trays / rows_deep) * float(p.get("tray_width_mm") or 0) / 25.4
             heights.append(h)
             widths.append(round(w, 2))
-        layouts.append({"Route": route, "Cart": lab, "# carts": K, "Shelves": len(heights),
+        layouts.append({"Route": route, "Cart": lab, "Variation": variation, "# carts": K, "Shelves": len(heights),
                         "Height (in)": int(sum(heights)) if all(x == int(x) for x in heights) else round(sum(heights), 1),
                         "Shelf heights": " / ".join(f"{x:g}" for x in heights),
                         "Shelf widths (in)": " / ".join(f"{x:g}" for x in widths)})
     return rows, layouts, notes
+
+
+MAX_BASE_CONFIGS = 50
+
+
+def base_build_summary(model: dict, rows: list) -> dict:
+    """Base builds of a master run: carts per base name, flex variants (distinct exact
+    contents) per base, routes."""
+    names = config_names(model)
+    by_cart = defaultdict(list)
+    for s in model["shelves"]:
+        by_cart[s["cart_id"]].append(s)
+    carts, variants = Counter(), defaultdict(set)
+    for c in model["carts"]:
+        carts[names[c["id"]]] += 1
+        variants[names[c["id"]]].add(cart_signature(c, by_cart.get(c["id"], [])))
+    routes = defaultdict(set)
+    for r in rows:
+        routes[r["KitDescription"]].add(r["Route"])
+    bases = [{"name": n, "carts": carts[n], "flex_variants": len(variants[n]),
+              "routes": len(routes.get(n, ()))} for n in sorted(carts, key=_config_sort_key)]
+    return {"bases": bases, "carts": sum(carts.values()),
+            "flex_variants_max": max((b["flex_variants"] for b in bases), default=0),
+            "bases_over_4": sum(1 for b in bases if b["flex_variants"] > 4)}
 
 
 def _pivot_key(k):
@@ -849,13 +901,24 @@ def build_pack_plan(model: dict, ref: dict):
             c.font = Font(bold=True)
         w.freeze_panes = "A2"
 
+    masters = has_masters(model)
+    base = base_build_summary(model, rows) if masters else None
+    lay_hdr = LAYOUT_HEADERS[:2] + ["Variation"] + LAYOUT_HEADERS[2:] if masters else LAYOUT_HEADERS
     w = wb.create_sheet("Cart Layouts")
-    w.append(LAYOUT_HEADERS)
+    w.append(lay_hdr)
     for c in w[1]:
         c.font = Font(bold=True)
     for L in layouts:
-        w.append([xl(L[h]) for h in LAYOUT_HEADERS])
+        w.append([xl(L[h]) for h in lay_hdr])
     w.freeze_panes = "A2"
+    if base:
+        # base builds: what the floor builds in bulk; flex variants add their two shelves
+        w.append([])
+        w.append(["Base build", "# carts", "Flex variants", "Routes"])
+        for c in w[w.max_row]:
+            c.font = Font(bold=True)
+        for b in base["bases"]:
+            w.append([xl(b["name"]), b["carts"], b["flex_variants"], b["routes"]])
 
     # Weekly check list (pack team guide 2026-11-25), worst first, on its own tab
     try:
@@ -864,6 +927,18 @@ def build_pack_plan(model: dict, ref: dict):
         import pack_checks
     _names = config_names(model)
     findings = pack_checks.run_checks(model, ref, rows, kit_name_of=_names)
+    if base:
+        n_b = len(base["bases"])
+        findings.insert(0, {"severity": "High" if n_b > MAX_BASE_CONFIGS else "OK", "check": "I",
+                            "title": f"Base cart configs <= {MAX_BASE_CONFIGS}",
+                            "route": None, "kit": None, "detail": f"{n_b} base builds for {base['carts']} carts",
+                            "carts": base["carts"], "file": "Pack Plan",
+                            "fix": "" if n_b <= MAX_BASE_CONFIGS else "Re-run with the master + flex cart menu"})
+        findings.insert(1, {"severity": "Info", "check": "I", "title": "Flex variants per base build",
+                            "route": None, "kit": None,
+                            "detail": f"max {base['flex_variants_max']}; {base['bases_over_4']} base build(s) "
+                                      f"with more than 4 flex variants", "carts": 0, "file": "Pack Plan",
+                            "fix": "Information (Jason's recommendation: at most 4 per base)"})
     w = wb.create_sheet("Checks")
     w.append(["Severity", "Check", "Finding", "Route", "Kit", "Detail", "Carts", "File", "What to do"])
     for c in w[1]:
@@ -882,6 +957,11 @@ def build_pack_plan(model: dict, ref: dict):
         "routes": sorted({r["Route"] for r in rows}), "unrouted_rows": sum(r["Route"] == UNROUTED for r in rows),
         "mix_rows": notes["mix_rows"], "rows_without_aster_code": notes["rows_without_aster_code"],
         "handling_tag_rows": notes["handling_tag_rows"],
+        "flex_rows": notes["flex_rows"],
+        "base_builds": len(base["bases"]) if base else None,
+        "flex_variants_max": base["flex_variants_max"] if base else None,
+        "kit_names": len({r["KitDescription"] for r in rows}),
+        "kit_variations": len({(r["KitDescription"], r["Variation"]) for r in rows}),
         "units_without_aster_code": sum(r["Total Used"] for r in rows if not r["AsterCode"]),
         "bloomaker_total": sum(r["Total Used"] for r in rows if is_bloom(r)),
         "soil_total": sum(r["Total Used"] for r in rows if is_soil(r)),

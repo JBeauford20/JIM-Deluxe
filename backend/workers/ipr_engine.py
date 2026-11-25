@@ -5267,6 +5267,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     shelves = sorted(range(len(mc["shelves"])),
                                      key=lambda i: (-_rung(mc["shelves"][i]),
                                                     min(PROFILE_HEIGHT_RANK.get(p_, 3) for p_ in MF.shelf_pids(mc["shelves"][i])),
+                                                    i not in mc["base_idx"],    # same height: base first
                                                     mc["shelves"][i]))
                     contents, flex = [], []
                     for pos, i in enumerate(shelves, 1):
@@ -6144,6 +6145,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    WHERE table_name = 'order_carts' AND column_name = 'handling_tag'""")
     _has_tag_col = bool(cur.fetchone())
     cart_tag_rows = []
+    # master + flex (cart_menu_mode = master_flex): "M 1".."M n" by carts using the master, most
+    # used first; directed / pre-built / locked carts have no master code (they keep their names)
+    cur.execute("""SELECT count(*) FROM information_schema.columns WHERE table_name = 'order_carts'
+                   AND column_name IN ('master_code', 'flex_positions')""")
+    _has_master_cols = (cur.fetchone() or [0])[0] == 2
+    _mcount_w = Counter(c["master_key"] for o2 in orders.values() for c in o2["carts"]
+                        if c.get("master_key") and c["master_key"][0] != "fixed")
+    _mcode = {m: f"M {i}" for i, (m, _n) in enumerate(
+        sorted(_mcount_w.items(), key=lambda kv: (-kv[1], str(kv[0]))), 1)}
+    cart_master_rows = []
 
     cart_seq = 0
     template = {}
@@ -6207,6 +6218,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                               f"WK{iso[0]}{iso[1]:02d}-C{cart_seq:04d}", code, True))
             if c.get("handling_tag"):
                 cart_tag_rows.append((c["handling_tag"], cid))
+            if c.get("master_key") in _mcode:
+                cart_master_rows.append((_mcode[c["master_key"]], list(c.get("flex_shelves") or []), cid))
             _store_deny = store_deny.get(store_id, NO_DENY)
             t = template.setdefault(code, {"cart_count": 0, "stores": set(), "units": 0, "shelves": None})
             t["cart_count"] += 1
@@ -6268,7 +6281,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if _has_tag_col and cart_tag_rows:
         psycopg2.extras.execute_batch(cur, "UPDATE order_carts SET handling_tag = %s WHERE id = %s",
                                       cart_tag_rows, page_size=500)
-    elif cart_tag_rows:
+    if _has_master_cols and cart_master_rows:
+        psycopg2.extras.execute_batch(cur, "UPDATE order_carts SET master_code = %s, flex_positions = %s WHERE id = %s",
+                                      cart_master_rows, page_size=500)
+    elif cart_master_rows:
+        decide("validation", f"{len(cart_master_rows)} cart(s) belong to a master cart build but "
+                             f"order_carts.master_code / flex_positions do not exist — apply migration "
+                             f"order_carts_master_2026_11_25 so the exports name carts by base build",
+               severity="warning")
+    if cart_tag_rows and not _has_tag_col:
         decide("validation", f"{len(cart_tag_rows)} cart(s) carry a store handling tag but "
                              f"order_carts.handling_tag does not exist — apply the store_master "
                              f"migration so restricted carts get their own cart config", severity="block")
