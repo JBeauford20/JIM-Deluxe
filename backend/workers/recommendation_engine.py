@@ -81,7 +81,7 @@ PROFILE_SIZE_GROUP = {
     'euro12': '12cm', 'db12': '12cm', 'hb12': '12cm',
     'climb':  '12cm', 'terrEU': '12cm',
     # Climb-itt accessory boxes (Jason's Week 49 brief, 11/25): real case sizes, 12cm positions
-    'acc_wire': '12cm', 'acc_clips': '12cm', 'acc_stakes': '12cm', 'acc_pole19': '12cm', 'acc_pole30': '12cm',
+    'globe3': '12cm', 'acc_wire': '12cm', 'acc_clips': '12cm', 'acc_stakes': '12cm', 'acc_pole19': '12cm', 'acc_pole30': '12cm',
     # 17cm family
     'box17': '17cm',
     # H2O family
@@ -109,7 +109,7 @@ PROFILE_HEIGHT_RANK = {
     'hb12':    2,   # 12cm Hanging Basket
     'climb':   2,   # 12cm Climb-itt
     'acc_wire': 2, 'acc_clips': 2, 'acc_stakes': 2,   # Climb-itt accessory boxes (21" shelf)
-    'acc_pole19': 2, 'acc_pole30': 2,
+    'acc_pole19': 2, 'acc_pole30': 2, 'globe3': 2,
     'venti':   2,   # H2O Venti — same height as 12cm
     'terrEU':  2,   # Terrarium — 21" class
     'bowlEU':  3,   # H2O Bowl — shorter than 12cm, taller than 9cm

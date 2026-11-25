@@ -12,13 +12,14 @@ shelves and 95 in per CC, 4 shelves on any cart carrying 17cm.
 """
 from collections import defaultdict
 
-CC_SHELF_IN = 50.5
-CC_FIT_IN = 51.0            # 1/4 in overhang allowed each edge
-FILLED_STRIP_IN = 3.0       # a leftover strip under 3 in counts as filled
-MIN_SHELF_FILL = 0.80       # Ken's rule: shelves filled completely; flag under 80%
-CC_MAX_SHELVES = 5
-CC_MAX_HEIGHT_IN = 95
-CC_17CM_MAX_SHELVES = 4
+try:
+    from workers import shelfkit as SK
+except ImportError:                       # backend/workers on sys.path (engine, tests)
+    import shelfkit as SK
+
+CC_SHELF_IN, CC_FIT_IN, FILLED_STRIP_IN = SK.CC_SHELF_IN, SK.CC_FIT_IN, SK.FILLED_STRIP_IN
+MIN_SHELF_FILL, CC_MAX_SHELVES, CC_MAX_HEIGHT_IN = SK.MIN_SHELF_FILL, SK.CC_MAX_SHELVES, SK.CC_MAX_HEIGHT_IN
+CC_17CM_MAX_SHELVES = SK.CC_17CM_MAX_SHELVES
 BOWL_SKUS = {1012142347}    # regular H2O Bowl; max 3 trays per cart, never a full shelf
 BOWL_MAX_PER_CART = 3
 VENTI_SKU = 1012138483
@@ -32,47 +33,9 @@ ASTER_SKU_OVERRIDES = {"1000464": 1015555690, "1001666": 1015555690, "1000853": 
                        "1001609": 1013310815, "1000614": 1012138481, "1000615": 1012138481,
                        "1001359": 1012138481, "1001429": 1012138484, "1001430": 1012138484}
 
-# profile -> (footprint class, inches across per tray/box, shelf rung in)
-#   std  = standard 15 3/4 x 11 tray two deep: a pair is 15.75 across, an odd tray 11
-#   hb   = 12cm hanging basket 16 x 11, pair 16
-#   each = fixed inches per tray/box
-PROFILE_FIT = {
-    "littles": ("each", 7.09, 15), "cer9": ("std", None, 15), "canopy9": ("std", None, 15),
-    "bowlEU": ("std", None, 15), "h2opp": ("std", None, 15), "terrEU": ("std", None, 15),
-    "euro12": ("std", None, 21), "climb": ("std", None, 21), "hb12": ("hb", None, 21),
-    "venti": ("each", 12.6, 21), "box17": ("each", 7.125, 29), "db12": ("std", None, 29),
-    "box8x2": ("each", 9.0, 15), "soilbag1": ("each", 8.25, 15), "soilbag2": ("each", 8.25, 15),
-    "spraybox": ("each", 10.1, 15),
-    # Climb-itt hardware boxes (ShelfKit max per CC shelf: Pole 30 2, Pole 19 4, Stakes 7, Clips/Wire 4)
-    "acc_pole30": ("each", CC_SHELF_IN / 2, 29), "acc_pole19": ("each", CC_SHELF_IN / 4, 21),
-    "acc_stakes": ("each", CC_SHELF_IN / 7, 15), "acc_clips": ("each", CC_SHELF_IN / 4, 15),
-    "acc_wire": ("each", CC_SHELF_IN / 4, 15),
-}
-
-
-def shelf_width(items):
-    """Inches across one CC shelf for [(profile_id, trays)], ShelfKit width maths."""
-    n_std = n_hb = 0
-    w = 0.0
-    for pid, trays in items:
-        kind, per, _ = PROFILE_FIT.get(pid, ("std", None, 21))
-        if kind == "std":
-            n_std += trays
-        elif kind == "hb":
-            n_hb += trays
-        else:
-            w += per * trays
-    w += (n_std // 2) * 15.75 + (n_hb // 2) * 16.0
-    if n_std % 2 and n_hb % 2:
-        w += 16.0                       # the odd standard and odd HB tray pair at 16
-    else:
-        w += (n_std % 2) * 11.0 + (n_hb % 2) * 11.0
-    return round(w, 2)
-
-
-def shelf_rung(pids):
-    """Shelf height = the tallest item's rung."""
-    return max(PROFILE_FIT.get(p, ("std", None, 21))[2] for p in pids) if pids else 0
+PROFILE_FIT = SK.PROFILE_FIT
+shelf_width = SK.shelf_width
+shelf_rung = SK.shelf_rung
 
 
 def cart_layers(shelves):

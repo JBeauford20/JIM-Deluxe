@@ -35,6 +35,7 @@ import config_merge
 import demand_history
 import inbound_timing
 import store_lead
+import shelfkit as SK
 import store_rules
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
@@ -173,7 +174,7 @@ def economic_action(wholesale, carts, lost_one_week, cart_cost, wholesale_low, a
     return "defer"
 
 
-def pair_partial_shelves(shelves, frac_of, height_of, pids_of, merge):
+def pair_partial_shelves(shelves, frac_of, height_of, pids_of, merge, fits=None):
     """Shelf splitting (Josh 2026-11-25: "we can split shelves between 2 different items").
     Full shelves stay as they are. Each partly filled shelf is paired with at most one other
     partial shelf of a DIFFERENT product profile when the two fit on one shelf together
@@ -197,7 +198,7 @@ def pair_partial_shelves(shelves, frac_of, height_of, pids_of, merge):
             if pa & pb or len(pa | pb) > 2:
                 continue
             f = frac_of(a) + frac_of(b)
-            if f > 1.0 + 1e-9:
+            if (not fits(a, b)) if fits else f > 1.0 + 1e-9:
                 continue
             key = (abs(height_of(a) - height_of(b)), -f)
             if best is None or key < best[0]:
@@ -2206,24 +2207,29 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         def _cc_best_fill(state):
             """Fill of the fullest cart the §7 packer would build from {profile: [trays, cap,
             height, max shelves]} — the same shelf and cart rules, on tray counts alone."""
-            shelves = []       # (pids, frac, height, {pid: max shelves})
+            # (pids, fill by real width, height, {pid: max shelves}, [(pid, trays)]) — the same
+            # ShelfKit width maths the packer uses, so the estimate and the real pack agree
+            shelves = []
             for pid, (t, cap, h, pmax) in state.items():
                 full, rem = divmod(int(t), cap)
-                shelves += [(frozenset([pid]), 1.0, h, {pid: pmax})] * full
+                shelves += [(frozenset([pid]), SK.shelf_fill([(pid, cap)]), h, {pid: pmax}, [(pid, cap)])] * full
                 if rem:
-                    shelves.append((frozenset([pid]), rem / cap, h, {pid: pmax}))
+                    shelves.append((frozenset([pid]), SK.shelf_fill([(pid, rem)]), h, {pid: pmax}, [(pid, rem)]))
             if split_shelves:
                 shelves = pair_partial_shelves(
                     shelves, lambda x: x[1], lambda x: x[2], lambda x: x[0],
-                    lambda a, b: (a[0] | b[0], a[1] + b[1], max(a[2], b[2]), {**a[3], **b[3]}))
+                    lambda a, b: (a[0] | b[0], SK.shelf_fill(a[4] + b[4]), max(a[2], b[2]),
+                                  {**a[3], **b[3]}, a[4] + b[4]),
+                    fits=lambda a, b: SK.fits_shelf(a[4] + b[4]))
             _rk = lambda x: min(PROFILE_HEIGHT_RANK.get(p_, 3) for p_ in x[0])
             shelves.sort(key=lambda x: (_rk(x), sorted(x[0])))
             if _cc_consol:
                 shelves.sort(key=lambda x: (-x[2], _rk(x), sorted(x[0])))
             carts = []
-            for pids, frac, h, pmx in shelves:
-                fits = [c for c in carts if len(c["sh"]) < CART_SHELVES and c["h"] + h <= CART_CEILING_IN
-                        and all(c["pc"][p_] < pmx[p_] for p_ in pids)]
+            for pids, frac, h, pmx, _its in shelves:
+                fits = [c for c in carts
+                        if len(c["sh"]) < min(CART_SHELVES, SK.max_shelves(set(c["pc"]) | set(pids)))
+                        and c["h"] + h <= CART_CEILING_IN and all(c["pc"][p_] < pmx[p_] for p_ in pids)]
                 if fits:
                     c = (min(fits, key=lambda c: (CART_CEILING_IN - c["h"] - h, len(c["sh"])))
                          if _cc_consol else fits[0])
@@ -2237,7 +2243,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             best = 0.0
             for c in carts:
                 hit = c["h"] + MIN_SHELF_CLEAR_IN > CART_CEILING_IN
-                slots = len(c["sh"]) if (hit and len(c["sh"]) < CART_SHELVES) else CART_SHELVES
+                _mx = min(CART_SHELVES, SK.max_shelves(set(c["pc"])))
+                slots = len(c["sh"]) if (hit or len(c["sh"]) >= _mx) else _mx
                 best = max(best, sum(c["sh"]) / slots)
             return best
 
@@ -2498,12 +2505,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
     prebuilt_alone = []          # stores whose only product this week is a pre-built cart
     def _sh_h(items):
-        """Clear height a shelf needs: its tallest product."""
-        return max(float(pack[it[0]]["clear_height_in"] or MIN_SHELF_CLEAR_IN) for it in items)
+        """Shelf rung (ShelfKit v3.68): the tallest product's rung; profiles the model does not
+        know use their packing-profile clear height."""
+        return max((float(SK.PROFILE_FIT[it[4]][2]) if it[4] in SK.PROFILE_FIT
+                    else float(pack[it[0]]["clear_height_in"] or MIN_SHELF_CLEAR_IN)) for it in items)
 
     def _sh_frac(items):
-        """Share of one shelf the items fill: each product's trays / its trays per shelf."""
-        return sum(it[1] / max(1, int(pack[it[0]]["trays_per_shelf"] or 1)) for it in items)
+        """Share of one CC shelf the items use, by real tray widths (ShelfKit width maths;
+        a leftover strip under 3 in counts as filled)."""
+        return SK.shelf_fill([(it[4], it[1]) for it in items])
 
     def _pack_store(store_id, olines):
         """Build one store's carts from its allocated lines (also used to re-pack a store
@@ -2571,7 +2581,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             shelves = pair_partial_shelves(
                 shelves, lambda sh: _sh_frac(sh[1]), lambda sh: _sh_h(sh[1]),
                 lambda sh: frozenset(it[4] for it in sh[1]),
-                lambda a, b: ((a if _sh_frac(a[1]) >= _sh_frac(b[1]) else b)[0], a[1] + b[1]))
+                lambda a, b: ((a if _sh_frac(a[1]) >= _sh_frac(b[1]) else b)[0], a[1] + b[1]),
+                fits=lambda a, b: SK.fits_shelf([(it[4], it[1]) for it in a[1] + b[1]]))
         # pack shelves into carts, tallest first; first-fit within 5 shelves / 95in / profile max
         shelves.sort(key=lambda s: (PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
         carts = []
@@ -2587,7 +2598,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             for it in items:
                 _pm.setdefault(it[4], int(pack[it[0]]["max_shelves"] or CART_SHELVES))
             fits = [c for c in carts
-                    if (len(c["shelves"]) < CART_SHELVES and c["height"] + h <= CART_CEILING_IN
+                    if (len(c["shelves"]) < min(CART_SHELVES, SK.max_shelves(set(c["prof_ct"]) | set(_pm)))
+                        and c["height"] + h <= CART_CEILING_IN
                         and all(c["prof_ct"][p_] < m_ for p_, m_ in _pm.items()))]
             if fits:
                 c = (min(fits, key=lambda c: (CART_CEILING_IN - c["height"] - h, len(c["shelves"])))
@@ -2602,7 +2614,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         carts = ded_carts + carts            # dedicated carts first; nothing else was packed onto them
         out = []
         for ci, c in enumerate(carts, 1):
-            ordered = sorted(c["shelves"], key=lambda s: (PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
+            ordered = sorted(c["shelves"], key=lambda s: (-_sh_h(s[1]), PROFILE_HEIGHT_RANK.get(s[0], 3), s[0]))
             contents = []
             for pos, (pid, items) in enumerate(ordered, 1):
                 for (sku_id, trays, units, kit, p) in items:
@@ -2618,13 +2630,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             # one tray each is NOT a full cart.
             shelf_eq = sum(min(1.0, _sh_frac(items)) for _, items in ordered)
             ceiling_hit = c["height"] + MIN_SHELF_CLEAR_IN > CART_CEILING_IN
-            slots = len(ordered) if (ceiling_hit and len(ordered) < CART_SHELVES) else CART_SHELVES
-            tray_fill = shelf_eq / slots
+            _maxsh = min(CART_SHELVES, SK.max_shelves({it[4] for _, its in ordered for it in its}))
+            slots = len(ordered) if (ceiling_hit or len(ordered) >= _maxsh) else _maxsh
+            tray_fill = shelf_eq / max(1, slots)
             phys_full = tray_fill >= min_cart_fill
             out.append({"cart_number": ci, "cart_type_id": "cc", "shelves_used": len(ordered),
                         "phys_full": phys_full, "tray_fill": round(tray_fill, 3),
                         "total_units": sum(x[3] for x in contents), "contents": contents,
-                        "is_full": len(ordered) >= CART_SHELVES, "is_flagged": False,
+                        "is_full": len(ordered) >= _maxsh, "is_flagged": False,
                         "wholesale_value": round(wh_value, 2), "wholesale_incomplete": wh_missing,
                         "delivered_cost": cart_cost,
                         "freight_pct": None if freight_pct is None else round(freight_pct, 4),
