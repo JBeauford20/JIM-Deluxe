@@ -50,6 +50,11 @@ CATALOG = [
          help="Jason's Week 49 brief (item 10), Josh 11/25: D stores get 70 days (10 weeks) to sell a "
               "delivery, so they build one full cart and are serviced less often. 0 = the normal "
               "cadence. Never applies to H2O/Terrarium, and never past a product's freshness window."),
+    dict(key="fill_open_positions", group="Minimum order and carts",
+         label="Fill empty tray positions on carts already shipping", kind="bool", default=True,
+         help="Jason's Week 49 brief item 9: fill all shelf positions, not just a percentage of the cart. "
+              "Empty positions on a store's carts are filled with products it has proven it sells, within "
+              "weeks of supply, tray limits and supply. Never adds a cart; H2O/Terrarium are never filler."),
     dict(key="split_shelves", group="Minimum order and carts",
          label="Two different products may share one shelf", kind="bool", default=True,
          help="Josh 11/25. Two part-filled shelves of different products are combined onto one shelf when "

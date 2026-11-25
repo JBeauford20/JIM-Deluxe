@@ -3138,6 +3138,106 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         log(f"Wholesale target ${target_w:,.0f}: final ${tgt['final']:,.0f} "
             f"({'reached' if tgt['reached'] else 'NOT reached: no more demand-backed orders with supply'}) · "
             f"top-up {tgt['topup_lines']:,} lines / {tgt['topup_units']:,}u")
+    # FILL OPEN SHELF POSITIONS (Jason's Week 49 brief item 9: "Fill all shelf positions and
+    # secure trays, not just a nominal percentage of shelf count"; Josh 2026-11-25). A cart that
+    # passed the minimum fill may still have empty tray positions. Fill them on carts ALREADY
+    # going to the store — never a new cart or stop — with products the store has proven it
+    # sells: forecast demand within the grade's weeks of supply (D: the sell-down horizon) or up
+    # to the largest restock it sold through, inside tray limits and supply. H2O/Terrarium are
+    # never used as filler (§17 "do not add trays merely to complete a shelf or cart"); shelf-
+    # check, unreliable-inventory, directed and reactivated lines are left alone. AA/A/B first.
+    fillpos = {"enabled": str(S.get("fill_open_positions", True)).lower() not in ("false", "0", "no"),
+               "stores": 0, "lines": 0, "trays": 0, "units": 0, "wholesale": 0.0}
+    if fillpos["enabled"] and orders:
+        _wos_fp = {**{"AA": 10, "A": 10, "B": 8, "C+": 8, "C": 7, "C-": 6, "D": 6},
+                   **{k: v for k, v in (S.get("gap_fill_weeks_supply_by_grade") or {}).items() if v}}
+
+        def _fp_ceiling(l):
+            w = max(float(_wos_fp.get(l.get("grade"), 6)), sell_down_wk(l))
+            w = min(w, fresh_of.get(l["sku_id"], fresh_days) / 7.0)
+            t = int((l["fc"] * w - max(0.0, l.get("projected", 0.0))) // max(1, l["upt"]))
+            t = max(t, lot_trays(l), l.get("trays", 0))
+            if l.get("tray_cap") is not None:
+                t = min(t, max(l.get("trays", 0), l["tray_cap"]))
+            return t
+
+        _fp_by_store = defaultdict(list)
+        for (st_id, sk), l in ship.items():
+            if (st_id in orders and l.get("plannable") and sk in pack
+                    and (l["fc"] > 0 or (hist_fill and l.get("best_lot")))
+                    and l["family"] not in H2O_TERR_FAMILIES
+                    and (sku_info[sk].get("family") or "") != "Prebuilt Cart"
+                    and not l.get("directed_trays") and not l.get("variety_codes")
+                    and not l.get("reactivation") and not l.get("oh_conflict")
+                    and l.get("conf") != "UNUSABLE"):
+                _fp_by_store[st_id].append(l)
+        _fp_order = sorted(_fp_by_store, key=lambda s_: (-max(x.get("priority", 0) for x in _fp_by_store[s_]), s_))
+        for st_id in _fp_order:
+            if (stores.get(st_id) or {}).get("capacity_carts"):
+                continue
+            o = orders[st_id]
+            if not o["carts"]:
+                continue
+            deny = store_deny.get(st_id, NO_DENY)
+            n_carts = len(o["carts"])
+            _rel = any(c.get("econ_action") == "release" for c in o["carts"])
+            _w0 = sum(c["wholesale_value"] for c in o["carts"])
+            _hit = False
+            for l in sorted(_fp_by_store[st_id], key=lambda x: (-x.get("sku_fit", 0), -x["fc"], x["sku_id"])):
+                room = min(_fp_ceiling(l) - l.get("alloc_trays", 0), int(pools.left(l["sku_id"], deny) // l["upt"]))
+                if room <= 0:
+                    continue
+                _ot, _ou = l.get("alloc_trays", 0), l.get("alloc_units", 0)
+                _was_in = l in o["lines"]
+                _old_carts = o["carts"]
+
+                def _fits(t):
+                    l["alloc_trays"], l["alloc_units"] = _ot + t, _ou + t * l["upt"]
+                    if not _was_in and l not in o["lines"]:
+                        o["lines"].append(l)
+                    _pack_store(st_id, o["lines"])
+                    return len(orders[st_id]["carts"]) <= n_carts
+
+                lo, hi, best = 1, room, 0               # largest t that adds no cart
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    if _fits(mid):
+                        best, lo = mid, mid + 1
+                    else:
+                        hi = mid - 1
+                if best:
+                    _fits(best)
+                else:
+                    l["alloc_trays"], l["alloc_units"] = _ot, _ou
+                    if not _was_in and l in o["lines"]:
+                        o["lines"].remove(l)
+                    orders[st_id]["carts"] = _old_carts
+                o = orders[st_id]
+                if not best:
+                    continue
+                u = best * l["upt"]
+                pools.take(l["sku_id"], u, deny)
+                l["fill_position_trays"] = l.get("fill_position_trays", 0) + best
+                alloc_units_total += u
+                fillpos["lines"] += 1
+                fillpos["trays"] += best
+                fillpos["units"] += u
+                _hit = True
+            if _hit:
+                if _rel:
+                    for c in o["carts"]:
+                        c["econ_action"] = "release"
+                _dw = sum(c["wholesale_value"] for c in o["carts"]) - _w0
+                fillpos["stores"] += 1
+                fillpos["wholesale"] += _dw
+                decide("fill_open_positions",
+                       f"Empty tray positions on the store's {n_carts} cart(s) filled with proven products: "
+                       f"+${_dw:,.0f} wholesale, no extra cart (Jason's brief item 9)",
+                       store_id=st_id, severity="info", wholesale_added=round(_dw, 2))
+        fillpos["wholesale"] = round(fillpos["wholesale"], 2)
+        log(f"Fill open positions: {fillpos['stores']:,} stores, {fillpos['trays']:,} trays / "
+            f"{fillpos['units']:,}u (+${fillpos['wholesale']:,.0f}) on carts already shipping")
+
     # SUPPLY INVARIANT: no SKU is ever allocated beyond its availability (checked, not assumed)
     _alloc_by = defaultdict(int)
     for o_ in orders.values():
@@ -3646,6 +3746,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "dual_use_conversion": {k: v for k, v in dual.items() if k != "lines"} | {"lines": len(dual["lines"])},
         "cart_value_floor": cv_summary,
         "partial_cart_trim": {**trim, "wholesale": round(trim["wholesale"], 2)},
+        "fill_open_positions": fillpos,
         "stockout_recovery": so_summary,
         "onhand_check": oc_summary,
         "demand_history": _dh_summary,
