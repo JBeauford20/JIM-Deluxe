@@ -99,6 +99,10 @@ CATALOG = [
          default={"AA": .3, "A": .2, "B": .1, "C+": 0, "C": 0, "C-": 0, "D": 0}, min=0, max=2,
          help="Added to every line's store priority, so AA, A and B stores get scarce product, cart "
               "completion and held-store releases first."),
+    dict(key="require_full_shelves", group="Minimum order and carts",
+         label="Every shelf full (the fill % applies to carts, not shelves)", kind="bool", default=True,
+         help="Josh 11/25. A partial shelf is completed with more of the products already on it while each "
+              "tray still adds projected sales; otherwise it is cut. Then carts must reach the minimum cart fill."),
     dict(key="trim_partial_carts", group="Minimum order and carts",
          label="Ship full carts only: drop a store's trailing partial cart", kind="bool", default=True,
          help="Jason's Week 49 order (11/25): every cart fully packed. A store with more than one cart loses "

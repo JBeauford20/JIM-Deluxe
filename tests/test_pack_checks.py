@@ -43,7 +43,7 @@ def test_17cm_cart_limited_to_four_shelves_and_bowl_cap():
 def test_under_filled_shelf_flagged_and_shelf_order():
     c = {1: [("littles", 7, 3, 84)], 2: [("euro12", 2, 1, 12)]}
     titles = [f[2] for f in PC.check_cart(c)]
-    assert "Shelf under 80% full" in titles
+    assert "Shelf not full" in titles
     assert "Shelf order not tallest-first from shelf 1" in titles
 
 
@@ -81,3 +81,12 @@ def test_floor_sheets_one_file_per_route_tabs_ordered_and_no_assorted_names():
     totals = [v for v in vals if v[5] == "Shelf total"]
     assert totals[0][6] == 84 and totals[0][7] == 252
     assert all("Assorted" not in str(v[4] or "") for v in vals)
+
+
+def test_full_shelf_means_no_more_trays_fit():
+    import shelfkit as SK
+    assert SK.shelf_is_full([("euro12", 6)])          # 47.25 in, a 7th tray won't fit
+    assert not SK.shelf_is_full([("euro12", 5)])
+    assert SK.shelf_is_full([("littles", 7)]) and SK.shelf_is_full([("box17", 7)])
+    assert SK.shelf_is_full([("venti", 4)]) and SK.shelf_is_full([("hb12", 6)])
+    assert SK.shelf_fill([("euro12", 6)]) == 1.0      # a full shelf counts 100% toward cart fill

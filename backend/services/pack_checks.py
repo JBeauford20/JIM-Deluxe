@@ -64,8 +64,9 @@ def check_cart(layers):
         w = shelf_width([(p, t) for p, t, _, _ in its])
         if w > CC_FIT_IN + 1e-9:
             f.append(("High", "A", "Shelf too wide", f"layer {L}: {w:g} in across (max 51)"))
-        elif CC_SHELF_IN - w >= FILLED_STRIP_IN and w / CC_SHELF_IN < MIN_SHELF_FILL:
-            f.append(("Medium", "A", "Shelf under 80% full", f"layer {L}: {w:g} of 50.5 in ({w / CC_SHELF_IN:.0%})"))
+        elif not SK.shelf_is_full([(p, t) for p, t, _, _ in its]):
+            # Josh 2026-11-25: every shelf full (the 80% rule is per cart, not per shelf)
+            f.append(("Medium", "A", "Shelf not full", f"layer {L}: {w:g} of 50.5 in ({w / CC_SHELF_IN:.0%})"))
     bowl_t = sum(t for its in layers.values() for _, t, sk, _ in its if sk in BOWL_SKUS)
     if bowl_t > BOWL_MAX_PER_CART:
         f.append(("Medium", "C", "More than 3 H2O Bowl trays on a cart", f"{bowl_t} bowl trays"))

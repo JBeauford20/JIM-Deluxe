@@ -62,12 +62,22 @@ def fits_shelf(items):
     return shelf_width(items) <= CC_FIT_IN + 1e-9
 
 
+def shelf_is_full(items):
+    """Full = no further tray/box of any product already on the shelf fits across (or the
+    leftover strip is under 3 in). 6 standard trays (47.25 in) is a full shelf: a 7th won't fit."""
+    if not items:
+        return False
+    if CC_SHELF_IN - shelf_width(items) < FILLED_STRIP_IN:
+        return True
+    return all(shelf_width(list(items) + [(pid, 1)]) > CC_FIT_IN + 1e-9 for pid, _ in items)
+
+
 def shelf_fill(items):
-    """Share of the shelf used (0..1); a leftover strip under 3 in counts as filled."""
+    """Share of the shelf used (0..1): 1.0 when full (see shelf_is_full), else width / 50.5."""
     w = shelf_width(items)
     if w <= 0:
         return 0.0
-    if CC_SHELF_IN - w < FILLED_STRIP_IN:
+    if shelf_is_full(items):
         return 1.0
     return min(1.0, w / CC_SHELF_IN)
 
