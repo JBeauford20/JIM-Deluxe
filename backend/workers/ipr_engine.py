@@ -6148,6 +6148,34 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     cart_seq = 0
     template = {}
     unassigned_restricted = defaultdict(int)     # variety-restricted units left without a line
+    # Lines added by the late cart steps (cart completion candidates, second chance, stop budget,
+    # cart menu) never went through the gate / priority step. Give every line that reaches the
+    # write the fields the order rows and the evidence trail read (the live run of 11/25 stopped
+    # on a missing 'priority'; previews return before this point, so they never saw it).
+    for _o in orders.values():
+        _pr = [x["priority"] for x in _o["lines"] if x.get("priority") is not None]
+        _base_pr = min(_pr) if _pr else 0.0
+        for l in _o["lines"]:
+            if l.get("priority") is None:
+                l["priority"] = _base_pr
+            l.setdefault("sku_fit", 0.0)
+            l.setdefault("conversion", None)
+            l.setdefault("grade", grade.get((l["store_id"], l["family"]), "C"))
+            l.setdefault("risk", "Unknown")
+            l.setdefault("need", 0.0)
+            l.setdefault("cap_note", None)
+            l.setdefault("method", "added by cart building")
+            for _k in ("r2", "r4", "r10", "r13", "onhand", "projected"):
+                l.setdefault(_k, 0.0)
+            l.setdefault("conf", "LOW")
+            l.setdefault("oh_src", "n/a")
+            l.setdefault("inbound", 0)
+            l.setdefault("inbound_src", "none")
+            l.setdefault("trays", 0)
+            l.setdefault("alloc_trays", 0)
+            l.setdefault("alloc_units", 0)
+            if (l["store_id"], l["sku_id"]) not in ship and l.get("alloc_trays", 0) > 0:
+                ship[(l["store_id"], l["sku_id"])] = l          # so its evidence line is written
     for store_id in sorted(orders):
         o2 = orders[store_id]
         oid = str(uuid.uuid4())
@@ -6159,10 +6187,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         top_recency = max(rec.get((l["store_id"], l["sku_id"]), 0.0) for l in lns)
         order_rows.append((oid, run_id, store_id, "draft", round(best["priority"] * 100, 2),
                            round(top_fam_vel, 4), round(top_recency, 4),
-                           service[fk][1], RISK_SCORE[best["risk"]],
+                           (service.get(fk) or (None, None))[1], RISK_SCORE.get(best["risk"], 0),
                            (anchor - fam_lastdel[fk]).days if fam_lastdel[fk] else None,
                            len(o2["carts"]), sum(l["alloc_units"] for l in lns), False,
-                           service[fk][1], True))
+                           (service.get(fk) or (None, None))[1], True))
         for c in o2["carts"]:
             cart_seq += 1
             cid = str(uuid.uuid4())
