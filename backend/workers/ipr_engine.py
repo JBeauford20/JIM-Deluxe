@@ -2331,9 +2331,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
         _cc_by_store = defaultdict(list)
         for l in ship.values():
-            if (l["plannable"] and not l.get("variety_codes") and l["sku_id"] in pack
+            if (l["plannable"] and not l.get("variety_codes") and not l.get("directed_trays")
+                    and l["sku_id"] in pack
                     and (sku_info[l["sku_id"]].get("family") or "") != "Prebuilt Cart"):
-                _cc_by_store[l["store_id"]].append(l)
+                _cc_by_store[l["store_id"]].append(l)      # routine lines only (directed ship as approved)
 
         def _cc_state(ls, trays_of):
             state = {}
@@ -2350,7 +2351,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # qualified gap-fill, and is kept only if one cart ends up full.
         short = []
         for st_id, ls in _cc_by_store.items():
-            if st_id in directed_stores or not any(l.get("alloc_trays", 0) > 0 for l in ls):
+            # stores with a directed shipment too (Josh 11/25): their ROUTINE lines must make a cart
+            # of at least min fill from demand-backed product, or the routine cart does not ship
+            if not any(l.get("alloc_trays", 0) > 0 for l in ls):
                 continue
             if _cc_best_fill(_cc_state(ls, lambda l: l.get("alloc_trays", 0))) < min_cart_fill:
                 short.append(st_id)
@@ -2810,7 +2813,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             "stores": 0, "carts": 0, "units": 0, "wholesale": 0.0}
     if trim["enabled"]:
         for store_id in sorted(orders):
-            if store_id in directed_stores or (stores.get(store_id) or {}).get("capacity_carts"):
+            # stores with a directed shipment are trimmed too (Jason 11/25 found 1-shelf routine carts
+            # riding with Bulbasaur): only carts holding a directed / named-variety line are protected
+            if (stores.get(store_id) or {}).get("capacity_carts"):
                 continue
             o = orders[store_id]
             if any(l.get("alloc_in_pool") for l in o["lines"]):
@@ -2822,9 +2827,16 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 if len(cs) <= 1:
                     break
                 by_sku_t = {l["sku_id"]: l for l in o["lines"]}
-                part = [c for c in cs if c["tray_fill"] < min_cart_fill - 1e-9
-                        and not any((by_sku_t.get(x[1]) or {}).get("directed_trays")
-                                    or (by_sku_t.get(x[1]) or {}).get("variety_codes") for x in c["contents"])]
+                _prot = lambda c: any((by_sku_t.get(x[1]) or {}).get("directed_trays")
+                                      or (by_sku_t.get(x[1]) or {}).get("variety_codes")
+                                      or (sku_info[x[1]].get("family") or "") == "Prebuilt Cart"
+                                      for x in c["contents"])
+                routine = [c for c in cs if not _prot(c)]
+                _cc_other = [c for c in cs if _prot(c) and not all(
+                    (sku_info[x[1]].get("family") or "") == "Prebuilt Cart" for x in c["contents"])]
+                if not routine or (len(routine) <= 1 and not _cc_other):
+                    break          # a store keeps one regular CC cart (a pre-built cart rides only with one)
+                part = [c for c in routine if c["tray_fill"] < min_cart_fill - 1e-9]
                 if not part:
                     break
                 c = min(part, key=lambda c_: (c_["wholesale_value"], -c_["cart_number"]))
@@ -2973,6 +2985,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     for store_id in sorted(orders):
         o = orders[store_id]
         n = len(o["carts"])
+        if not n:
+            continue                          # nothing left to ship (no cart to judge)
         W = sum(c["wholesale_value"] for c in o["carts"])
         C = n * cart_cost
         lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
@@ -3537,6 +3551,63 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             f"+{merge['trays_added']:,}/-{merge['trays_removed']:,} trays · net {merge['units_net']:+,}u · "
             f"{merge['locked_carts']:,} special carts untouched · rejected: {merge['rejected_checks']}")
 
+    # FINAL FULL-CART GUARD (Jason 11/25: one-shelf carts found in the live run). Steps after the
+    # trim (config merge edits carts in place) can leave a routine cart under the fill floor. At a
+    # store with more than one cart, every routine cart must meet min_cart_fill; one that does not
+    # is dropped and its trays go back to the pool. Directed / named-variety carts and pre-built
+    # carts are never dropped, and a store always keeps at least one cart.
+    guard = {"stores": 0, "carts": 0, "units": 0, "wholesale": 0.0}
+    if trim["enabled"]:
+        for store_id in sorted(orders):
+            o = orders[store_id]
+            if len(o["carts"]) <= 1:
+                continue
+            by_sku_g = {l["sku_id"]: l for l in o["lines"]}
+
+            def _protected(c):
+                return any((by_sku_g.get(x[1]) or {}).get("directed_trays")
+                           or (by_sku_g.get(x[1]) or {}).get("variety_codes")
+                           or (sku_info[x[1]].get("family") or "") == "Prebuilt Cart" for x in c["contents"])
+            drop = sorted((c for c in o["carts"] if c["tray_fill"] < min_cart_fill - 1e-9 and not _protected(c)),
+                          key=lambda c: (c["wholesale_value"], -c["cart_number"]))
+            if not drop:
+                continue
+            _routine_g = [c for c in o["carts"] if not _protected(c)]
+            _cc_other_g = [c for c in o["carts"] if _protected(c) and not all(
+                (sku_info[x[1]].get("family") or "") == "Prebuilt Cart" for x in c["contents"])]
+            _keep_min = 0 if _cc_other_g else 1     # a directed CC cart already carries the stop
+            if len(drop) > len(_routine_g) - _keep_min:
+                drop = drop[:max(0, len(_routine_g) - _keep_min)]
+            if not drop:
+                continue
+            _deny_g = store_deny.get(store_id, NO_DENY)
+            for c in drop:
+                for (_pos, sk, tr, u, _k, _pid) in c["contents"]:
+                    l = by_sku_g.get(sk)
+                    if not l:
+                        continue
+                    tr_, u_ = min(tr, l.get("alloc_trays", 0)), min(u, l.get("alloc_units", 0))
+                    l["alloc_trays"] -= tr_
+                    l["alloc_units"] -= u_
+                    l["trimmed_units"] = l.get("trimmed_units", 0) + u_
+                    pools.give_back(sk, u_, _deny_g)
+                    alloc_units_total -= u_
+                    guard["units"] += u_
+                guard["carts"] += 1
+                guard["wholesale"] += c["wholesale_value"]
+            o["carts"] = [c for c in o["carts"] if c not in drop]
+            for i, c in enumerate(o["carts"], 1):
+                c["cart_number"] = i
+            o["lines"] = [l for l in o["lines"] if l.get("alloc_trays", 0) > 0 or l.get("directed_trays")]
+            guard["stores"] += 1
+            decide("partial_cart_trimmed",
+                   f"Final check: {len(drop)} cart(s) under the {min_cart_fill:.0%} fill floor removed after "
+                   f"cart-config matching; trays back to the pool", store_id=store_id, severity="info",
+                   carts_cut=len(drop), stage="final_guard")
+        guard["wholesale"] = round(guard["wholesale"], 2)
+        log(f"Final full-cart guard: {guard['stores']:,} stores, {guard['carts']:,} under-filled carts removed "
+            f"({guard['units']:,}u, ${guard['wholesale']:,.0f})")
+
     # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
     # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
     # jute. Kit options per SKU come from every availability line: a grower-pot (1M) line can be
@@ -3937,6 +4008,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "cart_value_floor": cv_summary,
         "partial_cart_trim": {**trim, "wholesale": round(trim["wholesale"], 2)},
         "fill_open_positions": fillpos,
+        "final_full_cart_guard": guard,
         "stockout_recovery": so_summary,
         "onhand_check": oc_summary,
         "demand_history": _dh_summary,
