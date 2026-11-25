@@ -55,6 +55,18 @@ CATALOG = [
          help="Jason's Week 49 brief item 9: fill all shelf positions, not just a percentage of the cart. "
               "Empty positions on a store's carts are filled with products it has proven it sells, within "
               "weeks of supply, tray limits and supply. Never adds a cart; H2O/Terrarium are never filler."),
+    dict(key="demand_estimator", group="Demand and goal", label="Store x SKU demand estimate", kind="choice",
+         default="recovery", choices=["recovery", "compare", "engine"],
+         choice_labels={"recovery": "Jason's demand-recovery method sets demand and stock at receipt",
+                        "compare": "Engine blend sets demand; the recovery estimate is shown on each line",
+                        "engine": "Engine blend only"},
+         help="Recovery (Jason's Week 49 method): recent, November, summer, prior-December and successful-"
+              "delivery paces, price-screened; supply-light weighting; AA/A/B recovery toward the strongest "
+              "qualified pace; stock at receipt from recent receipts depleted to the delivery date."),
+    dict(key="receipt_lag_days", group="Demand and goal", label="Days from dispatch to store receipt",
+         kind="number", default=10, min=0, max=30,
+         help="Used by the demand-recovery estimate for receipts and the new shipment's arrival "
+              "(Jason's model: dispatch + 10 days)."),
     dict(key="marginal_allocation", group="Demand and goal",
          label="Only send a tray or box while it adds projected sales", kind="bool", default=True,
          help="Jason's Week 49 agent direction (11/25). Projected units sold = min(shipped x sellable share, "

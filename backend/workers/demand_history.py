@@ -187,6 +187,45 @@ def best_lot(sold, delivered, span=LAST_LOT_SPAN_WEEKS, window=BEST_LOT_WINDOW_W
     return best
 
 
+FAST_SHARE, FAST_WEEKS, MIN_WAVE_UNITS = 0.68, 5, 6
+
+
+def fast_waves(sold, delivered, span=LAST_LOT_SPAN_WEEKS, share=FAST_SHARE, weeks=FAST_WEEKS,
+               min_units=MIN_WAVE_UNITS):
+    """Successful exact store/SKU delivery waves (Jason's Week 49 method): a lot of at least
+    min_units that sold `share` of what was delivered within `weeks` weeks (68% in ~34 days).
+    Returns {pace (median weekly pace of fast waves), waves, mature} or None. Weekly bins,
+    weeks counted back from the anchor; only lots whose window has closed count."""
+    d_weeks = sorted((w for w, u in delivered.items() if (u or 0) > 0), reverse=True)
+    lots, cur = [], []
+    for w in d_weeks:
+        if cur and cur[0] - w > span:
+            lots.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        lots.append(cur)
+    paces, mature = [], 0
+    for lot in lots:
+        start = lot[0]
+        dlv = sum(float(delivered[w]) for w in lot)
+        if dlv < min_units or start - weeks + 1 < 0:
+            continue
+        mature += 1
+        cum = 0.0
+        for k in range(weeks):
+            cum += max(0.0, float(sold.get(start - k, 0) or 0))
+            if cum >= share * dlv:
+                paces.append(cum / (k + 1))
+                break
+    if not paces:
+        return {"pace": None, "waves": 0, "mature": mature} if mature else None
+    paces.sort()
+    m = len(paces) // 2
+    med = paces[m] if len(paces) % 2 else (paces[m - 1] + paces[m]) / 2
+    return {"pace": med, "waves": len(paces), "mature": mature}
+
+
 def typical_week(values):
     """What sold repeatedly: the mean of available weeks with the single biggest week capped at
     the second biggest, so one spike (an ad, a holiday) never sets the routine rate."""
@@ -369,7 +408,8 @@ def load(cur, anchor, fresh_of, fresh_default_days, dedup_deliveries_sql, stores
         first = next((wb for wb in range(n_all - 1, -1, -1) if av[wb]), None)
         lines[k] = dict(r4=r4, a4=a4, r10=r10, a10=a10, r13=r13, a13=a13, a_total=a_total,
                         first_avail_wb=first, last_lot=last_lot(s, deliv.get(k, {})),
-                        best_lot=best_lot(s, deliv.get(k, {})))
+                        best_lot=best_lot(s, deliv.get(k, {})),
+                        fast=fast_waves(s, deliv.get(k, {})))
 
     periods = benchmark_periods(anchor, ship_month)
     bench, index = benchmarks(hist, periods, min_w, min_share)

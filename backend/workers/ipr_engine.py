@@ -36,6 +36,7 @@ import demand_history
 import inbound_timing
 import store_lead
 import demand_forecast as DF
+import demand_recovery as DR
 import shelfkit as SK
 import store_rules
 from db_conn import get_conn
@@ -783,6 +784,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if pk_month in pk_idx:
             peak_rate = {k: b[0] for k, b in H["bench"].items() if b[0] > 0}
         peak_label = f"{H['periods'][0]} benchmark"
+    # DEMAND RECOVERY ESTIMATOR (Jason's Week 49 demand method, 2026-11-25; workers/demand_recovery.py):
+    # store x SKU weekly demand from a hierarchy of stocked-period evidence and stock at receipt
+    # from recent receipts. recovery = it sets each line's forecast and projected stock; engine =
+    # the engine's own blend (the estimator is still computed and shown on the line for review).
+    est_mode = str(S.get("demand_estimator", "recovery") or "engine").lower()
+    est_lag = int(float(S.get("receipt_lag_days", 10) or 10))
+    est_in, est_win = ({}, None)
+    if est_mode in ("recovery", "compare"):
+        est_in, est_win = DR.load_inputs(cur, anchor, est_lag, DEDUP_DELIVERIES)
+    est_receipt = shipping_week + timedelta(days=est_lag)
+    est_receipt_day = (est_receipt - anchor).days
+    est_stats = {"mode": est_mode, "receipt_lag_days": est_lag, "receipt_date": str(est_receipt),
+                 "lines": 0, "lines_rate_up": 0, "lines_rate_down": 0, "sources": Counter()}
     # Stockout recovery (Jason's review 11/24, Madison's Climb-itt accessories: 215 delivered in
     # March, 188 sold by July, nothing since, and the engine planned 0 trays). The starved-line
     # floor sizes every quiet line at peak_floor_share of its benchmark because a quiet line may
@@ -1347,6 +1361,25 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                           f"typical week {_b[0]:.1f}u/wk x {so_idx:.2f} seasonal index")
             else:
                 _so = None
+        _est = None
+        if est_in and not _dir:
+            _fw = ((H["lines"].get((store_id, sku_id)) or {}).get("fast") or {}) if H else {}
+            _est = DR.line_estimate(
+                est_in.get((store_id, sku_id)), est_win, store_cadence(store_id)[0],
+                int((pack.get(sku_id) or {}).get("units_per_tray") or 1),
+                float((sku_info.get(sku_id) or {}).get("wholesale_price_whl") or 0) or None,
+                est_receipt_day, est_receipt, exact_success_pace=_fw.get("pace"), success=_fw.get("pace"))
+            if _est and est_mode == "recovery":
+                est_stats["lines"] += 1
+                est_stats["sources"][_est["source"]] += 1
+                if _est["rate"] > fc + 1e-9:
+                    est_stats["lines_rate_up"] += 1
+                elif _est["rate"] < fc - 1e-9:
+                    est_stats["lines_rate_down"] += 1
+                _prev_fc, fc = fc, _est["rate"]
+                method = (f"demand recovery: {_est['source']} {fc:.1f}u/wk (baseline "
+                          f"{(_est.get('baseline') or 0):.1f}, strongest {(_est.get('strongest') or 0):.1f}"
+                          f"{', supply light' if _est.get('light') else ''}; engine estimate {_prev_fc:.1f})")
         # approved scenario demand multipliers (clamped; the parser never touches the engine —
         # this deterministic application is the only path, and every hit is counted for audit)
         for _a in scn_mult:
@@ -1452,6 +1485,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         else:
             stock_at_arrival, inbound_later, lost_before = None, [], 0.0
             projected = max(0.0, oh_adj + inbound - before_arrival)
+        if _est and est_mode == "recovery":
+            projected = float(_est.get("stock") or 0.0)      # recent receipts depleted to receipt (credited once)
         cover_days = projected / (fc / 7.0) if fc else 999
 
         if conf == "UNUSABLE" or store_id in edi_gap:
@@ -1491,6 +1526,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             acc_hist=bool(sv["w13"] > 0 or (((H["lines"].get((store_id, sku_id)) or {}).get("last_lot") or {})
                                              .get("sold_since", 0) > 0 if H else False)),
             best_lot=((H["lines"].get((store_id, sku_id)) or {}).get("best_lot") if H else None),
+            demand_estimate=({k: (round(v, 3) if isinstance(v, float) else v) for k, v in _est.items()}
+                             if _est else None),
             stockout_recovery=(dict(_so[0], benchmark=round(_so[1][0], 2), period=_so[1][1]) if _so else None))
         # scenario floor/cap, computed ONCE here (value_numeric is SHELVES) and pre-bounded to
         # the store's selling pace — §17's 13-week window for H2O/Terrarium, the sell-through
@@ -3894,6 +3931,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "shipment_forecast": forecast_summary,
+        "demand_estimator": {**est_stats, "sources": dict(est_stats["sources"])},
         "tray_limits": tl_summary,
         "dual_use_conversion": {k: v for k, v in dual.items() if k != "lines"} | {"lines": len(dual["lines"])},
         "cart_value_floor": cv_summary,
