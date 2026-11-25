@@ -22,6 +22,7 @@ order_carts/cart_shelves/order_line_allocations/cart_config_templates*) so the R
 Exchange, pack plans, Aster export, Cart Configs and editor all work unchanged.
 """
 import json
+import os
 import math
 import re
 import uuid
@@ -39,6 +40,8 @@ import demand_forecast as DF
 import demand_recovery as DR
 import shelfkit as SK
 import stop_rules as SR
+import cart_menu as CM
+import master_flex as MF
 import store_rules
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
@@ -3695,7 +3698,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # pre-built carts never change. Done before kits, Aster lines and the totals below.
     merge = {"enabled": False, "configs_before": 0, "configs_after": 0, "carts_changed": 0,
              "swaps": 0, "trays_added": 0, "trays_removed": 0, "units_net": 0}
-    if str(S.get("config_merge", True)).lower() not in ("false", "0", "no"):
+    # weekly cart menu (below) replaces config merge while it is on
+    max_cfg = int(S.get("max_cart_configs", 50) or 0)
+    _menu_on = max_cfg > 0 and str(S.get("cart_menu_mode", "master_flex") or "master_flex").strip().lower() != "off"
+    if _menu_on:
+        merge["skipped"] = "weekly cart menu on (max_cart_configs, cart_menu_mode): it sets the configs"
+    if not _menu_on and str(S.get("config_merge", True)).lower() not in ("false", "0", "no"):
         merge["enabled"] = True
         _mx = int(S.get("config_merge_max_changes", 2) or 0)
         _wos_m = {**{"AA": 10, "A": 10, "B": 8, "C+": 8, "C": 7, "C-": 6, "D": 6},
@@ -3948,6 +3956,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
               "wholesale_added_by_deepening": 0.0, "readmitted": 0, "admitted_new": 0,
               "carts_admitted": 0, "wholesale_admitted": 0.0, "rounds": 0, "exceptions": {}}
     _held_by_rule = set()                         # stores held on purpose by the stop rule
+    _budget_hold = None                           # the stop-budget hold pass, re-run after the cart menu
 
     def _is_routine(l):
         return not (l.get("directed_trays") or l.get("variety_codes")
@@ -4634,6 +4643,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 return changed
 
             _deep_st = set()
+            _budget_hold = _hold_pass
             _hold_pass()
             for _rnd in range(8):
                 budget["rounds"] += 1
@@ -4767,6 +4777,578 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if _over2:
         raise ValueError(f"Allocation exceeds supply after the stop-minimum rebuild for {len(_over2)} SKU(s): "
                          f"{dict(list(_over2.items())[:5])}")
+
+    # WEEKLY CART MENU (leadership 11/25: at most max_cart_configs unique cart configurations a
+    # week, directed and pre-built included; the pack team builds carts from named kits). The
+    # menu is chosen from this week's own routine carts (each already physically valid and full
+    # under ShelfKit): greedy, at most K = max - (directed / pre-built configs) builds, each pick
+    # the cart that lets the stores keep the most projected sold $. Then every store's routine
+    # carts are handed back and it receives, best stores first, the set of menu carts (same
+    # number as before at most) with the highest projected sold $ F(q,h) that passes, for THAT
+    # store: products it sells (eligible line, not held, store rules / variety bans, no
+    # restricted-variety handling tag), tray caps (per line, H2O/Terrarium own need and store
+    # limit, accessory boxes), supply, and blended projected sell-through >= cart_min_sellthrough.
+    # A cart no menu build qualifies for is dropped (trays back to the pool). Products a store
+    # has never sold are not placed (unproven units = 0). Then the stop budget is re-checked.
+    menu_mode = str(S.get("cart_menu_mode", "master_flex") or "master_flex").strip().lower()
+    if menu_mode not in ("master_flex", "match", "off"):
+        menu_mode = "master_flex"
+    menu = {"enabled": max_cfg > 0 and menu_mode != "off", "max_cart_configs": max_cfg, "mode": menu_mode}
+    if menu["enabled"]:
+        def _msig(c):
+            return CM.cart_signature(c["contents"], c.get("handling_tag"))
+
+        _prot_sigs, _locked, _rstores, _tmpl = set(), set(), {}, {}
+        _before_wh, _before_carts, _before_cfg = 0.0, 0, set()
+        for st_id in sorted(orders):
+            o = orders[st_id]
+            by = {l["sku_id"]: l for l in o["lines"]}
+            rc, mixed = [], False
+            for c in o["carts"]:
+                _before_cfg.add(_msig(c))
+                has_r = _cart_has_routine(c, by)
+                has_p = any(not _is_routine(by.get(x[1]) or {"sku_id": x[1]}) for x in c["contents"])
+                if has_r and has_p or (has_r and c.get("handling_tag")):
+                    mixed = True
+                if has_r and not has_p:
+                    rc.append(c)
+            if mixed or (stores.get(st_id) or {}).get("capacity_carts"):
+                _locked.add(st_id)              # left as is: its carts count as fixed configs
+            for c in o["carts"]:
+                if st_id in _locked or not _cart_has_routine(c, by):
+                    _prot_sigs.add(_msig(c))
+            if st_id in _locked or not rc:
+                continue
+            _rstores[st_id] = len(rc)
+            _before_carts += len(rc)
+            _before_wh += sum(c["wholesale_value"] for c in rc)
+            for c in rc:
+                sig = _msig(c)
+                ph = SR.cart_physical(c["contents"], skip_fullness=True)
+                if (sig not in _tmpl and c["tray_fill"] >= min_cart_fill - 1e-9 and not ph["shelves_too_wide"]
+                        and not ph["over_height"] and not ph["over_shelf_cap"]
+                        and not _routine_shelves_not_full(c, by)):
+                    _tmpl[sig] = c
+        K = max(0, max_cfg - len(_prot_sigs))
+        menu.update(configs_before=len(_before_cfg), fixed_configs=len(_prot_sigs), routine_slots=K,
+                    routine_carts_before=_before_carts, routine_wholesale_before=round(_before_wh, 2),
+                    stores=len(_rstores), templates=len(_tmpl), locked_stores=len(_locked))
+        _tq = {}
+        for sig, c in _tmpl.items():
+            q_ = defaultdict(int)
+            for (_p, sk, tr, _u, _k, _pid) in c["contents"]:
+                q_[sk] += tr
+            _tq[sig] = dict(q_)
+        # each store's current routine trays (its approved order: always eligible, caps floor)
+        _cur_tr = {st_id: defaultdict(int) for st_id in _rstores}
+        _elig = {st_id: {} for st_id in _rstores}
+        for st_id in _rstores:
+            for l in orders[st_id]["lines"]:
+                if _is_routine(l) and l.get("alloc_trays", 0) > 0:
+                    _cur_tr[st_id][l["sku_id"]] += l["alloc_trays"]
+                    _elig[st_id][l["sku_id"]] = l
+        _tmpl_skus = {sk for q_ in _tq.values() for sk in q_}
+        for src in (ship, lines):
+            for (st_, sk_), l in src.items():
+                if st_ not in _rstores or sk_ not in _tmpl_skus or sk_ in _elig[st_]:
+                    continue
+                if not (_is_routine(l) and l.get("plannable") and sk_ in pack and l.get("fc", 0) > 0
+                        and l["fc"] >= min_rate and not l.get("oh_conflict") and l.get("conf") != "UNUSABLE"
+                        and not l.get("reactivation") and (st_, sk_) not in held):
+                    continue
+                if store_rule.get(st_) and not store_rules.sku_allowed(store_rule[st_], sku_info[sk_],
+                                                                       directed=False)[0]:
+                    continue
+                _dn = store_deny.get(st_)
+                if _dn and pools.denied_supply(sk_, _dn) > 0:
+                    continue                    # would need a restricted-variety handling tag
+                _elig[st_][sk_] = l
+        _ht_cur = {st_id: sum(t for sk, t in _cur_tr[st_id].items()
+                              if (_elig[st_id].get(sk) or {}).get("family") in H2O_TERR_FAMILIES)
+                   for st_id in _rstores}
+        _ht_free = {st_id: any((l.get("tray_cap") or 0) > ht_max for l in _elig[st_id].values()
+                               if l["family"] in H2O_TERR_FAMILIES) for st_id in _rstores}
+        _sold_memo, _eval_memo = {}, {}
+
+        def _sold(st_id, l, u):
+            k_ = (st_id, l["sku_id"], u)
+            v_ = _sold_memo.get(k_)
+            if v_ is None:
+                v_ = _sold_memo[k_] = DF.sold_units(u, l["fc"], max(0.0, l.get("projected", 0.0)),
+                                                    line_horizon(l), mg_a, line_f(l)) * usd(l)
+            return v_
+
+        _live = {"on": False}
+
+        def _evaluate(st_id, ms):
+            """Projected sold $ of this set of menu carts at the store, or None if it does not
+            qualify (eligibility, caps, sell-through; supply too once _live is on)."""
+            key = (st_id, tuple(sorted(ms)))
+            if key in _eval_memo:
+                r_ = _eval_memo[key]
+            else:
+                q_ = defaultdict(int)
+                for m in ms:
+                    for sk, tr in _tq[m].items():
+                        q_[sk] += tr
+                num = den = 0.0
+                ht = 0
+                r_ = None
+                ok_ = True
+                for sk, tr in q_.items():
+                    l = _elig[st_id].get(sk)
+                    if l is None:
+                        ok_ = False
+                        break
+                    c0 = _cur_tr[st_id].get(sk, 0)
+                    if l.get("tray_cap") is not None and tr > max(l["tray_cap"], c0):
+                        ok_ = False
+                        break
+                    if l["family"] in H2O_TERR_FAMILIES:
+                        if tr > max(l.get("trays", 0), c0):
+                            ok_ = False
+                            break
+                        ht += tr
+                    u = tr * l["upt"]
+                    num += _sold(st_id, l, u)
+                    den += u * usd(l)
+                if ok_ and ht_store_max > 0 and not _ht_free[st_id] and ht > max(ht_store_max, _ht_cur[st_id]):
+                    ok_ = False
+                if ok_ and not (cart_st_min > 0 and den and num / den < cart_st_min - 1e-9):
+                    r_ = (num, dict(q_))
+                _eval_memo[key] = r_
+            if r_ is None:
+                return None
+            if _live["on"]:
+                deny = store_deny.get(st_id, NO_DENY)
+                for sk, tr in r_[1].items():
+                    if tr * _elig[st_id][sk]["upt"] > pools.left(sk, deny):
+                        return None
+            return r_[0]
+
+        def _dump_menu_inputs(path):
+            """Debug hook (IPR_DUMP_MENU_INPUTS=<path>): everything the cart-menu step needs, so a
+            menu builder can be developed offline against this week's data. Preview use only."""
+            import pickle as _pk
+            _lf = lambda l: {"sku_id": l["sku_id"], "fc": l.get("fc", 0.0), "projected": max(0.0, l.get("projected", 0.0)),
+                             "upt": l["upt"], "family": l["family"], "tray_cap": l.get("tray_cap"),
+                             "trays": l.get("trays", 0), "accessory": bool(l.get("accessory")),
+                             "h": line_horizon(l), "f": line_f(l), "usd": usd(l), "priority": l.get("priority", 0),
+                             "whl": float((sku_info.get(l["sku_id"]) or {}).get("wholesale_price_whl") or 0),
+                             "alloc_units": l.get("alloc_units", 0)}
+            st_out = {}
+            for st_id in _rstores:
+                o_ = orders[st_id]
+                cand = {}
+                for sk, l in _elig[st_id].items():
+                    cand[sk] = _lf(l)
+                _dn = store_deny.get(st_id)
+                st_out[st_id] = {"n_carts": _rstores[st_id], "region": (stores.get(st_id) or {}).get("region") or "?",
+                                 "grade": store_cadence(st_id)[0],
+                                 "priority": max((l.get("priority", 0) for l in o_["lines"]), default=0),
+                                 "prot_carts": sum(1 for c in o_["carts"]
+                                                   if not _cart_has_routine(c, {l["sku_id"]: l for l in o_["lines"]})),
+                                 "cur_trays": dict(_cur_tr[st_id]), "eligible": cand,
+                                 "ht_free": _ht_free[st_id], "ht_cur": _ht_cur[st_id],
+                                 "denied_skus": sorted(sk for sk in pack if _dn and pools.denied_supply(sk, _dn) > 0)}
+            # all routine-eligible lines of the menu stores for ANY sku (proven or not), for test items
+            any_lines = defaultdict(dict)
+            for src in (ship, lines):
+                for (st_, sk_), l in src.items():
+                    if st_ in _rstores and sk_ in pack and _is_routine(l) and sk_ not in any_lines[st_]:
+                        any_lines[st_][sk_] = dict(_lf(l), plannable=bool(l.get("plannable")),
+                                                   held=(st_, sk_) in held, oh_conflict=bool(l.get("oh_conflict")),
+                                                   conf=l.get("conf"), reactivation=bool(l.get("reactivation")),
+                                                   rule_ok=not (store_rule.get(st_) and not store_rules.sku_allowed(
+                                                       store_rule[st_], sku_info[sk_], directed=False)[0]))
+            others = []
+            for st_id, o_ in orders.items():
+                if st_id in _rstores:
+                    continue
+                for l in o_["lines"]:
+                    if l.get("alloc_units", 0) > 0 and not (l.get("directed_trays") or l.get("variety_codes")):
+                        others.append(dict(_lf(l), store_id=st_id, grade=store_cadence(st_id)[0]))
+            other_stops = [{"store_id": st_id, "region": (stores.get(st_id) or {}).get("region") or "?",
+                            "carts": len(o_["carts"])} for st_id, o_ in orders.items()
+                           if st_id not in _rstores and o_["carts"]]
+            supply = {sk: int(pools.left(sk)) for sk in pack if pools.left(sk) > 0}
+            pk = {sk: {"profile_id": v["profile_id"], "trays_per_shelf": int(v["trays_per_shelf"] or 1),
+                       "max_shelves": int(v["max_shelves"] or CART_SHELVES),
+                       "clear_height_in": float(v["clear_height_in"] or MIN_SHELF_CLEAR_IN),
+                       "upt": int(v.get("units_per_tray") or 1),
+                       "family": (sku_info.get(sk) or {}).get("family"),
+                       "ipr_family": (sku_info.get(sk) or {}).get("ipr_family"),
+                       "description": (sku_info.get(sk) or {}).get("description"),
+                       "whl": float((sku_info.get(sk) or {}).get("wholesale_price_whl") or 0)}
+                  for sk, v in pack.items()}
+            tmpls = {i: [tuple(x) for x in c["contents"]] for i, c in enumerate(_tmpl.values())}
+            cur_carts = {st_id: [[tuple(x) for x in c["contents"]] for c in orders[st_id]["carts"]
+                                 if _cart_has_routine(c, {l["sku_id"]: l for l in orders[st_id]["lines"]})]
+                         for st_id in _rstores}
+            _pk.dump({"stores": st_out, "any_lines": dict(any_lines), "others": others,
+                      "other_stops": other_stops, "supply": supply, "pack": pk, "templates": tmpls,
+                      "cur_carts": cur_carts, "fixed_configs": len(_prot_sigs), "routine_carts_before": _before_carts,
+                      "routine_wholesale_before": _before_wh,
+                      "settings": {"min_cart_fill": min_cart_fill, "cart_st_min": cart_st_min, "ht_max": ht_max,
+                                   "ht_store_max": ht_store_max, "max_cfg": max_cfg, "mg_a": mg_a,
+                                   "CART_SHELVES": CART_SHELVES, "CART_CEILING_IN": CART_CEILING_IN,
+                                   "MIN_SHELF_CLEAR_IN": MIN_SHELF_CLEAR_IN, "truck_cap": truck_cap,
+                                   "max_spt": max_spt, "cart_cost": cart_cost, "min_rate": min_rate,
+                                   "PROFILE_HEIGHT_RANK": dict(PROFILE_HEIGHT_RANK),
+                                   "H2O_TERR_FAMILIES": sorted(H2O_TERR_FAMILIES),
+                                   "split_shelves": split_shelves, "consolidate": consolidate}},
+                     open(path, "wb"))
+            log(f"Cart-menu inputs dumped to {path}")
+
+        if menu_mode == "match":
+            # hand every participating store's routine trays back first (the menu re-deals them)
+            _cfg_free_units = {}
+            for st_id in _rstores:
+                o = orders[st_id]
+                deny = store_deny.get(st_id, NO_DENY)
+                _cfg_free_units[st_id] = 0
+                for l in o["lines"]:
+                    if not _is_routine(l) or l.get("alloc_trays", 0) <= 0:
+                        continue
+                    u = int(l.get("alloc_units", 0) or 0)
+                    if not l.get("alloc_in_pool"):
+                        pools.give_back(l["sku_id"], u, deny)
+                    l.pop("alloc_in_pool", None)
+                    alloc_units_total -= u
+                    _cfg_free_units[st_id] += u
+                    l["menu_prev_trays"] = l["alloc_trays"]
+                    l["alloc_units"] = l["alloc_trays"] = 0
+            if os.environ.get("IPR_DUMP_MENU_INPUTS"):
+                _dump_menu_inputs(os.environ["IPR_DUMP_MENU_INPUTS"])
+            _fits = defaultdict(list)
+            for m in _tmpl:
+                for st_id in _rstores:
+                    if _evaluate(st_id, [m]) is not None:
+                        _fits[m].append(st_id)
+            _menu, _ = CM.select_menu(_rstores, list(_tmpl), _evaluate, K, fits=_fits)
+            # assign, best stores first, against the live pool
+            _live["on"] = True
+            _prio = lambda st_: (-max((l.get("priority", 0) for l in orders[st_]["lines"]), default=0), st_)
+            _use = Counter()
+            _use_st = defaultdict(set)
+            dropped = {"carts": 0, "stores_emptied": 0, "wholesale": 0.0, "stores": 0}
+            _menu_ids = {m: i + 1 for i, m in enumerate(_menu)}
+            for st_id in sorted(_rstores, key=_prio):
+                o = orders[st_id]
+                n0 = _rstores[st_id]
+                old_wh = sum(c["wholesale_value"] for c in o["carts"]
+                             if _cart_has_routine(c, {l["sku_id"]: l for l in o["lines"]}))
+                got, _v = CM.best_set(st_id, n0, [m for m in _menu if st_id in set(_fits[m])], _evaluate)
+                deny = store_deny.get(st_id, NO_DENY)
+                q_ = defaultdict(int)
+                for m in got:
+                    for sk, tr in _tq[m].items():
+                        q_[sk] += tr
+                for sk, tr in q_.items():
+                    l = _elig[st_id][sk]
+                    u = tr * l["upt"]
+                    pools.take(sk, u, deny)
+                    l["alloc_trays"], l["alloc_units"] = tr, u
+                    l["deferred_units"] = 0
+                    l["menu_trays"] = tr
+                    ship[(st_id, sk)] = l
+                    alloc_units_total += u
+                prot_lines = [l for l in o["lines"] if not _is_routine(l) and l.get("alloc_trays", 0) > 0]
+                by0 = {l["sku_id"]: l for l in o["lines"]}
+                prot_carts = [c for c in o["carts"] if not _cart_has_routine(c, by0)]
+                new_lines = prot_lines + [_elig[st_id][sk] for sk in q_]
+                for l in o["lines"]:
+                    if _is_routine(l) and l.get("menu_prev_trays") and l["sku_id"] not in q_:
+                        l["deferred_units"] = l["menu_prev_trays"] * l["upt"]
+                carts = list(prot_carts)
+                for m in got:
+                    t = _tmpl[m]
+                    c = {k_: v_ for k_, v_ in t.items() if k_ not in ("contents", "handling_tag", "cart_number")}
+                    c["contents"] = [(p, sk, tr, tr * _elig[st_id][sk]["upt"], None, pid)
+                                     for (p, sk, tr, _u, _k, pid) in t["contents"]]
+                    c["menu_build"] = _menu_ids[m]
+                    carts.append(c)
+                    _use[m] += 1
+                    _use_st[m].add(st_id)
+                for i, c in enumerate(carts, 1):
+                    c["cart_number"] = i
+                new_wh = sum(_tmpl[m]["wholesale_value"] for m in got)
+                if len(got) < n0:
+                    dropped["carts"] += n0 - len(got)
+                    dropped["stores"] += 1
+                    dropped["wholesale"] += max(0.0, old_wh - new_wh) if not got else 0.0
+                    decide("cart_menu_dropped",
+                           f"{n0 - len(got)} of {n0} routine cart(s) dropped: no build on this week's cart menu "
+                           f"({len(_menu)} routine builds, {max_cfg} configs max) qualifies for this store "
+                           f"(its products, tray limits, supply, {cart_st_min:.0%} blended sell-through). "
+                           f"Trays back to the pool.", store_id=st_id, severity="info", carts_dropped=n0 - len(got))
+                if carts:
+                    orders[st_id] = {"lines": new_lines, "carts": carts}
+                else:
+                    del orders[st_id]
+                    dropped["stores_emptied"] += 1
+            _after_wh = sum(_tmpl[m]["wholesale_value"] * n for m, n in _use.items())
+            dropped["wholesale"] = round(max(0.0, _before_wh - _after_wh), 2)
+            menu_hold = 0
+            if _budget_hold is not None:
+                _hs0 = sum(1 for d_ in decisions if d_[0] == "held_stop_budget")
+                _budget_hold()
+                menu_hold = sum(1 for d_ in decisions if d_[0] == "held_stop_budget") - _hs0
+            _shelves = lambda c: [{"shelf": p, "items": [{"sku_id": sk, "description": sku_info[sk].get("description"),
+                                                          "profile": pid, "trays": tr}
+                                                         for (p2, sk, tr, _u, _k, pid) in c["contents"] if p2 == p]}
+                                  for p in sorted({x[0] for x in c["contents"]})]
+            _live_use = Counter()
+            _live_st = defaultdict(set)
+            for st_id, o in orders.items():
+                for c in o["carts"]:
+                    if c.get("menu_build"):
+                        _live_use[c["menu_build"]] += 1
+                        _live_st[c["menu_build"]].add(st_id)
+            menu.update(
+                routine_builds=len(_menu), routine_carts_after=sum(_live_use.values()),
+                routine_wholesale_after=round(sum(c["wholesale_value"] for o in orders.values() for c in o["carts"]
+                                                  if c.get("menu_build")), 2),
+                carts_dropped_no_menu_cart=dropped["carts"], stores_with_carts_dropped=dropped["stores"],
+                stores_emptied=dropped["stores_emptied"], wholesale_lost=dropped["wholesale"],
+                stops_held_after_menu=menu_hold, unproven_units=0, unproven_stores=0,
+                builds=sorted(({"build": _menu_ids[m], "carts": _live_use.get(_menu_ids[m], 0),
+                                "stores": len(_live_st.get(_menu_ids[m], ())),
+                                "units": sum(x[3] for x in _tmpl[m]["contents"]),
+                                "wholesale": _tmpl[m]["wholesale_value"],
+                                "tray_fill": _tmpl[m]["tray_fill"], "shelves": _shelves(_tmpl[m])}
+                               for m in _menu), key=lambda b: -b["carts"]))
+            log(f"Cart menu: {len(_menu)} routine builds (+{len(_prot_sigs)} directed / pre-built configs, max "
+                f"{max_cfg}) · routine carts {_before_carts} -> {menu['routine_carts_after']} · ${_before_wh:,.0f} -> "
+                f"${menu['routine_wholesale_after']:,.0f} · {dropped['carts']} carts dropped "
+                f"({dropped['stores_emptied']} stores emptied) · {menu_hold} stops held after re-check")
+        else:
+            # MASTER + FLEX (Josh 11/25, Jason's packing recommendation): the cap counts MASTER
+            # configurations — a cart's base shelves (5 shelves: 3 base + 2 flex; 4: 2 + 2; 3:
+            # 1 + 2) — so stores keep their own demand on two flex shelves. 1) Regroup, zero
+            # quantity change: each store's single-profile full shelves are re-split into full
+            # single-SKU shelves first (same shelves per profile per cart, so heights, shelf caps
+            # and fill are unchanged) and each cart's base shelves are chosen (with same-profile
+            # swaps between a store's carts) so masters are shared. 2) Only if that leaves too
+            # many masters: the rarest master is dissolved, its carts' base shelves replaced by a
+            # kept master's (same shelf rung, no 17cm change, profile shelf caps kept) when the
+            # store takes it — its products, tray caps, supply, blended sell-through.
+            def _rung(b):
+                return max(float(SK.PROFILE_FIT[pid][2]) if pid in SK.PROFILE_FIT
+                           else float(pack[sk]["clear_height_in"] or MIN_SHELF_CLEAR_IN) for sk, _t, pid in b)
+
+            _pmax = defaultdict(lambda: CART_SHELVES)
+            for sk_, v_ in pack.items():
+                _pmax[v_["profile_id"]] = min(_pmax[v_["profile_id"]], int(v_["max_shelves"] or CART_SHELVES))
+            _cap_of = lambda pid, skus: min(int(pack[sk]["trays_per_shelf"] or 1) for sk in skus)
+            _mcarts = []
+            for st_id in sorted(_rstores):
+                o = orders[st_id]
+                by = {l["sku_id"]: l for l in o["lines"]}
+                rc = [c for c in o["carts"] if _cart_has_routine(c, by)]
+                builds = []
+                for c in rc:
+                    layers = defaultdict(list)
+                    for (p, sk, tr, _u, _k, pid) in c["contents"]:
+                        layers[p].append((sk, tr, pid))
+                    builds.append([tuple(sorted(v)) for _p, v in sorted(layers.items())])
+                for c, b in zip(rc, MF.regroup_store(builds, _cap_of)):
+                    _mcarts.append({"store": st_id, "shelves": b, "orig": c})
+            MF.choose_bases(_mcarts)
+            _regroup_masters = len({c["master"] for c in _mcarts})
+            _q = {st_id: Counter(_cur_tr[st_id]) for st_id in _rstores}
+            _val = {}
+
+            def _eval_q(st_id, q_):
+                num = den = 0.0
+                ht = 0
+                for sk, tr in q_.items():
+                    if tr <= 0:
+                        continue
+                    l = _elig[st_id].get(sk)
+                    if l is None:
+                        return None
+                    c0 = _cur_tr[st_id].get(sk, 0)
+                    if l.get("tray_cap") is not None and tr > max(l["tray_cap"], c0):
+                        return None
+                    if l["family"] in H2O_TERR_FAMILIES:
+                        if tr > max(l.get("trays", 0), c0):
+                            return None
+                        ht += tr
+                    u = tr * l["upt"]
+                    num += _sold(st_id, l, u)
+                    den += u * usd(l)
+                if ht_store_max > 0 and not _ht_free[st_id] and ht > max(ht_store_max, _ht_cur[st_id]):
+                    return None
+                if cart_st_min > 0 and den and num / den < cart_st_min - 1e-9:
+                    return None
+                return num
+
+            for st_id in _rstores:
+                _val[st_id] = _eval_q(st_id, _q[st_id]) or 0.0
+
+            def _delta(old, new):
+                d = Counter()
+                for b in new:
+                    for sk, tr, _ in b:
+                        d[sk] += tr
+                for b in old:
+                    for sk, tr, _ in b:
+                        d[sk] -= tr
+                return d
+
+            def _compat(s_, mb):
+                return _rung(s_) == _rung(mb) and ("box17" in MF.shelf_pids(s_)) == ("box17" in MF.shelf_pids(mb))
+
+            def _judge(c, new):
+                cnt = Counter(pid for b in new for pid in MF.shelf_pids(b))
+                if any(k > _pmax[pid] for pid, k in cnt.items()):
+                    return None
+                st_id = c["store"]
+                deny = store_deny.get(st_id, NO_DENY)
+                q2 = Counter(_q[st_id])
+                for sk, t in _delta(c["shelves"], new).items():
+                    q2[sk] += t
+                    if t > 0:
+                        l = _elig[st_id].get(sk)
+                        if l is None or t * l["upt"] > pools.left(sk, deny):
+                            return None
+                v = _eval_q(st_id, q2)
+                return None if v is None else v - _val[st_id]
+
+            def _apply(c, old, new):
+                nonlocal_units = 0                  # units net of this change
+                st_id = c["store"]
+                deny = store_deny.get(st_id, NO_DENY)
+                for sk, t in _delta(old, new).items():
+                    if not t:
+                        continue
+                    l = _elig[st_id][sk]
+                    u = t * l["upt"]
+                    if t > 0:
+                        pools.take(sk, u, deny)
+                    else:
+                        pools.give_back(sk, -u, deny)
+                    _q[st_id][sk] += t
+                    nonlocal_units += u
+                _val[st_id] = _eval_q(st_id, _q[st_id]) or 0.0
+                _units_net[0] += nonlocal_units
+
+            _units_net = [0]
+            _moves, _mcount = MF.standardise(_mcarts, K, _judge, _apply, _compat)
+            alloc_units_total += _units_net[0]
+            # commit the store lines and rebuild the routine carts from their shelves
+            _chg = {"units_added": 0, "units_removed": 0, "stores": set(), "wholesale_delta": 0.0}
+            for c, old, new in _moves:
+                for sk, t in _delta(old, new).items():
+                    u = t * _elig[c["store"]][sk]["upt"]
+                    _chg["units_added" if u > 0 else "units_removed"] += abs(u)
+                    _chg["wholesale_delta"] += u * float((sku_info.get(sk) or {}).get("wholesale_price_whl") or 0)
+                    if t:
+                        _chg["stores"].add(c["store"])
+            by_store = defaultdict(list)
+            for c in _mcarts:
+                by_store[c["store"]].append(c)
+            for st_id, mcs in by_store.items():
+                o = orders[st_id]
+                for sk, tr in _q[st_id].items():
+                    l = _elig[st_id][sk]
+                    if tr != l.get("alloc_trays", 0):
+                        l["master_flex_trays_before"] = l.get("alloc_trays", 0)
+                    l["alloc_trays"], l["alloc_units"] = tr, tr * l["upt"]
+                    if tr > 0:
+                        ship[(st_id, sk)] = l
+                by0 = {l["sku_id"]: l for l in o["lines"]}
+                keep = [l for l in o["lines"] if not _is_routine(l) and l.get("alloc_trays", 0) > 0]
+                keep += [_elig[st_id][sk] for sk, tr in sorted(_q[st_id].items()) if tr > 0]
+                prot_carts = [c for c in o["carts"] if not _cart_has_routine(c, by0)]
+                new_carts = list(prot_carts)
+                for mc in mcs:
+                    shelves = sorted(range(len(mc["shelves"])),
+                                     key=lambda i: (-_rung(mc["shelves"][i]),
+                                                    min(PROFILE_HEIGHT_RANK.get(p_, 3) for p_ in MF.shelf_pids(mc["shelves"][i])),
+                                                    mc["shelves"][i]))
+                    contents, flex = [], []
+                    for pos, i in enumerate(shelves, 1):
+                        if i not in mc["base_idx"]:
+                            flex.append(pos)
+                        for sk, tr, pid in mc["shelves"][i]:
+                            contents.append((pos, sk, tr, tr * _elig[st_id][sk]["upt"], None, pid))
+                    t = mc["orig"]
+                    wh = sum(x[3] * float((sku_info.get(x[1]) or {}).get("wholesale_price_whl") or 0) for x in contents)
+                    nc = {k_: v_ for k_, v_ in t.items() if k_ not in ("contents", "cart_number")}
+                    nc.update(contents=contents, total_units=sum(x[3] for x in contents), wholesale_value=round(wh, 2),
+                              freight_pct=round(cart_cost / wh, 4) if wh else None, low_value=wh < low_value_wh,
+                              wholesale_incomplete=sorted({x[1] for x in contents
+                                                           if not (sku_info[x[1]].get("wholesale_price_whl") or 0)}),
+                              master_key=mc["master"], flex_shelves=flex)
+                    new_carts.append(nc)
+                for i, c in enumerate(new_carts, 1):
+                    c["cart_number"] = i
+                orders[st_id] = {"lines": keep, "carts": new_carts}
+            # master ids over ALL carts: a directed / pre-built / locked cart is its own master
+            _all_m = Counter()
+            for st_id, o in orders.items():
+                for c in o["carts"]:
+                    if "master_key" not in c:
+                        c["master_key"] = ("fixed",) + _msig(c)
+                        c["flex_shelves"] = []
+                    _all_m[c["master_key"]] += 1
+            _mid = {m: i for i, (m, _n) in enumerate(sorted(_all_m.items(), key=lambda kv: (-kv[1], str(kv[0]))), 1)}
+            _flex_combos = defaultdict(set)
+            for o in orders.values():
+                for c in o["carts"]:
+                    c["master_id"] = _mid[c["master_key"]]
+                    _flex_combos[c["master_id"]].add(tuple(sorted(
+                        tuple(sorted((x[1], x[2]) for x in c["contents"] if x[0] == p)) for p in c["flex_shelves"])))
+            _mx_flex = int(S.get("max_flex_combos_per_master", 0) or 0)
+            _lim = _mx_flex or 4
+            _over = {m for m, v in _flex_combos.items() if len(v) > _lim}
+            _shared = sum(n for n in _all_m.values() if n > 1)
+            _ncarts = sum(_all_m.values())
+            _master_rows = []
+            for m, i in sorted(_mid.items(), key=lambda kv: kv[1]):
+                ex = next(c for o in orders.values() for c in o["carts"] if c["master_id"] == i)
+                _master_rows.append({
+                    "master_id": i, "carts": _all_m[m],
+                    "stores": len({st for st, o in orders.items() for c in o["carts"] if c["master_id"] == i}),
+                    "flex_combos": len(_flex_combos[i]), "fixed": m[0] == "fixed",
+                    "base_shelves": [] if m[0] == "fixed" else
+                    [[{"sku_id": sk, "description": sku_info[sk].get("description"), "trays": tr, "profile": pid}
+                      for sk, tr, pid in b] for b in m],
+                    "example_cart_wholesale": ex["wholesale_value"]})
+            _routine_after = [c for o in orders.values() for c in o["carts"] if c.get("master_key", ("fixed",))[0] != "fixed"]
+            menu.update(
+                mode="master_flex", masters=len(_all_m), routine_masters_after_regroup=_regroup_masters,
+                carts_per_master={str(k): v for k, v in sorted(Counter(_all_m.values()).items())},
+                carts_sharing_master=_shared, carts_sharing_master_pct=round(_shared / _ncarts, 4) if _ncarts else None,
+                distinct_full_carts=len({CM.cart_signature(c["contents"], c.get("handling_tag"))
+                                         for o in orders.values() for c in o["carts"]}),
+                flex_combos_max=max((len(v) for v in _flex_combos.values()), default=0),
+                flex_combo_limit_reported=_lim, masters_over_flex_limit=len(_over),
+                carts_on_masters_over_flex_limit=sum(_all_m[m] for m, i in _mid.items() if i in _over),
+                all_flex_carts=sum(1 for c in _routine_after if MF.n_base(c.get("shelves_used") or 0) == 0),
+                carts_moved_to_kept_master=len(_moves), units_added=_chg["units_added"],
+                units_removed=_chg["units_removed"], stores_changed=len(_chg["stores"]),
+                wholesale_delta=round(_chg["wholesale_delta"], 2), unproven_units=0, unproven_stores=0,
+                routine_carts_after=len(_routine_after),
+                routine_wholesale_after=round(sum(c["wholesale_value"] for c in _routine_after), 2),
+                carts_dropped_no_menu_cart=0, master_list=_master_rows)
+            log(f"Cart masters: {_regroup_masters} routine masters after regroup -> {len(_all_m)} masters in all "
+                f"(max {max_cfg}) · {len(_moves)} carts moved onto a kept master (+{_chg['units_added']:,}u / "
+                f"-{_chg['units_removed']:,}u at {len(_chg['stores'])} stores, ${_chg['wholesale_delta']:+,.0f}) · "
+                f"{_shared / max(1, _ncarts):.1%} of carts share a master")
+
+    # SUPPLY INVARIANT, after the cart menu
+    _alloc_by4 = defaultdict(int)
+    for o_ in orders.values():
+        for l in o_["lines"]:
+            _alloc_by4[l["sku_id"]] += int(l.get("alloc_units", 0) or 0)
+    _over4 = {sk: (u, sum(pools.total[sk].values())) for sk, u in _alloc_by4.items()
+              if sk in pools.total and sum(pools.total[sk].values()) and u > sum(pools.total[sk].values())}
+    if _over4:
+        raise ValueError(f"Allocation exceeds supply after the cart menu for {len(_over4)} SKU(s): "
+                         f"{dict(list(_over4.items())[:5])}")
 
     # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
     # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
@@ -5216,6 +5798,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         if _tot_s and u > _tot_s:
             _sup_over += 1
     _dl = (second.get("demand_lost_audit") or {}).get("stores")
+    # unique cart configurations as the exports key them: (position, sku, trays, kit) + handling tag
+    _cfg_count = Counter(CM.export_signature(c["contents"], c.get("handling_tag"))
+                         for o in orders.values() for c in o["carts"])
+    _cfg_dist = {str(k): v for k, v in sorted(Counter(_cfg_count.values()).items())}
+    menu.update(configs_after=len(_cfg_count), carts_per_config=_cfg_dist)
     _checks = [
         SR.check("projected_35day_routine_sellthrough", forecast_summary["sellthrough35"], sc_min_st, ">=",
                  "demand / sell-through"),
@@ -5244,6 +5831,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                  ">=", "demand / sell-through",
                  by_grade={g: round(v, 2) for g, v in sorted(_rw_grade.items(), key=lambda kv: str(kv[0]))}),
         SR.check("skus_over_supply", _sup_over, 0, "==", "supply"),
+        *([SR.check("master_cart_configs", menu.get("masters"), max_cfg, "<=", "pack team",
+                    carts_sharing_master_pct=menu.get("carts_sharing_master_pct"),
+                    carts_per_master=menu.get("carts_per_master")),
+           SR.check("flex_combos_per_master_over_limit", menu.get("masters_over_flex_limit"), 0, "==", "pack team",
+                    informational=not int(S.get("max_flex_combos_per_master", 0) or 0),
+                    limit=menu.get("flex_combo_limit_reported"), flex_combos_max=menu.get("flex_combos_max"),
+                    carts_on_masters_over_limit=menu.get("carts_on_masters_over_flex_limit"))]
+          if menu.get("mode") == "master_flex" and menu.get("enabled") else []),
+        SR.check("distinct_cart_configs", len(_cfg_count), max_cfg if max_cfg > 0 else 0, "<=", "pack team",
+                 informational=not (menu.get("enabled") and menu.get("mode") == "match"), carts_per_config=_cfg_dist,
+                 used_once=sum(1 for v in _cfg_count.values() if v == 1),
+                 carts_dropped_no_menu_cart=menu.get("carts_dropped_no_menu_cart", 0),
+                 unproven_units=menu.get("unproven_units", 0)),
     ]
     release_scorecard = SR.scorecard(_checks)
     log(f"Routing: {routing['carts']:,} carts / {routing['stops']:,} stops -> {routing['trucks']:,} trucks of "
@@ -5276,6 +5876,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "second_chance_carts": second,
         "stop_minimum": stopmin,
         "stop_budget": budget,
+        "cart_menu": menu,
         "routing_feasibility": routing,
         "release_scorecard": release_scorecard,
         "stockout_recovery": so_summary,

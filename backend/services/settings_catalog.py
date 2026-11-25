@@ -116,6 +116,26 @@ CATALOG = [
               "product up to what still sells the cart sell-through target of itself. On: its own order as the "
               "engine first built it is the starting point (as far as stock still allows) and the second cart "
               "is added on top with the same rules; every cart must still be full and the blend sell through."),
+    dict(key="cart_menu_mode", group="Minimum order and carts", label="How the weekly cart-configuration cap works",
+         kind="choice", default="master_flex", choices=["master_flex", "match", "off"],
+         choice_labels={"master_flex": "Master + flex: the cap counts master carts (base shelves); each cart may "
+                                       "carry two store-specific flex shelves",
+                        "match": "Every whole cart must be one of the weekly menu carts",
+                        "off": "No cap (report only)"},
+         help="Josh 11/25 with the pack team: a cart is a master (identical base shelves) plus up to two flex "
+              "shelves (5 shelves: 3 base + 2 flex; 4: 2 + 2; 3: 1 + 2). Stores' shelves are regrouped first "
+              "with no quantity change; base shelves are standardised only if still over the cap."),
+    dict(key="max_flex_combos_per_master", group="Minimum order and carts",
+         label="Most flex-shelf combinations per master (0 = no limit, reported at 4)", kind="int", default=0,
+         min=0, max=50, help="Jason's recommendation is 4. Reported on the release scorecard; enforced as a "
+                             "scorecard check only when set above 0."),
+    dict(key="max_cart_configs", group="Minimum order and carts",
+         label="Most cart configurations per week (masters in master + flex mode)", kind="int", default=50, min=0, max=500,
+         help="Leadership 11/25: the pack team builds carts from named kits. The engine picks a weekly menu of "
+              "routine cart builds from this week's own full carts (directed and pre-built configs count toward "
+              "the limit) and gives every store the menu carts that best fit its demand, within its rules, tray "
+              "limits, supply and the cart sell-through target. A cart no menu build qualifies for is dropped. "
+              "0 turns the menu off (configs are then only matched by the config-merge step)."),
     dict(key="truck_cart_capacity", group="Minimum order and carts",
          label="Carts per truck (routing check)", kind="int", default=45, min=1, max=100,
          help="Used for the routing feasibility check and release scorecard: trucks = carts / this, rounded up."),
