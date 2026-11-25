@@ -177,25 +177,31 @@ def load_reference(cur, batch_id: str | None, sku_ids=None) -> dict:
                           dynamic_velocity_tier, store_status{extra} FROM stores""")
     stores = {r["store_id"]: dict(r) for r in cur.fetchall()}
     cur.execute("""SELECT k.sku_id, k.description, k.family, k.size_category, k.program,
-                          fm.ipr_family
-                   FROM skus k LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id""")
+                          fm.ipr_family, k.upc, pb.retail_price
+                   FROM skus k LEFT JOIN ipr_family_map fm ON fm.sku_id = k.sku_id
+                   LEFT JOIN pricebook_hd pb ON pb.sku_id = k.sku_id""")
     skus = {r["sku_id"]: dict(r) for r in cur.fetchall()}
     avail = {}
     if batch_id:
-        cur.execute("""SELECT id, sku_id, plant_id, code_level, hard_good_type, units_available
+        cur.execute("""SELECT id, sku_id, plant_id, code_level, hard_good_type, units_available,
+                              shipping_origin
                        FROM availability_lines WHERE batch_id = %s""", (batch_id,))
         avail = {str(r["id"]): dict(r) for r in cur.fetchall()}
     cur.execute("""SELECT aster_code, aster_name, code_level, hard_good_type, hd_sku_id
                    FROM aster_product_mapping WHERE active = true""")
     apm = [dict(r) for r in cur.fetchall()]
-    cur.execute("SELECT aster_code, product_name FROM variety_parsed_reference")
-    aster_names = {str(r["aster_code"]): r["product_name"] for r in cur.fetchall()}
+    cur.execute("SELECT aster_code, product_name, parsed_genus, parsed_variety FROM variety_parsed_reference")
+    _vp = cur.fetchall()
+    aster_names = {str(r["aster_code"]): r["product_name"] for r in _vp}
+    aster_parsed = {str(r["aster_code"]): (r["parsed_genus"], r["parsed_variety"]) for r in _vp}
     for m in apm:
         aster_names.setdefault(str(m["aster_code"]), m["aster_name"])
     cur.execute("""SELECT id, tray_width_mm, tray_depth_mm, units_per_tray, clear_height_in
                    FROM packing_profiles""")
     profiles = {r["id"]: dict(r) for r in cur.fetchall()}
-    return build_reference(stores, skus, avail, apm, aster_names, profiles)
+    ref = build_reference(stores, skus, avail, apm, aster_names, profiles)
+    ref["aster_parsed"] = aster_parsed
+    return ref
 
 
 def build_reference(stores, skus, avail, apm, aster_names, profiles) -> dict:
@@ -851,7 +857,27 @@ def build_pack_plan(model: dict, ref: dict):
         w.append([xl(L[h]) for h in LAYOUT_HEADERS])
     w.freeze_panes = "A2"
 
+    # Weekly check list (pack team guide 2026-11-25), worst first, on its own tab
+    try:
+        from services import pack_checks
+    except ImportError:                      # running from backend/services directly (tests)
+        import pack_checks
+    _names = config_names(model)
+    findings = pack_checks.run_checks(model, ref, rows, kit_name_of=_names)
+    w = wb.create_sheet("Checks")
+    w.append(["Severity", "Check", "Finding", "Route", "Kit", "Detail", "Carts", "File", "What to do"])
+    for c in w[1]:
+        c.font = Font(bold=True)
+    for f in findings:
+        w.append([f["severity"], f["check"], f["title"], xl(f["route"]), xl(f["kit"]), xl(f["detail"]),
+                  f["carts"], f["file"], f["fix"]])
+    for col, wd in zip("ABCDEFGHI", (9, 7, 38, 10, 18, 52, 7, 13, 60)):
+        w.column_dimensions[col].width = wd
+    w.freeze_panes = "A2"
+
     report = {
+        "checks": pack_checks.summarize(findings),
+        "checks_high": sum(1 for f in findings if f["severity"] == "High"),
         "sheet_rows": len(rows), "total_used": grand, "route_config_groups": len(layouts),
         "routes": sorted({r["Route"] for r in rows}), "unrouted_rows": sum(r["Route"] == UNROUTED for r in rows),
         "mix_rows": notes["mix_rows"], "rows_without_aster_code": notes["rows_without_aster_code"],

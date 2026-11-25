@@ -118,7 +118,7 @@ def test_pack_plan_conserves_units_and_mixes():
     assert layouts[0]["Shelf heights"] == "29 / 15" and layouts[0]["Height (in)"] == 44
     wb, rep = X.build_pack_plan(m, ref)
     assert wb.sheetnames == ["Bloomaker by Day", "Soil by Day", "Totals Used", "Routing Report",
-                             "Deductions", "Sheet", "Changes", "Availability Subs", "Cart Layouts"]
+                             "Deductions", "Sheet", "Changes", "Availability Subs", "Cart Layouts", "Checks"]
     assert [c.value for c in wb["Sheet"][1]] == X.PP_SHEET_HEADERS
     assert wb["Sheet"]["Q2"].value == "=D2*P2"
     assert [c.value for c in wb["Availability Subs"][1]] == X.SUBS_HEADERS

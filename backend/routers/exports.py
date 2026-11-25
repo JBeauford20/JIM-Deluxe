@@ -548,6 +548,37 @@ def export_ops_pack_plan(run_id: str,
                            "X-Rows-Without-Aster": str(rep["rows_without_aster_code"])})
 
 
+@router.get("/runs/{run_id}/pack-checks")
+def pack_plan_checks(run_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
+    """The pack team's weekly check list (guide 2026-11-25) on this run: findings worst first."""
+    from services import pack_checks
+    with get_db() as conn:
+        cur = cursor(conn)
+        model, ref = _v2_model(cur, run_id)
+    rows, _lay, _n = v2x.pack_plan_rows(model, ref)
+    findings = pack_checks.run_checks(model, ref, rows, kit_name_of=v2x.config_names(model))
+    return {"run_id": run_id, "summary": pack_checks.summarize(findings), "findings": findings}
+
+
+@router.get("/runs/{run_id}/floor-sheets.zip")
+def export_floor_sheets(run_id: str, user=Depends(require_role("order_writer", "manager", "admin"))):
+    """Floor sheets per routed route (one tab per cart build). Import routing first: carts not
+    on a load are left out and counted in X-Unrouted-Rows."""
+    from services import floor_sheets
+    with get_db() as conn:
+        cur = cursor(conn)
+        model, ref = _v2_model(cur, run_id)
+    rows, _lay, _n = v2x.pack_plan_rows(model, ref)
+    wk = v2x.week_number(model["run"]["shipping_week"])
+    data, rep = floor_sheets.build_floor_sheets(rows, ref, wk)
+    if not rep["files"]:
+        raise HTTPException(400, "No routed carts yet: import the routing workbook first")
+    return StreamingResponse(io.BytesIO(data), media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="Week {wk} Floor Sheets.zip"',
+        "X-Routes": str(rep["routes"]), "X-Unrouted-Rows": str(rep["unrouted_rows"]),
+        "X-Assorted-Codes": ",".join(rep["assorted_codes_for_catalog"])[:500]})
+
+
 @router.get("/runs/{run_id}/aster.csv")
 def export_aster_v2(run_id: str, include_draft: bool = Query(False),
                     user=Depends(require_role("manager", "admin"))):
