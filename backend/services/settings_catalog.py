@@ -72,6 +72,11 @@ CATALOG = [
          help="Jason's Week 49 agent direction (11/25). Projected units sold = min(shipped x sellable share, "
               "weeks x pace x stocked weekly rate - stock at receipt), over 35 days (D stores 70, never "
               "H2O/Terrarium). Every sizing and top-up step stops when the next pack would add too little."),
+    dict(key="cart_min_sellthrough", group="Demand and goal",
+         label="A completed cart must project at least this blended sell-through", kind="pct",
+         default=0.68, min=0.0, max=1.0,
+         help="Jason's direction: 68%+ blended sell-through for the cart over the store's selling window "
+              "(35 days; D 70), not a hard 68% gate per SKU. Applied when cart completion finishes a store's cart."),
     dict(key="marginal_pack_min_share", group="Demand and goal",
          label="Next pack must sell at least this share of its units in the window", kind="pct",
          default=0.5, min=0.05, max=1.0,
@@ -82,6 +87,11 @@ CATALOG = [
     dict(key="plant_sellable_fraction", group="Demand and goal",
          label="Sellable share of shipped plants (after loss / shelf allowance)", kind="pct",
          default=0.83, min=0.5, max=1.0, help="0.83 = 17% plant loss / shelf allowance. Hard goods use 1.0."),
+    dict(key="second_chance_carts", group="Minimum order and carts",
+         label="Retry pushed stores with stock freed later in the run", kind="bool", default=True,
+         help="Jason 11/25: build carts iteratively. After trims, shelf cuts and pushes free stock, each due "
+              "store without a routine cart gets a second build from its proven sellers (AA/A/B first); it "
+              "ships only with a full cart, every shelf full, and the blended sell-through target met."),
     dict(key="split_shelves", group="Minimum order and carts",
          label="Two different products may share one shelf", kind="bool", default=True,
          help="Josh 11/25. Two part-filled shelves of different products are combined onto one shelf when "

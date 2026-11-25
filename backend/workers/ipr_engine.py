@@ -847,6 +847,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     mg_share = float(S.get("marginal_pack_min_share", 0.5) or 0.5)
     mg_a = float(S.get("forecast_pace_factor", DF.BASE["a"]) or DF.BASE["a"])
     mg_f = float(S.get("plant_sellable_fraction", DF.BASE["f_plant"]) or DF.BASE["f_plant"])
+    cart_st_min = float(S.get("cart_min_sellthrough", 0.68) or 0)     # blended, grade horizon
 
     def line_horizon(l):
         return DF.horizon_weeks(store_cadence(l["store_id"])[0], l["family"],
@@ -1214,8 +1215,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     f"{cov:g} wks)" if l["tray_cap"] > ht_max else
                     f"H2O/Terrarium limit {ht_max} trays — full-price sales {_fp:.1f}u/wk do not support more")
         elif l.get("accessory") and acc_max > 0:
-            if acc_round_up and l.get("acc_hist") and l["plannable"] and need >= acc_min_share * l["upt"]:
-                trays = max(trays, int(math.ceil(need / l["upt"])))
+            if acc_round_up and l.get("acc_hist") and l["plannable"]:
+                # never expire: size over the selling window (35 days, D 70), whole boxes while a box
+                # sells at least accessory_round_up_min_share of itself (Jason: 504 one box, 509 two)
+                trays = max(trays, DF.ceiling_packs(l["fc"], max(0.0, l.get("projected", 0.0)),
+                                                    line_horizon(l), max(1, l["upt"]), mg_a, 1.0,
+                                                    min_share=acc_min_share))
             l["tray_cap"] = acc_max
             _why = f"Climb-itt accessory limit {acc_max} boxes per store"
         if l["tray_cap"] is not None and trays > l["tray_cap"]:
@@ -2335,6 +2340,42 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     and l["sku_id"] in pack
                     and (sku_info[l["sku_id"]].get("family") or "") != "Prebuilt Cart"):
                 _cc_by_store[l["store_id"]].append(l)      # routine lines only (directed ship as approved)
+        # Jason 11/25: completion must consider EVERY product with supported historical demand at the
+        # store, not only the SKUs base sizing gave trays. Lines with demand evidence whose base order
+        # rounded to zero join the pool (gates, store rules, blocked families, shelf checks and
+        # unreliable inventory still exclude; H2O/Terrarium are never filler).
+        cc_extra_added = 0
+        for (st_, sk_), l in lines.items():
+            if (st_, sk_) in ship or st_ not in _cc_by_store or sk_ not in pack:
+                continue
+            if (not l.get("plannable") or l.get("variety_codes") or l.get("directed_trays") or l["fc"] <= 0
+                    or l.get("oh_conflict") or l.get("conf") == "UNUSABLE" or l.get("reactivation")
+                    or l["family"] in H2O_TERR_FAMILIES
+                    or (sku_info[sk_].get("family") or "") == "Prebuilt Cart" or (st_, sk_) in held):
+                continue
+            if (service.get((st_, l["family"])) or ("",))[0] == "BLOCKED":
+                continue
+            _r = store_rule.get(st_)
+            if _r and not store_rules.sku_allowed(_r, sku_info[sk_], directed=False)[0]:
+                continue
+            _ev = l.get("demand_estimate") or {}
+            if not (_ev.get("rate") or l.get("best_lot") or (l.get("sales13") or 0) > 0):
+                continue                             # demand must be evidenced, not assumed
+            l.setdefault("alloc_trays", 0)
+            l.setdefault("alloc_units", 0)
+            l.setdefault("priority", min((x.get("priority", 0) for x in _cc_by_store[st_]), default=0))
+            l.setdefault("sku_fit", 0.0)
+            # fields the gate step sets on shipping lines
+            l.setdefault("grade", grade.get((st_, l["family"]), _cc_by_store[st_][0].get("grade")))
+            l.setdefault("service", "ELIGIBLE")
+            l.setdefault("conversion", None)
+            l.setdefault("conv_conf", "candidate added by cart completion")
+            l.setdefault("reactivation", None)
+            l.setdefault("trays_unreduced", 0)
+            l["cc_candidate"] = True
+            _cc_by_store[st_].append(l)
+            cc_extra_added += 1
+        completion["extra_candidates"] = cc_extra_added
 
         def _cc_state(ls, trays_of):
             state = {}
@@ -2413,8 +2454,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     # Jason's Week 49 brief: a store may get back up to the largest earlier
                     # restock it sold through ("successful exact store/SKU delivery sell-down")
                     ceiling = max(ceiling, int((_bl["units"] - max(0.0, l["projected"])) // l["upt"]))
-                if l.get("mcap") is not None:
-                    ceiling = min(ceiling, l["mcap"])          # next pack must add sales
+                if mg_on and not l.get("directed_trays"):
+                    # completion: a pack only has to add projected sales; the CART must reach the
+                    # blended sell-through target (Jason: 68% at the grade horizon, not per SKU)
+                    _D = DF.sellable_demand(l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l), mg_a)
+                    _p = max(1, l["upt"])
+                    # a product may go up to the quantity that still sells cart_min_sellthrough of
+                    # itself in the window (D / 0.68), never past a pack that adds no sales at all
+                    _st_cap = int(_D / (cart_st_min * _p)) if cart_st_min > 0 else 10 ** 6
+                    ceiling = min(ceiling, max(DF.ceiling_packs(l["fc"], max(0.0, l.get("projected", 0.0)),
+                                                                line_horizon(l), _p, mg_a, line_f(l),
+                                                                min_share=1e-6), _st_cap))
                 by_wos = max(l["trays"], ceiling) - have        # its own need always qualifies
                 if l.get("tray_cap") is not None:
                     by_wos = min(by_wos, max(l["trays"], l["tray_cap"]) - have)   # per-line tray limit
@@ -2485,6 +2535,20 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                         continue
                     state, fill, _used = trial, f2, _used + 1.0 / cap
                     tests.append((_sk, _med, _nc, _fam))
+            if fill >= min_cart_fill and mg_on and cart_st_min > 0:
+                _num = _den = 0.0
+                for l in ls:
+                    q = got[l["sku_id"]] * l["upt"]
+                    if q <= 0:
+                        continue
+                    v = usd(l)
+                    _num += DF.sold_units(q, l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l),
+                                          mg_a, line_f(l)) * v
+                    _den += q * v
+                if _den and _num / _den < cart_st_min:
+                    completion.setdefault("failed_sellthrough", 0)
+                    completion["failed_sellthrough"] += 1
+                    fill = 0.0                          # the completed cart would not sell through
             if fill < min_cart_fill:
                 completion["stores_short"] += 1     # nothing qualified completes the cart
                 _w = sum(1 for l in cands if _room(l)[2] <= 0)
@@ -2536,6 +2600,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     continue
                 if n > 0:
                     pools.take(l["sku_id"], n * l["upt"], deny)
+                    if (st_id, l["sku_id"]) not in ship:
+                        ship[(st_id, l["sku_id"])] = l      # proven seller added by completion
                 u_delta += (n - o) * l["upt"]
                 l["alloc_trays"], l["alloc_units"] = n, n * l["upt"]
                 gap = max(0, n - max(l["trays"], o))            # trays beyond the store's own need
@@ -2804,6 +2870,201 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # that pass ship whole (a trailing partial cart rides on the same stop).
     returned = defaultdict(int)     # sku -> units handed back by held (pushed/deferred) orders
     held_orders = {}                 # store -> its held order (lines keep deferred_units), for the target step
+    # EVERY SHELF FULL (Josh 2026-11-25: "80% fill means carts, not shelves — all shelves should be
+    # full"). A routine shelf is full when its trays leave less than a 3 in strip (ShelfKit). For each
+    # product profile that leaves a partial shelf at a store: first COMPLETE it with more trays of
+    # that profile's products the store sells, while each added tray still adds projected sales in
+    # the selling window, within supply and tray limits; otherwise CUT the partial shelf (its
+    # lowest-value trays go back to the pool). The store is re-packed with full shelves only. A
+    # store whose routine order no longer fills one cart to min fill loses its routine cart(s)
+    # (pushed to next week); directed / pre-built carts are never touched.
+    fullsh = {"enabled": str(S.get("require_full_shelves", True)).lower() not in ("false", "0", "no"),
+              "stores": 0, "shelves_completed": 0, "trays_added": 0, "shelves_cut": 0, "trays_cut": 0,
+              "units_added": 0, "units_cut": 0, "stores_routine_pushed": 0}
+    def _full_shelves_pass(stage, only=None):
+        """Every-shelf-full pass (complete partial shelves, else cut; push stores whose routine
+        order then fills no cart). Runs before the partial-cart trim and again after config merge."""
+        nonlocal alloc_units_total
+        def _is_prot_line(l):
+            return bool(l.get("directed_trays") or l.get("variety_codes")
+                        or (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart")
+
+        def _partial_profiles(o):
+            by = {l["sku_id"]: l for l in o["lines"]}
+            out = set()
+            for c in o["carts"]:
+                layers = defaultdict(list)
+                for (pos, sk, tr, u, kt, pid) in c["contents"]:
+                    layers[pos].append((pid, tr, sk))
+                for its in layers.values():
+                    if any(_is_prot_line(by.get(sk) or {"sku_id": sk}) for _, _, sk in its):
+                        continue
+                    if not SK.shelf_is_full([(pp, t) for pp, t, _ in its]):
+                        out |= {pp for pp, _, _ in its}
+            return out
+
+        def _next_units(l, extra_trays=0):
+            q = l.get("alloc_units", 0) + extra_trays * l["upt"]
+            return DF.marginal_units(q, l["upt"], l["fc"], max(0.0, l.get("projected", 0.0)),
+                                     line_horizon(l), mg_a, line_f(l))
+
+        _sh_order = sorted((s_ for s_ in orders if only is None or s_ in only),
+                           key=lambda s_: (-max((l.get("priority", 0) for l in orders[s_]["lines"]), default=0), s_))
+        for store_id in _sh_order:
+            o = orders.get(store_id)
+            if not o or not o["carts"]:
+                continue
+            if any(l.get("alloc_in_pool") for l in o["lines"]):
+                continue                 # trays already handed back by cart completion (pushed later)
+            deny = store_deny.get(store_id, NO_DENY)
+            touched = False
+            for _it in range(3):
+                bad = _partial_profiles(o)
+                if not bad:
+                    break
+                for pid in sorted(bad):
+                    plines = [l for l in o["lines"] if not _is_prot_line(l) and l["sku_id"] in pack
+                              and pack[l["sku_id"]]["profile_id"] == pid and l.get("alloc_trays", 0) > 0]
+                    if not plines:
+                        continue
+                    cap = max(1, int(pack[plines[0]["sku_id"]]["trays_per_shelf"] or 1))
+                    rem = sum(l["alloc_trays"] for l in plines) % cap
+                    if not rem:
+                        continue
+                    need = cap - rem
+                    # candidate lines of this profile at the store (shipping or not), best next tray first
+                    cands = [l for (st_, sk_), l in ship.items()
+                             if st_ == store_id and sk_ in pack and pack[sk_]["profile_id"] == pid
+                             and l.get("plannable") and not _is_prot_line(l) and not l.get("oh_conflict")
+                             and l.get("conf") != "UNUSABLE" and (l["fc"] > 0)]
+                    adds = defaultdict(int)
+                    for _k in range(need):
+                        best = None
+                        for l in cands:
+                            a = adds[id(l)]
+                            if l.get("tray_cap") is not None and l.get("alloc_trays", 0) + a + 1 > l["tray_cap"]:
+                                continue
+                            if pools.left(l["sku_id"], deny) < (a + 1) * l["upt"]:
+                                continue
+                            mu = _next_units(l, a)
+                            if mu <= 1e-9:
+                                continue
+                            v = mu * usd(l)
+                            if best is None or v > best[0]:
+                                best = (v, l)
+                        if not best:
+                            break
+                        adds[id(best[1])] += 1
+                    if sum(adds.values()) != need:
+                        # same product type cannot finish the shelf: try ANOTHER product the store
+                        # sells that shares the shelf (ShelfKit fit; two products per shelf max),
+                        # added only while each tray adds projected sales, within supply / limits
+                        adds = defaultdict(int)
+                        _base = [(pid, rem)]
+                        xc = []
+                        for (st_, sk_), l in ship.items():
+                            if (st_ != store_id or sk_ not in pack or not l.get("plannable") or _is_prot_line(l)
+                                    or l.get("oh_conflict") or l.get("conf") == "UNUSABLE" or l["fc"] <= 0
+                                    or l["family"] in H2O_TERR_FAMILIES):
+                                continue
+                            q = pack[sk_]["profile_id"]
+                            if q == pid:
+                                continue
+                            qcap = max(1, int(pack[sk_]["trays_per_shelf"] or 1))
+                            if sum(x.get("alloc_trays", 0) for x in o["lines"] if x["sku_id"] in pack
+                                   and pack[x["sku_id"]]["profile_id"] == q and not _is_prot_line(x)) % qcap:
+                                continue                      # q already leaves its own partial shelf
+                            xc.append((q, l))
+                        best = None
+                        for q, l in xc:
+                            t, units_gain = 0, 0.0
+                            while True:
+                                t += 1
+                                if not SK.fits_shelf(_base + [(q, t)]):
+                                    t = 0
+                                    break
+                                if (l.get("tray_cap") is not None and l.get("alloc_trays", 0) + t > l["tray_cap"]) \
+                                        or pools.left(l["sku_id"], deny) < t * l["upt"]:
+                                    t = 0
+                                    break
+                                mu = _next_units(l, t - 1)
+                                if mu <= 1e-9:
+                                    t = 0
+                                    break
+                                units_gain += mu
+                                if SK.shelf_is_full(_base + [(q, t)]):
+                                    break
+                            if t and (best is None or units_gain * usd(l) > best[0]):
+                                best = (units_gain * usd(l), l, t)
+                        if best:
+                            adds[id(best[1])] = best[2]
+                            cands = [best[1]]
+                            need = best[2]
+                    if sum(adds.values()) == need and need > 0:
+                        for l in cands:
+                            a = adds[id(l)]
+                            if not a:
+                                continue
+                            u = a * l["upt"]
+                            pools.take(l["sku_id"], u, deny)
+                            l["alloc_trays"] = l.get("alloc_trays", 0) + a
+                            l["alloc_units"] = l.get("alloc_units", 0) + u
+                            l["shelf_completion_trays"] = l.get("shelf_completion_trays", 0) + a
+                            if l not in o["lines"]:
+                                o["lines"].append(l)
+                            alloc_units_total += u
+                            fullsh["units_added"] += u
+                        fullsh["trays_added"] += need
+                        fullsh["shelves_completed"] += 1
+                    else:
+                        # cut the partial shelf: lowest-value last trays first
+                        left = rem
+                        while left > 0:
+                            l = min((x for x in plines if x.get("alloc_trays", 0) > 0),
+                                    key=lambda x: (_next_units(x, -1) * usd(x), x["sku_id"]))
+                            l["alloc_trays"] -= 1
+                            l["alloc_units"] -= l["upt"]
+                            l["shelf_cut_trays"] = l.get("shelf_cut_trays", 0) + 1
+                            pools.give_back(l["sku_id"], l["upt"], deny)
+                            alloc_units_total -= l["upt"]
+                            fullsh["units_cut"] += l["upt"]
+                            fullsh["trays_cut"] += 1
+                            left -= 1
+                        fullsh["shelves_cut"] += 1
+                    touched = True
+                _pack_store(store_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
+                o = orders[store_id]
+            if not touched:
+                continue
+            fullsh["stores"] += 1
+            by_g = {l["sku_id"]: l for l in o["lines"]}
+            _rc = [c for c in o["carts"] if not any(_is_prot_line(by_g.get(x[1]) or {"sku_id": x[1]})
+                                                     for x in c["contents"])]
+            if _rc and not any(c["tray_fill"] >= min_cart_fill - 1e-9 for c in _rc):
+                # routine order no longer fills one cart: routine trays back to the pool
+                for l in o["lines"]:
+                    if _is_prot_line(l) or not l.get("alloc_units"):
+                        continue
+                    pools.give_back(l["sku_id"], l["alloc_units"], deny)
+                    alloc_units_total -= l["alloc_units"]
+                    l["deferred_units"] = l["alloc_units"]
+                    l["alloc_units"] = l["alloc_trays"] = 0
+                keep = [l for l in o["lines"] if l.get("alloc_trays", 0) > 0]
+                fullsh["stores_routine_pushed"] += 1
+                decide("pushed_min_cart", "Routine order pushed to next week: with every shelf full it no "
+                                          f"longer fills one cart to {min_cart_fill:.0%} (Josh 11/25)",
+                       store_id=store_id, severity="info", stage="full_shelves")
+                if keep:
+                    _pack_store(store_id, keep)
+                else:
+                    del orders[store_id]
+        log(f"Every shelf full: {fullsh['stores']:,} stores · {fullsh['shelves_completed']:,} shelves completed "
+            f"(+{fullsh['units_added']:,}u) · {fullsh['shelves_cut']:,} partial shelves cut (-{fullsh['units_cut']:,}u) · "
+            f"{fullsh['stores_routine_pushed']:,} routine orders pushed")
+
+    if fullsh["enabled"]:
+        _full_shelves_pass("pre_trim")      # complete partial shelves before any cart is judged
+
     # FULL CARTS ONLY (Jason's Week 49 order, 11/25: "all carts fully allocated"): a store with
     # more than one cart drops a trailing cart filled below min_cart_fill — the lowest-value
     # partial cart's trays go back to the pool (re-offered to other stores' open space; this
@@ -2822,7 +3083,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 continue                 # cart completion could not fill it: trays already pooled, pushed below
             _deny_t = store_deny.get(store_id, NO_DENY)
             _cut_u, _cut_c, _cut_w = 0, 0, 0.0
-            for _i in range(8):
+            for _i in range(40):
                 cs = o["carts"]
                 if len(cs) <= 1:
                     break
@@ -2839,8 +3100,21 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 part = [c for c in routine if c["tray_fill"] < min_cart_fill - 1e-9]
                 if not part:
                     break
-                c = min(part, key=lambda c_: (c_["wholesale_value"], -c_["cart_number"]))
-                for (_pos, sk, tr, u, _k, _pid) in c["contents"]:
+                # Jason 11/25 (store 628): cutting a whole partial cart, repacking, then cutting the
+                # next abandoned demand that made more than one full cart. With several routine
+                # carts, cut ONE shelf at a time (the lowest-value shelf of the least-full cart) and
+                # repack, so the order settles on its full carts. A store's only routine cart that is
+                # short (beside a directed cart) goes whole: shelf cuts cannot fill it.
+                c = min(part, key=lambda c_: (c_["tray_fill"], c_["wholesale_value"], -c_["cart_number"]))
+                if len(routine) > 1:
+                    _lay = defaultdict(list)
+                    for x in c["contents"]:
+                        _lay[x[0]].append(x)
+                    _lv = lambda p_: sum(x[3] * float(sku_info[x[1]].get("wholesale_price_whl") or 0) for x in _lay[p_])
+                    _cut_items = _lay[min(_lay, key=lambda p_: (_lv(p_), p_))]
+                else:
+                    _cut_items = c["contents"]
+                for (_pos, sk, tr, u, _k, _pid) in _cut_items:
                     l = by_sku_t.get(sk)
                     if not l:
                         continue
@@ -2852,7 +3126,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     returned[sk] += u_
                     _cut_u += u_
                 _cut_c += 1
-                _cut_w += c["wholesale_value"]
+                _cut_w += sum(x[3] * float(sku_info[x[1]].get("wholesale_price_whl") or 0) for x in _cut_items)
                 _pack_store(store_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
                 o = orders[store_id]
             if _cut_c:
@@ -2862,7 +3136,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 trim["units"] += _cut_u
                 trim["wholesale"] += _cut_w
                 decide("partial_cart_trimmed",
-                       f"Trailing partial cart(s) removed so every cart ships full: {_cut_c} cart(s), "
+                       f"Partial shelves/carts removed so every cart ships full: {_cut_c} cut(s), "
                        f"{_cut_u:,}u, ${_cut_w:,.0f} back to the pool; the store keeps "
                        f"{len(o['carts'])} full cart(s) and its need is recalculated next week",
                        store_id=store_id, severity="info", carts_cut=_cut_c, units_cut=_cut_u,
@@ -3551,191 +3825,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             f"+{merge['trays_added']:,}/-{merge['trays_removed']:,} trays · net {merge['units_net']:+,}u · "
             f"{merge['locked_carts']:,} special carts untouched · rejected: {merge['rejected_checks']}")
 
-    # EVERY SHELF FULL (Josh 2026-11-25: "80% fill means carts, not shelves — all shelves should be
-    # full"). A routine shelf is full when its trays leave less than a 3 in strip (ShelfKit). For each
-    # product profile that leaves a partial shelf at a store: first COMPLETE it with more trays of
-    # that profile's products the store sells, while each added tray still adds projected sales in
-    # the selling window, within supply and tray limits; otherwise CUT the partial shelf (its
-    # lowest-value trays go back to the pool). The store is re-packed with full shelves only. A
-    # store whose routine order no longer fills one cart to min fill loses its routine cart(s)
-    # (pushed to next week); directed / pre-built carts are never touched.
-    fullsh = {"enabled": str(S.get("require_full_shelves", True)).lower() not in ("false", "0", "no"),
-              "stores": 0, "shelves_completed": 0, "trays_added": 0, "shelves_cut": 0, "trays_cut": 0,
-              "units_added": 0, "units_cut": 0, "stores_routine_pushed": 0}
     if fullsh["enabled"]:
-        def _is_prot_line(l):
-            return bool(l.get("directed_trays") or l.get("variety_codes")
-                        or (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart")
-
-        def _partial_profiles(o):
-            by = {l["sku_id"]: l for l in o["lines"]}
-            out = set()
-            for c in o["carts"]:
-                layers = defaultdict(list)
-                for (pos, sk, tr, u, kt, pid) in c["contents"]:
-                    layers[pos].append((pid, tr, sk))
-                for its in layers.values():
-                    if any(_is_prot_line(by.get(sk) or {"sku_id": sk}) for _, _, sk in its):
-                        continue
-                    if not SK.shelf_is_full([(pp, t) for pp, t, _ in its]):
-                        out |= {pp for pp, _, _ in its}
-            return out
-
-        def _next_units(l, extra_trays=0):
-            q = l.get("alloc_units", 0) + extra_trays * l["upt"]
-            return DF.marginal_units(q, l["upt"], l["fc"], max(0.0, l.get("projected", 0.0)),
-                                     line_horizon(l), mg_a, line_f(l))
-
-        _sh_order = sorted(orders, key=lambda s_: (-max((l.get("priority", 0) for l in orders[s_]["lines"]), default=0), s_))
-        for store_id in _sh_order:
-            o = orders.get(store_id)
-            if not o or not o["carts"]:
-                continue
-            deny = store_deny.get(store_id, NO_DENY)
-            touched = False
-            for _it in range(3):
-                bad = _partial_profiles(o)
-                if not bad:
-                    break
-                for pid in sorted(bad):
-                    plines = [l for l in o["lines"] if not _is_prot_line(l) and l["sku_id"] in pack
-                              and pack[l["sku_id"]]["profile_id"] == pid and l.get("alloc_trays", 0) > 0]
-                    if not plines:
-                        continue
-                    cap = max(1, int(pack[plines[0]["sku_id"]]["trays_per_shelf"] or 1))
-                    rem = sum(l["alloc_trays"] for l in plines) % cap
-                    if not rem:
-                        continue
-                    need = cap - rem
-                    # candidate lines of this profile at the store (shipping or not), best next tray first
-                    cands = [l for (st_, sk_), l in ship.items()
-                             if st_ == store_id and sk_ in pack and pack[sk_]["profile_id"] == pid
-                             and l.get("plannable") and not _is_prot_line(l) and not l.get("oh_conflict")
-                             and l.get("conf") != "UNUSABLE" and (l["fc"] > 0)]
-                    adds = defaultdict(int)
-                    for _k in range(need):
-                        best = None
-                        for l in cands:
-                            a = adds[id(l)]
-                            if l.get("tray_cap") is not None and l.get("alloc_trays", 0) + a + 1 > l["tray_cap"]:
-                                continue
-                            if pools.left(l["sku_id"], deny) < (a + 1) * l["upt"]:
-                                continue
-                            mu = _next_units(l, a)
-                            if mu <= 1e-9:
-                                continue
-                            v = mu * usd(l)
-                            if best is None or v > best[0]:
-                                best = (v, l)
-                        if not best:
-                            break
-                        adds[id(best[1])] += 1
-                    if sum(adds.values()) != need:
-                        # same product type cannot finish the shelf: try ANOTHER product the store
-                        # sells that shares the shelf (ShelfKit fit; two products per shelf max),
-                        # added only while each tray adds projected sales, within supply / limits
-                        adds = defaultdict(int)
-                        _base = [(pid, rem)]
-                        xc = []
-                        for (st_, sk_), l in ship.items():
-                            if (st_ != store_id or sk_ not in pack or not l.get("plannable") or _is_prot_line(l)
-                                    or l.get("oh_conflict") or l.get("conf") == "UNUSABLE" or l["fc"] <= 0
-                                    or l["family"] in H2O_TERR_FAMILIES):
-                                continue
-                            q = pack[sk_]["profile_id"]
-                            if q == pid:
-                                continue
-                            qcap = max(1, int(pack[sk_]["trays_per_shelf"] or 1))
-                            if sum(x.get("alloc_trays", 0) for x in o["lines"] if x["sku_id"] in pack
-                                   and pack[x["sku_id"]]["profile_id"] == q and not _is_prot_line(x)) % qcap:
-                                continue                      # q already leaves its own partial shelf
-                            xc.append((q, l))
-                        best = None
-                        for q, l in xc:
-                            t, units_gain = 0, 0.0
-                            while True:
-                                t += 1
-                                if not SK.fits_shelf(_base + [(q, t)]):
-                                    t = 0
-                                    break
-                                if (l.get("tray_cap") is not None and l.get("alloc_trays", 0) + t > l["tray_cap"]) \
-                                        or pools.left(l["sku_id"], deny) < t * l["upt"]:
-                                    t = 0
-                                    break
-                                mu = _next_units(l, t - 1)
-                                if mu <= 1e-9:
-                                    t = 0
-                                    break
-                                units_gain += mu
-                                if SK.shelf_is_full(_base + [(q, t)]):
-                                    break
-                            if t and (best is None or units_gain * usd(l) > best[0]):
-                                best = (units_gain * usd(l), l, t)
-                        if best:
-                            adds[id(best[1])] = best[2]
-                            cands = [best[1]]
-                            need = best[2]
-                    if sum(adds.values()) == need and need > 0:
-                        for l in cands:
-                            a = adds[id(l)]
-                            if not a:
-                                continue
-                            u = a * l["upt"]
-                            pools.take(l["sku_id"], u, deny)
-                            l["alloc_trays"] = l.get("alloc_trays", 0) + a
-                            l["alloc_units"] = l.get("alloc_units", 0) + u
-                            l["shelf_completion_trays"] = l.get("shelf_completion_trays", 0) + a
-                            if l not in o["lines"]:
-                                o["lines"].append(l)
-                            alloc_units_total += u
-                            fullsh["units_added"] += u
-                        fullsh["trays_added"] += need
-                        fullsh["shelves_completed"] += 1
-                    else:
-                        # cut the partial shelf: lowest-value last trays first
-                        left = rem
-                        while left > 0:
-                            l = min((x for x in plines if x.get("alloc_trays", 0) > 0),
-                                    key=lambda x: (_next_units(x, -1) * usd(x), x["sku_id"]))
-                            l["alloc_trays"] -= 1
-                            l["alloc_units"] -= l["upt"]
-                            l["shelf_cut_trays"] = l.get("shelf_cut_trays", 0) + 1
-                            pools.give_back(l["sku_id"], l["upt"], deny)
-                            alloc_units_total -= l["upt"]
-                            fullsh["units_cut"] += l["upt"]
-                            fullsh["trays_cut"] += 1
-                            left -= 1
-                        fullsh["shelves_cut"] += 1
-                    touched = True
-                _pack_store(store_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
-                o = orders[store_id]
-            if not touched:
-                continue
-            fullsh["stores"] += 1
-            by_g = {l["sku_id"]: l for l in o["lines"]}
-            _rc = [c for c in o["carts"] if not any(_is_prot_line(by_g.get(x[1]) or {"sku_id": x[1]})
-                                                     for x in c["contents"])]
-            if _rc and not any(c["tray_fill"] >= min_cart_fill - 1e-9 for c in _rc):
-                # routine order no longer fills one cart: routine trays back to the pool
-                for l in o["lines"]:
-                    if _is_prot_line(l) or not l.get("alloc_units"):
-                        continue
-                    pools.give_back(l["sku_id"], l["alloc_units"], deny)
-                    alloc_units_total -= l["alloc_units"]
-                    l["deferred_units"] = l["alloc_units"]
-                    l["alloc_units"] = l["alloc_trays"] = 0
-                keep = [l for l in o["lines"] if l.get("alloc_trays", 0) > 0]
-                fullsh["stores_routine_pushed"] += 1
-                decide("pushed_min_cart", "Routine order pushed to next week: with every shelf full it no "
-                                          f"longer fills one cart to {min_cart_fill:.0%} (Josh 11/25)",
-                       store_id=store_id, severity="info", stage="full_shelves")
-                if keep:
-                    _pack_store(store_id, keep)
-                else:
-                    del orders[store_id]
-        log(f"Every shelf full: {fullsh['stores']:,} stores · {fullsh['shelves_completed']:,} shelves completed "
-            f"(+{fullsh['units_added']:,}u) · {fullsh['shelves_cut']:,} partial shelves cut (-{fullsh['units_cut']:,}u) · "
-            f"{fullsh['stores_routine_pushed']:,} routine orders pushed")
+        _full_shelves_pass("final")
 
     # FINAL FULL-CART GUARD (Jason 11/25: one-shelf carts found in the live run). Steps after the
     # trim (config merge edits carts in place) can leave a routine cart under the fill floor. At a
@@ -3793,6 +3884,189 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         guard["wholesale"] = round(guard["wholesale"], 2)
         log(f"Final full-cart guard: {guard['stores']:,} stores, {guard['carts']:,} under-filled carts removed "
             f"({guard['units']:,}u, ${guard['wholesale']:,.0f})")
+
+    # SECOND-CHANCE CART BUILD (Jason 11/25: "cart building has to be iterative — if a proposed cart
+    # fails, go back into the qualified demand pool, try alternative SKUs, recalculate expected
+    # sales and build a better cart; do not simply abandon the store"). Cart completion runs once,
+    # early, while stores that later get trimmed, cut to full shelves or pushed still hold their
+    # stock (store 561: 0 Littles left at its turn, 12,000 unused at the end). After every step that
+    # frees stock, each due store with no routine cart gets a second build from the freed pool,
+    # AA/A/B first: its proven sellers, best next pack first, each product up to the quantity that
+    # still sells cart_min_sellthrough of itself in the window, the cart's blended projected sell-
+    # through >= cart_min_sellthrough, every shelf full, the cart >= min fill. Else nothing changes.
+    second = {"enabled": str(S.get("second_chance_carts", True)).lower() not in ("false", "0", "no"),
+              "stores_tried": 0, "stores": 0, "carts": 0, "units": 0, "wholesale": 0.0}
+    if second["enabled"] and completion.get("enabled") and min_full_carts > 0:
+        def _is_routine(l):
+            return not (l.get("directed_trays") or l.get("variety_codes")
+                        or (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart")
+
+        _sc_lines = defaultdict(list)
+        for (st_, sk_), l in ship.items():
+            if (_is_routine(l) and l.get("plannable") and sk_ in pack and l["fc"] > 0
+                    and not l.get("oh_conflict") and l.get("conf") != "UNUSABLE" and not l.get("reactivation")):
+                _sc_lines[st_].append(l)
+        for (st_, sk_), l in lines.items():
+            if (st_, sk_) in ship or st_ not in _sc_lines or not l.get("cc_candidate"):
+                continue
+            _sc_lines[st_].append(l)
+
+        def _has_routine_cart(st_):
+            o_ = orders.get(st_)
+            return bool(o_) and any(_is_routine(l) and l.get("alloc_trays", 0) > 0 for l in o_["lines"])
+
+        _sc_stores = [st_ for st_ in _sc_lines if not _has_routine_cart(st_)
+                      and not (stores.get(st_) or {}).get("capacity_carts")]
+        _sc_stores.sort(key=lambda st_: (-max(x.get("priority", 0) for x in _sc_lines[st_]), st_))
+
+        def _sc_cap(l):
+            """Most packs for a line: proven demand up to cart_min_sellthrough of itself, tray limits."""
+            _D = DF.sellable_demand(l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l), mg_a)
+            _p = max(1, l["upt"])
+            c_ = max(DF.ceiling_packs(l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l), _p, mg_a,
+                                      line_f(l), min_share=1e-6),
+                     int(_D / (cart_st_min * _p)) if cart_st_min > 0 else 0)
+            if l["family"] in H2O_TERR_FAMILIES:
+                c_ = min(c_, max(l.get("trays", 0), 0))          # never filler: own need only
+            if l.get("tray_cap") is not None:
+                c_ = min(c_, l["tray_cap"])
+            return max(0, c_)
+
+        for st_id in _sc_stores:
+            ls = _sc_lines[st_id]
+            deny = store_deny.get(st_id, NO_DENY)
+            caps = {id(l): min(_sc_cap(l), int(pools.left(l["sku_id"], deny) // max(1, l["upt"]))) for l in ls}
+            # quick screen: could everything available reach a full cart at all?
+            if _cc_best_fill(_cc_state(ls, lambda l: caps[id(l)])) < min_cart_fill:
+                continue
+            second["stores_tried"] += 1
+            got = defaultdict(int)
+            state, fill = {}, 0.0
+            for _k in range(400):
+                if fill >= min_cart_fill:
+                    break
+                best = None
+                for l in ls:
+                    t = got[id(l)]
+                    if t >= caps[id(l)]:
+                        continue
+                    mu = DF.marginal_units(t * l["upt"], l["upt"], l["fc"], max(0.0, l.get("projected", 0.0)),
+                                           line_horizon(l), mg_a, line_f(l))
+                    if mu <= 1e-9:
+                        continue
+                    pid, cap, h, pmax = _cc_prof(l["sku_id"])
+                    trial = {k: list(v) for k, v in state.items()}
+                    trial.setdefault(pid, [0, cap, h, pmax])[0] += 1
+                    f2 = _cc_best_fill(trial)
+                    if f2 <= fill + 1e-9:
+                        continue
+                    key = (mu * usd(l), l.get("sku_fit", 0))
+                    if best is None or key > best[0]:
+                        best = (key, l, trial, f2)
+                if not best:
+                    break
+                got[id(best[1])] += 1
+                state, fill = best[2], best[3]
+            if fill < min_cart_fill:
+                continue
+            _num = _den = 0.0
+            for l in ls:
+                q = got[id(l)] * l["upt"]
+                if q:
+                    v = usd(l)
+                    _num += DF.sold_units(q, l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l),
+                                          mg_a, line_f(l)) * v
+                    _den += q * v
+            if cart_st_min > 0 and _den and _num / _den < cart_st_min:
+                continue
+            # commit, pack, complete shelves; keep only if a routine cart is full
+            o_prev = orders.get(st_id)
+            prev_lines = list(o_prev["lines"]) if o_prev else []
+            prev_carts = o_prev["carts"] if o_prev else None
+            taken = []
+            for l in ls:
+                n = got[id(l)]
+                if n <= 0:
+                    continue
+                u = n * l["upt"]
+                pools.take(l["sku_id"], u, deny)
+                taken.append((l, l.get("alloc_trays", 0), l.get("alloc_units", 0), (st_id, l["sku_id"]) in ship))
+                l["alloc_trays"], l["alloc_units"] = n, u
+                l.pop("alloc_in_pool", None)           # its stock is now properly taken from the pool
+                l["second_chance_trays"] = n
+                l["deferred_units"] = 0
+                ship[(st_id, l["sku_id"])] = l
+            new_lines = prev_lines + [l for l, *_ in taken if l not in prev_lines]
+            _pack_store(st_id, [l for l in new_lines if l.get("alloc_trays", 0) > 0])
+            if fullsh["enabled"]:
+                _full_shelves_pass("second_chance", only={st_id})
+            o_ = orders.get(st_id)
+            ok = bool(o_) and any(c["tray_fill"] >= min_cart_fill - 1e-9 and any(
+                _is_routine(next((x for x in o_["lines"] if x["sku_id"] == it[1]), {"sku_id": it[1]}))
+                for it in c["contents"]) for c in o_["carts"])
+            if not ok:
+                for l, t0, u0, was in taken:          # put everything back as it was
+                    pools.give_back(l["sku_id"], l.get("alloc_units", 0), deny)
+                    l["alloc_trays"], l["alloc_units"] = t0, u0
+                    l.pop("second_chance_trays", None)
+                    if not was:
+                        ship.pop((st_id, l["sku_id"]), None)
+                if o_prev is not None:
+                    orders[st_id] = {"lines": prev_lines, "carts": prev_carts}
+                else:
+                    orders.pop(st_id, None)
+                continue
+            _u = sum(l.get("alloc_units", 0) for l, *_ in taken)
+            alloc_units_total += _u
+            _rc = [c for c in o_["carts"] if any(
+                _is_routine(next((x for x in o_["lines"] if x["sku_id"] == it[1]), {"sku_id": it[1]}))
+                for it in c["contents"])]
+            second["stores"] += 1
+            second["carts"] += len(_rc)
+            second["units"] += _u
+            second["wholesale"] += sum(c["wholesale_value"] for c in _rc)
+            decisions[:] = [d_ for d_ in decisions if not (d_[0] == "pushed_min_cart" and d_[1] == st_id)]
+            decide("second_chance_cart",
+                   f"Second cart build from stock freed later in the run: {len(_rc)} full routine cart(s), "
+                   f"{_u:,}u, projected blended sell-through {(_num / _den if _den else 0):.0%} in the selling "
+                   f"window (Jason 11/25: iterate, do not abandon the store)", store_id=st_id, severity="info",
+                   units=_u, sellthrough=round(_num / _den, 4) if _den else None)
+        second["wholesale"] = round(second["wholesale"], 2)
+        # DEMAND-CONVERSION AUDIT (Josh 11/25: "the audits should catch these"): every due store left
+        # without a routine cart is tested against the stock still free at the END of the run. If its
+        # proven sellers and that stock could have built a full cart, qualified demand was lost
+        # between forecasting, allocation and cart building: a warning per store, counted by grade.
+        lost = {"stores": 0, "by_grade": Counter(), "units_possible": 0, "examples": []}
+        for st_id in _sc_lines:
+            if _has_routine_cart(st_id) or (stores.get(st_id) or {}).get("capacity_carts"):
+                continue
+            ls = _sc_lines[st_id]
+            deny = store_deny.get(st_id, NO_DENY)
+            caps = {id(l): min(_sc_cap(l), int(pools.left(l["sku_id"], deny) // max(1, l["upt"]))) for l in ls}
+            if _cc_best_fill(_cc_state(ls, lambda l: caps[id(l)])) < min_cart_fill:
+                continue
+            _g = store_cadence(st_id)[0]
+            _pu = sum(caps[id(l)] * l["upt"] for l in ls)
+            lost["stores"] += 1
+            lost["by_grade"][_g] += 1
+            lost["units_possible"] += _pu
+            if len(lost["examples"]) < 15:
+                lost["examples"].append(st_id)
+            decide("demand_lost_audit", f"AUDIT: no routine cart, yet its proven sellers and the stock still "
+                                        f"free could build a full cart ({_pu:,}u possible). Demand was lost "
+                                        f"between allocation and cart building — investigate before release.",
+                   store_id=st_id, severity="warning", grade=_g, units_possible=_pu)
+        plant_left = Counter()
+        for sk_, info_ in sku_info.items():
+            if sk_ in pools.total and not str(info_.get("ipr_family") or "").startswith(("Climb-ITT", "H2O")):
+                plant_left[info_.get("ipr_family") or "?"] += int(pools.left(sk_))
+        second["demand_lost_audit"] = {"stores": lost["stores"], "by_grade": dict(lost["by_grade"]),
+                                       "units_possible": lost["units_possible"], "examples": lost["examples"],
+                                       "plant_stock_left_by_family": dict(plant_left.most_common(8))}
+        log(f"Demand-conversion audit: {lost['stores']:,} due stores without a routine cart COULD have had a full "
+            f"cart from free stock ({dict(lost['by_grade'])})")
+        log(f"Second-chance carts: {second['stores']:,} of {second['stores_tried']:,} stores rebuilt "
+            f"({second['carts']:,} carts, {second['units']:,}u, ${second['wholesale']:,.0f})")
 
     # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
     # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
@@ -4196,6 +4470,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "fill_open_positions": fillpos,
         "final_full_cart_guard": guard,
         "every_shelf_full": fullsh,
+        "second_chance_carts": second,
         "stockout_recovery": so_summary,
         "onhand_check": oc_summary,
         "demand_history": _dh_summary,
