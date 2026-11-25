@@ -39,6 +39,15 @@ CATALOG = [
     dict(key="cart_wholesale_low", group="Minimum order and carts", label="Low-value cart threshold (wholesale)",
          kind="money", default=1700, min=100, max=10000,
          help="A cart below this wholesale value is flagged low-value (leadership range $1,700 to $3,000)."),
+    dict(key="historical_lot_fill", group="Minimum order and carts",
+         label="Fill carts up to the largest earlier restock the store sold through", kind="bool", default=True,
+         help="Jason's Week 49 brief: before a store is pushed for not filling a cart, its products may be "
+              "refilled up to the largest earlier delivery it sold at least 70% of within 8 weeks."),
+    dict(key="store_grade_priority_boost", group="Minimum order and carts",
+         label="Serve these store grades first (priority added)", kind="grade_pct",
+         default={"AA": .3, "A": .2, "B": .1, "C+": 0, "C": 0, "C-": 0, "D": 0}, min=0, max=2,
+         help="Added to every line's store priority, so AA, A and B stores get scarce product, cart "
+              "completion and held-store releases first."),
     dict(key="trim_partial_carts", group="Minimum order and carts",
          label="Ship full carts only: drop a store's trailing partial cart", kind="bool", default=True,
          help="Jason's Week 49 order (11/25): every cart fully packed. A store with more than one cart loses "
@@ -46,7 +55,7 @@ CATALOG = [
               "space and its need is recalculated next week. Carts with directed lines are never cut."),
     dict(key="cart_value_floor", group="Minimum order and carts",
          label="Hold orders that average under the low-value threshold per cart", kind="choice",
-         default="hard", choices=["hard", "off"],
+         default="off", choices=["hard", "off"],
          choice_labels={"hard": "Hold them: every routine cart ships at or above the threshold",
                         "off": "Ship them when another rule releases them (full cart, lost sales, overdue)"},
          help="Jason's Week 49 order (11/25): every routine cart exceeds $1,700 wholesale. Held trays go back "
@@ -114,6 +123,14 @@ CATALOG = [
          default=0.8, min=0.5, max=1.0,
          help="A store may get more than the tray limit only when its sales at or above this share of the "
               "Home Depot retail price cover more over its coverage weeks."),
+    dict(key="h2o_terrarium_store_max_trays", group="Sell-through gates",
+         label="H2O and Terrarium: most trays per store, all products together", kind="number", default=2,
+         min=0, max=50,
+         help="Jason's Week 49 brief: a conservative combined limit of two H2O/Terrarium trays per store. "
+              "A store whose full-price sales lift a product's own limit is not held to it. 0 = no limit."),
+    dict(key="excluded_skus", group="Sell-through gates", label="SKUs never shipped as routine replenishment",
+         kind="list", default=["1015443116"],
+         help="Comma separated HD SKUs. Default: the Climb-itt Plank (Jason's Week 49 brief: zero Plank)."),
     dict(key="climbitt_accessory_max_boxes", group="Sell-through gates",
          label="Climb-itt accessories: most boxes per product per store", kind="number", default=2, min=0, max=20,
          help="Wire, clips, stakes, poles and planks. Jason's Week 49 order: at most two boxes per SKU per "
@@ -183,7 +200,7 @@ CATALOG = [
          key_labels={"w4": "Last 4 weeks", "w10": "Last 10 weeks", "w13": "Last 13 weeks"},
          help="How much each sales window counts in the weekly forecast. Must total 100%."),
     dict(key="peak_floor_share", group="Demand and goal", label="Peak-season floor",
-         kind="pct", default=0.5, min=0.05, max=1,
+         kind="pct", default=0.9, min=0.05, max=1,
          help="Forecast is never below this share of the store's benchmark rate (seasonally adjusted), "
               "so lines starved of supply do not vanish. With selling-week history on, the benchmark is "
               "June-July's typical week; otherwise the Apr-Jul average."),

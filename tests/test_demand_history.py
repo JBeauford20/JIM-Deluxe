@@ -163,3 +163,19 @@ def test_last_lot_caps_sold_at_delivered_and_handles_no_history():
     assert lot["sold_since"] == 12 and lot["sell_through"] == 1.0
     assert D.last_lot({1: 5}, {}) is None
     assert D.last_lot({}, {6: 12})["weeks_since_sale"] is None
+
+
+def test_best_lot_finds_largest_sold_through_restock():
+    from demand_history import best_lot
+    # weeks back from anchor: lot A (72u at wk 30) sold 69 in 8 wks; lot B (36u at wk 15) sold 10
+    delivered = {30: 72, 15: 36}
+    sold = {w: 9 for w in range(23, 31)}            # 72 sold over wks 30..23
+    sold.update({15: 5, 14: 5})
+    b = best_lot(sold, delivered)
+    assert b["units"] == 72 and b["waves"] == 1 and b["sell_through"] == 1.0
+
+
+def test_best_lot_none_when_no_lot_sold_through_or_window_open():
+    from demand_history import best_lot
+    assert best_lot({30: 5}, {30: 72}) is None
+    assert best_lot({3: 40, 2: 40}, {3: 72}) is None     # window not finished yet

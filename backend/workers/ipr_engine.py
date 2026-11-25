@@ -421,12 +421,17 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         total_supply = sum(supply.values())
         log("WHAT-IF: every mapped, packable SKU treated as available (preview only)")
 
+    excluded_skus = {str(x) for x in (S.get("excluded_skus") if S.get("excluded_skus") is not None
+                                      else [1015443116])}       # Climb-itt Plank (Jason 11/25)
     excluded_fams = set(S.get("excluded_families") or [])   # e.g. Seasonal/Holiday: not routine replenishment
     plannable = set()
     for sku_id in supply:
         info, pk = sku_info.get(sku_id), pack.get(sku_id)
         if not info:
             decide("validation", "Availability SKU not in SKU master — excluded", sku_id=sku_id, severity="block")
+        elif str(sku_id) in excluded_skus:
+            decide("validation", "SKU excluded from routine replenishment by setting excluded_skus "
+                                 "(Jason's Week 49 brief: no Climb-itt Plank)", sku_id=sku_id, severity="info")
         elif (info["ipr_family"] or "Unmapped") in excluded_fams:
             decide("validation", f"{info['ipr_family']} is excluded from routine replenishment (seasonal "
                                  f"programs ship through Promotions)", sku_id=sku_id, severity="info")
@@ -710,7 +715,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # it binds). Months without a calibrated index get no floor.
     pk_win = S.get("peak_window") or ["2026-04-01", "2026-07-31"]
     pk_idx = {int(k): float(v) for k, v in (S.get("peak_seasonal_index") or PEAK_SEASONAL_INDEX).items()}
-    pk_share = float(S.get("peak_floor_share", 0.5) or 0.5)
+    pk_share = float(S.get("peak_floor_share", 0.9) or 0.9)   # Jason 11/25: 90% of stocked pace
     pk_starve = str(S.get("peak_floor_require_starvation", False)).lower() in ("true", "1", "yes")
     pk_month = (shipping_week or anchor).month
     peak_rate = {}
@@ -759,6 +764,23 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     ht_max = int(float(S.get("h2o_terrarium_max_trays", 2) or 0))
     ht_fp_share = float(S.get("h2o_terrarium_fullprice_share", 0.8) or 0.8)
     acc_max = int(float(S.get("climbitt_accessory_max_boxes", 2) or 0))
+    # Jason's Week 49 brief: cart completion may refill a product up to the largest earlier
+    # restock the store sold through; AA/A/B stores are served first (store priority boost).
+    hist_fill = str(S.get("historical_lot_fill", True)).lower() not in ("false", "0", "no")
+    def lot_trays(l):
+        """Trays a line may reach in the re-offer / target top-up: its own need, or up to the
+        largest earlier restock the store sold through (historical_lot_fill), never past the
+        line's tray limit; shelf-check and unreliable-inventory lines keep their own need."""
+        t = l.get("trays", 0)
+        _bl = l.get("best_lot") if hist_fill else None
+        if _bl and l.get("conf") != "UNUSABLE" and not l.get("oh_conflict"):
+            t = max(t, int((_bl["units"] - max(0.0, l.get("projected", 0.0))) // max(1, l["upt"])))
+        if l.get("tray_cap") is not None:
+            t = min(t, max(l.get("trays", 0), l["tray_cap"]))
+        return t
+
+    grade_boost = {**{"AA": 0.3, "A": 0.2, "B": 0.1},
+                   **{k: float(v) for k, v in (S.get("store_grade_priority_boost") or {}).items()}}
 
     def is_accessory(sku_id):
         """Climb-itt hard goods (wire, clips, stakes, poles, planks): the Climb-ITT family
@@ -1364,6 +1386,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             plannable=is_plannable, oh_conflict=oh_conflict,
             fp_rate=(fp_rate.get((store_id, sku_id), 0.0) if fam in H2O_TERR_FAMILIES else None),
             accessory=is_accessory(sku_id),
+            best_lot=((H["lines"].get((store_id, sku_id)) or {}).get("best_lot") if H else None),
             stockout_recovery=(dict(_so[0], benchmark=round(_so[1][0], 2), period=_so[1][1]) if _so else None))
         # scenario floor/cap, computed ONCE here (value_numeric is SHELVES) and pre-bounded to
         # the store's selling pace — §17's 13-week window for H2O/Terrarium, the sell-through
@@ -1793,6 +1816,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         l["priority"] = (sp_w["incremental_sales"] * inc[k] + sp_w["family_velocity"] * fv[k]
                          + sp_w["mature_delivery_sales"] * conv01 + sp_w["stockout_risk"] * RISK_SCORE[l["risk"]]
                          + sp_w["seasonal"] * 0.0 + sp_w["recency"] * rec[k])
+        l["priority"] += grade_boost.get((stores.get(l["store_id"]) or {}).get("volume_code"), 0.0)
         if l.get("directed_trays"):
             l["priority"] += 10.0            # filled before routine need when supply is short
         l["sku_fit"] = (sf_w["sku_velocity"] * (l["fc"] / max(1e-9, store_max_fc[l["store_id"]]))
@@ -1804,6 +1828,29 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 l["priority"] += max(0.0, min(scn_boost_cap, float(_a["value_numeric"] or 0)))
                 scn_fx[_a["adj_id"]]["lines"] += 1
                 scn_fx[_a["adj_id"]]["stores"].add(l["store_id"])
+
+    # H2O + TERRARIUM PER STORE (Jason's Week 49 brief: "the conservative combined cap of two
+    # H2O/terrarium trays per store"): the store's H2O and Terrarium lines together get at most
+    # ht_store_max trays, highest-forecast first, unless full-price sales lifted a line's own limit.
+    ht_store_max = int(float(S.get("h2o_terrarium_store_max_trays", 2) or 0))
+    if ht_store_max > 0:
+        _ht = defaultdict(list)
+        for l in ship.values():
+            if l["family"] in H2O_TERR_FAMILIES and not l.get("directed_trays") and l["trays"] > 0:
+                _ht[l["store_id"]].append(l)
+        for _st, _ls in _ht.items():
+            if any((l.get("tray_cap") or 0) > ht_max for l in _ls):
+                continue                      # verified full-price seller: per-line limits only
+            left = ht_store_max
+            for l in sorted(_ls, key=lambda x: (-x["fc"], x["sku_id"])):
+                t = min(l["trays"], left)
+                if t < l["trays"]:
+                    l["trays_before_tray_cap"] = l.get("trays_before_tray_cap") or l["trays"]
+                    l["cap_note"] = ((l.get("cap_note") or "") +
+                                     f" H2O/Terrarium store limit {ht_store_max} trays combined").strip()
+                l["trays"], l["tray_cap"] = t, t
+                left -= t
+        ship = {k: l for k, l in ship.items() if l["trays"] > 0 or l.get("directed_trays")}
 
     # DUAL-USE CONVERSION (Jason's Week 49 order, 11/25): Aster plant lines named
     # "... Everyday/Ceramic" on the 9cm Ceramic SKU are the same 9cm plant the Littles program
@@ -2187,7 +2234,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     got[l["sku_id"]] = min(o, int(pools.left(l["sku_id"], deny) // l["upt"]))
             state = _cc_state(ls, lambda l: got[l["sku_id"]])
             fill = _cc_best_fill(state)
-            cands = sorted((l for l in ls if l["fc"] > 0 and not l.get("reactivation")),
+            cands = sorted((l for l in ls if (l["fc"] > 0 or (hist_fill and l.get("best_lot")))
+                            and not l.get("reactivation")),
                            key=lambda x: (-x.get("sku_fit", 0), -x["fc"], x["sku_id"]))
 
             def _room(l):
@@ -2202,6 +2250,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     w = min(w, oh_check_wk)     # shelf check pending: never past the cap
                 have = got[l["sku_id"]]
                 ceiling = int((l["fc"] * w - max(0.0, l["projected"])) // l["upt"])
+                _bl = l.get("best_lot") if hist_fill else None
+                if _bl and l["conf"] != "UNUSABLE" and not l.get("oh_conflict"):
+                    # Jason's Week 49 brief: a store may get back up to the largest earlier
+                    # restock it sold through ("successful exact store/SKU delivery sell-down")
+                    ceiling = max(ceiling, int((_bl["units"] - max(0.0, l["projected"])) // l["upt"]))
                 by_wos = max(l["trays"], ceiling) - have        # its own need always qualifies
                 if l.get("tray_cap") is not None:
                     by_wos = min(by_wos, max(l["trays"], l["tray_cap"]) - have)   # per-line tray limit
@@ -2363,7 +2416,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # $180–$300 (default $240); normal wholesale value per cart is roughly $1,700–$3,000.
     cart_cost = float(S.get("cart_delivered_cost", 240) or 240)
     low_value_wh = float(S.get("cart_wholesale_low", 1700) or 1700)
-    cv_hard = str(S.get("cart_value_floor", "hard") or "off").lower() == "hard"
+    cv_hard = str(S.get("cart_value_floor", "off") or "off").lower() == "hard"
     consolidate = str(S.get("cart_consolidate", True)).lower() not in ("false", "0", "no")
     orders = {}
     for l in ship.values():
@@ -2879,7 +2932,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         for (st_id, sk), l in ship.items():
             if (sk in returned and st_id in orders and not l.get("directed_trays")
                     and not (stores.get(st_id) or {}).get("capacity_carts")
-                    and l.get("trays", 0) > l.get("alloc_trays", 0)):
+                    and lot_trays(l) > l.get("alloc_trays", 0)):
                 _cands.append(l)
         _cands.sort(key=lambda x: (-x.get("priority", 0), x["store_id"], x["sku_id"]))
         _touched = set()
@@ -2887,7 +2940,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         reoffer["refused_would_add_cart"] = 0
         for l in _cands:
             deny = store_deny.get(l["store_id"], NO_DENY)
-            short_t = l["trays"] - l.get("alloc_trays", 0)
+            short_t = lot_trays(l) - l.get("alloc_trays", 0)
             give_t = min(short_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
             if give_t <= 0:
                 continue
@@ -2941,14 +2994,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             _tc = [l for (st_id, sk), l in ship.items()
                    if st_id in orders and not l.get("directed_trays")
                    and not (stores.get(st_id) or {}).get("capacity_carts")
-                   and l.get("trays", 0) > l.get("alloc_trays", 0)]
+                   and lot_trays(l) > l.get("alloc_trays", 0)]
             _tc.sort(key=lambda x: (-x.get("priority", 0), x["store_id"], x["sku_id"]))
             _tt, added = set(), 0.0
             for l in _tc:
                 if cur_w + added >= target_w:
                     break
                 deny = store_deny.get(l["store_id"], NO_DENY)
-                short_t = l["trays"] - l.get("alloc_trays", 0)
+                short_t = lot_trays(l) - l.get("alloc_trays", 0)
                 t = min(short_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
                 if t <= 0:
                     continue

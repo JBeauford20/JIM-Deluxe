@@ -149,6 +149,44 @@ def last_lot(sold, delivered, span=LAST_LOT_SPAN_WEEKS):
                 weeks_since_sale=min(sale_weeks) if sale_weeks else None)
 
 
+BEST_LOT_WINDOW_WEEKS = 8      # a lot "sold through" when it sold this share inside this window
+BEST_LOT_MIN_SELLTHROUGH = 0.7
+
+
+def best_lot(sold, delivered, span=LAST_LOT_SPAN_WEEKS, window=BEST_LOT_WINDOW_WEEKS,
+             min_st=BEST_LOT_MIN_SELLTHROUGH):
+    """The largest earlier restock this store sold through (Jason's Week 49 brief: "successful
+    exact store/SKU delivery sell-down"). Deliveries within `span` weeks form one lot; a lot
+    succeeded when units sold from its first week through `window` weeks later reached
+    `min_st` of what was delivered. Weeks are counted back from the anchor (0 = latest).
+    Returns {units, delivered, sell_through, waves} for the largest successful lot by units
+    sold (capped at delivered), or None. Lots whose window has not finished yet are skipped."""
+    d_weeks = sorted((w for w, u in delivered.items() if (u or 0) > 0), reverse=True)   # oldest first
+    lots, cur = [], []
+    for w in d_weeks:
+        if cur and cur[0] - w > span:
+            lots.append(cur)
+            cur = []
+        cur.append(w)
+    if cur:
+        lots.append(cur)
+    best, waves = None, 0
+    for lot in lots:
+        start = lot[0]
+        if start - window + 1 < 0:
+            continue
+        dlv = sum(float(delivered[w]) for w in lot)
+        sold_w = sum(max(0.0, float(sold.get(w, 0) or 0)) for w in range(start - window + 1, start + 1))
+        sold_w = min(sold_w, dlv)
+        if dlv > 0 and sold_w / dlv >= min_st:
+            waves += 1
+            if best is None or sold_w > best["units"]:
+                best = dict(units=sold_w, delivered=dlv, sell_through=round(sold_w / dlv, 3))
+    if best:
+        best["waves"] = waves
+    return best
+
+
 def typical_week(values):
     """What sold repeatedly: the mean of available weeks with the single biggest week capped at
     the second biggest, so one spike (an ad, a holiday) never sets the routine rate."""
@@ -330,7 +368,8 @@ def load(cur, anchor, fresh_of, fresh_default_days, dedup_deliveries_sql, stores
         a_total = sum(av[:HISTORY_WEEKS])
         first = next((wb for wb in range(n_all - 1, -1, -1) if av[wb]), None)
         lines[k] = dict(r4=r4, a4=a4, r10=r10, a10=a10, r13=r13, a13=a13, a_total=a_total,
-                        first_avail_wb=first, last_lot=last_lot(s, deliv.get(k, {})))
+                        first_avail_wb=first, last_lot=last_lot(s, deliv.get(k, {})),
+                        best_lot=best_lot(s, deliv.get(k, {})))
 
     periods = benchmark_periods(anchor, ship_month)
     bench, index = benchmarks(hist, periods, min_w, min_share)
