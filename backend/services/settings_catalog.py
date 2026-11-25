@@ -44,6 +44,12 @@ CATALOG = [
          default=0.5, min=0.0, max=1.0,
          help="At 50% a store needing half a box or more gets whole boxes (up to the limit). Lower = more "
               "stores get a box; on the Week 49 inputs 50% gave ~580 boxes vs Jason's 384, 25% ~990."),
+    dict(key="sell_down_weeks_by_grade", group="Minimum order and carts",
+         label="Weeks a store grade may take to sell a delivery", kind="grade_int",
+         default={"AA": 0, "A": 0, "B": 0, "C+": 0, "C": 0, "C-": 0, "D": 10}, min=0, max=13,
+         help="Jason's Week 49 brief (item 10), Josh 11/25: D stores get 70 days (10 weeks) to sell a "
+              "delivery, so they build one full cart and are serviced less often. 0 = the normal "
+              "cadence. Never applies to H2O/Terrarium, and never past a product's freshness window."),
     dict(key="split_shelves", group="Minimum order and carts",
          label="Two different products may share one shelf", kind="bool", default=True,
          help="Josh 11/25. Two part-filled shelves of different products are combined onto one shelf when "

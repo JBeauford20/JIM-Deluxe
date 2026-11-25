@@ -804,6 +804,22 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # Jason's Week 49 brief: cart completion may refill a product up to the largest earlier
     # restock the store sold through; AA/A/B stores are served first (store priority boost).
     hist_fill = str(S.get("historical_lot_fill", True)).lower() not in ("false", "0", "no")
+    # SELL-DOWN HORIZON BY STORE GRADE (Jason's Week 49 brief item 10; Josh 2026-11-25): D stores
+    # are allowed 70 days (10 weeks) to sell a delivery instead of the normal cadence + buffer, so a
+    # low-volume store builds one full cart and is serviced less often. Store grade = the store's
+    # DTS volume code (cadence grade). Never H2O/Terrarium (they keep 35 days / their own limits)
+    # and never past the product's freshness window.
+    sell_down = {k: float(v) for k, v in
+                 ((S.get("sell_down_weeks_by_grade") if S.get("sell_down_weeks_by_grade") is not None
+                   else {"D": 10})).items() if v}
+
+    def sell_down_wk(l):
+        """Extra sell-down weeks for this line's store grade (0 when none applies)."""
+        if l["family"] in H2O_TERR_FAMILIES:
+            return 0.0
+        _w = sell_down.get(store_cadence(l["store_id"])[0], 0.0)
+        return min(_w, fresh_of.get(l["sku_id"], fresh_days) / 7.0) if _w else 0.0
+
     # Josh 2026-11-25: a shelf may be split between two different products.
     split_shelves = str(S.get("split_shelves", True)).lower() not in ("false", "0", "no")
     # Josh 2026-11-25 (agrees with Jason): Climb-itt hard goods never expire, so a store that has
@@ -1123,6 +1139,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             # and by the sell-through cover limit (stock after delivery <= max_cover_weeks of fc)
             cov = min(cov + l["cov_extra"], max(cov, max_cover_wk),
                       fresh_of.get(l["sku_id"], fresh_days) / 7.0)
+        _sd = sell_down_wk(l)
+        if _sd > cov:
+            cov = _sd                                                     # 70-day D-store horizon
         need = max(0.0, l["fc"] * cov - l["projected"])
         cap_note = None
         if l.get("inbound_later") and l.get("stock_at_arrival") is not None:
@@ -2293,7 +2312,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
 
             def _room(l):
                 g = l.get("grade")
-                w = float(_wos_set.get(g) or _wos_def.get(g, 6))
+                w = max(float(_wos_set.get(g) or _wos_def.get(g, 6)), sell_down_wk(l))
                 w = min(w, fresh_of.get(l["sku_id"], fresh_days) / 7.0)
                 if l["family"] in H2O_TERR_FAMILIES:
                     w = min(w, float(S["h2o_terrarium_window_weeks"]))
@@ -3152,7 +3171,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                   **{k: v for k, v in (S.get("gap_fill_weeks_supply_by_grade") or {}).items() if v}}
 
         def _m_ceiling(l):
-            w = float(_wos_m.get(l.get("grade"), 6))
+            w = max(float(_wos_m.get(l.get("grade"), 6)), sell_down_wk(l))
             w = min(w, fresh_of.get(l["sku_id"], fresh_days) / 7.0)
             if l["family"] in H2O_TERR_FAMILIES:
                 w = min(w, float(S["h2o_terrarium_window_weeks"]))
