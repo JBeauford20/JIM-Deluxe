@@ -39,6 +39,18 @@ CATALOG = [
     dict(key="cart_wholesale_low", group="Minimum order and carts", label="Low-value cart threshold (wholesale)",
          kind="money", default=1700, min=100, max=10000,
          help="A cart below this wholesale value is flagged low-value (leadership range $1,700 to $3,000)."),
+    dict(key="trim_partial_carts", group="Minimum order and carts",
+         label="Ship full carts only: drop a store's trailing partial cart", kind="bool", default=True,
+         help="Jason's Week 49 order (11/25): every cart fully packed. A store with more than one cart loses "
+              "a cart filled below the minimum fill; its trays go back to the pool for other stores' open "
+              "space and its need is recalculated next week. Carts with directed lines are never cut."),
+    dict(key="cart_value_floor", group="Minimum order and carts",
+         label="Hold orders that average under the low-value threshold per cart", kind="choice",
+         default="hard", choices=["hard", "off"],
+         choice_labels={"hard": "Hold them: every routine cart ships at or above the threshold",
+                        "off": "Ship them when another rule releases them (full cart, lost sales, overdue)"},
+         help="Jason's Week 49 order (11/25): every routine cart exceeds $1,700 wholesale. Held trays go back "
+              "to the pool for other stores. Directed shipments always ship."),
     dict(key="cart_consolidate", group="Minimum order and carts", label="Pack each store's shelves into the fewest carts",
          kind="bool", default=True,
          help="On: shelves are packed best-fit so a store uses as few carts as physically possible. "
@@ -93,6 +105,29 @@ CATALOG = [
     dict(key="h2o_terrarium_window_weeks", group="Sell-through gates",
          label="H2O and Terrarium: most weeks of demand to ship", kind="number", default=13, min=1, max=52,
          help="H2O and Terrarium trays never exceed this many weeks of the store's demand."),
+    dict(key="h2o_terrarium_max_trays", group="Sell-through gates",
+         label="H2O and Terrarium: most trays per store and product", kind="number", default=2, min=0, max=50,
+         help="Jason's Week 49 order (11/25): two trays unless full-price sales support more. Most 13-week "
+              "H2O volume sold on clearance, which is not a reason to send more. 0 = no limit."),
+    dict(key="h2o_terrarium_fullprice_share", group="Sell-through gates",
+         label="H2O and Terrarium: a sale counts as full price at this share of retail", kind="pct",
+         default=0.8, min=0.5, max=1.0,
+         help="A store may get more than the tray limit only when its sales at or above this share of the "
+              "Home Depot retail price cover more over its coverage weeks."),
+    dict(key="climbitt_accessory_max_boxes", group="Sell-through gates",
+         label="Climb-itt accessories: most boxes per product per store", kind="number", default=2, min=0, max=20,
+         help="Wire, clips, stakes, poles and planks. Jason's Week 49 order: at most two boxes per SKU per "
+              "store. 0 = no limit."),
+    dict(key="dual_use_conversion", group="Inventory in stores",
+         label="Pack dual-use 9cm ceramic plants as Littles when Littles are short", kind="choice",
+         default="auto", choices=["auto", "off"],
+         choice_labels={"auto": "Move whole Everyday/Ceramic plant lines to Littles until both are equally covered",
+                        "off": "Never convert"},
+         help="Jason's Week 49 order converted 14,232 dual-use ceramic plants to Littles. Operations confirms "
+              "the repack before release (listed in the run's decisions)."),
+    dict(key="dual_use_max_units", group="Inventory in stores",
+         label="Most dual-use plants to convert to Littles in one run", kind="number", default=0, min=0,
+         max=1000000, help="0 = no limit beyond the dual-use stock and equal coverage."),
     # ── Demand ──────────────────────────────────────────────────────────────
     dict(key="weekly_objective_retail", group="Demand and goal", label="Weekly sales goal",
          kind="money", default=900000, min=0, max=10000000,

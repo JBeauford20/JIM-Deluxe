@@ -23,6 +23,7 @@ Exchange, pack plans, Aster export, Cart Configs and editor all work unchanged.
 """
 import json
 import math
+import re
 import uuid
 from collections import Counter, defaultdict
 from datetime import date, timedelta
@@ -170,6 +171,20 @@ def economic_action(wholesale, carts, lost_one_week, cart_cost, wholesale_low, a
     if prior_deferrals >= max_deferrals:
         return "release_after_deferral"
     return "defer"
+
+
+def dual_use_target(supply_from, supply_to, need_from, need_to, dual_units, max_units=0):
+    """Units of dual-use plants to move from the ceramic SKU to Littles: enough that both are
+    covered at the same share of their need, (supply_to + x) / need_to = (supply_from - x) /
+    need_from, never more than Littles are short, the dual-use stock, or max_units (0 = none)."""
+    if need_to <= supply_to or dual_units <= 0:
+        return 0
+    if need_from > 0:
+        x = (supply_from * need_to - supply_to * need_from) / float(need_to + need_from)
+    else:
+        x = float(need_to - supply_to)
+    lim = [x, need_to - supply_to, dual_units] + ([max_units] if max_units and max_units > 0 else [])
+    return int(max(0, min(lim)))
 
 
 def shipping_efficiency(sold, delivered):
@@ -736,6 +751,21 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # Shelf check (see the line loop): cap = ship at most oh_check_wk weeks; flag = report only.
     oh_check = str(S.get("onhand_check", "cap") or "cap").lower()
     oh_check_wk = float(S.get("onhand_check_cap_weeks", 2) or 2)
+    # Per-line tray limits (Jason's Week 49 order, 11/25). H2O / Terrarium: at most
+    # ht_max trays per store x SKU unless VERIFIED FULL-PRICE sales support more — most of the
+    # 13-week H2O volume sold on clearance ($2-6 realized on a $19.98 bowl), and markdown sales
+    # are not a reason to send more. Climb-itt accessories: at most acc_max boxes per SKU per
+    # store. 0 = no limit. Directed shipments and approved scenario floors are not limited here.
+    ht_max = int(float(S.get("h2o_terrarium_max_trays", 2) or 0))
+    ht_fp_share = float(S.get("h2o_terrarium_fullprice_share", 0.8) or 0.8)
+    acc_max = int(float(S.get("climbitt_accessory_max_boxes", 2) or 0))
+
+    def is_accessory(sku_id):
+        """Climb-itt hard goods (wire, clips, stakes, poles, planks): the Climb-ITT family
+        without a pot size in the description (the 12cm / 17cm Climb-itt SKUs are plants)."""
+        i = sku_info.get(sku_id) or {}
+        return (i.get("ipr_family") == "Climb-ITT"
+                and not re.search(r"\d+\s*cm", str(i.get("description") or "").lower()))
 
     def sold_out(k):
         """(last restock, benchmark) when the line sold >= so_min_st of its last restock, that
@@ -777,6 +807,27 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         sales[k] = {c: float(r[c] or 0) for c in ("w2", "w4", "w8", "w10", "w13", "d13", "w13d")}
         store_recent[r["store_id"]] += sales[k]["w2"]
         store_older[r["store_id"]] += sales[k]["w13"] - sales[k]["w2"]
+
+    # Full-price selling rate for H2O / Terrarium (the tray limit above): units sold at
+    # >= ht_fp_share of the Home Depot retail price over the last 13 weeks, per week of
+    # dollar-reported sales. No dollar data = not verified = the limit stands.
+    fp_rate, fp_weeks = {}, 0.0
+    if ht_max > 0:
+        cur.execute("""SELECT MIN(sale_date) AS mn FROM sales
+                       WHERE dollars IS NOT NULL AND sale_date > %s AND sale_date <= %s""", (d(91), anchor))
+        _mn = cur.fetchone()["mn"]
+        if _mn:
+            fp_weeks = max(1.0, ((anchor - _mn).days + 1) / 7.0)
+            cur.execute("""SELECT s.store_id, s.sku_id,
+                                  SUM(s.units_sold) FILTER (WHERE s.dollars >= %s * pb.retail_price * s.units_sold) AS fp
+                           FROM sales s
+                           JOIN ipr_family_map fm ON fm.sku_id = s.sku_id
+                           JOIN pricebook_hd pb ON pb.sku_id = s.sku_id
+                           WHERE fm.ipr_family = ANY(%s) AND s.dollars IS NOT NULL AND s.units_sold > 0
+                             AND pb.retail_price > 0 AND s.sale_date > %s AND s.sale_date <= %s
+                           GROUP BY s.store_id, s.sku_id""",
+                        (ht_fp_share, sorted(H2O_TERR_FAMILIES), d(91), anchor))
+            fp_rate = {(r["store_id"], r["sku_id"]): float(r["fp"] or 0) / fp_weeks for r in cur.fetchall()}
 
     # EDI-gap detection: store sold in weeks 3-13 but reported nothing for 14 days.
     # Missing EDI is NOT zero demand (§3, §5) — demand is held at the 13-wk baseline.
@@ -1024,6 +1075,23 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             trays = int(need // l["upt"])                                 # never exceed: round down
         else:
             trays = int(math.floor(need / l["upt"] + 0.5))                # nearest valid tray
+        # per-line tray limit (Jason's Week 49 order): H2O/Terrarium unless full-price sales
+        # support more; Climb-itt accessories always. Every later top-up step honours tray_cap.
+        l["tray_cap"] = None
+        l.pop("trays_before_tray_cap", None)
+        if l["family"] in H2O_TERR_FAMILIES and ht_max > 0:
+            _fp = float(l.get("fp_rate") or 0.0)
+            l["tray_cap"] = max(ht_max, int((_fp * cov) // l["upt"]))
+            _why = (f"H2O/Terrarium limit {l['tray_cap']} trays (full-price sales {_fp:.1f}u/wk over "
+                    f"{cov:g} wks)" if l["tray_cap"] > ht_max else
+                    f"H2O/Terrarium limit {ht_max} trays — full-price sales {_fp:.1f}u/wk do not support more")
+        elif l.get("accessory") and acc_max > 0:
+            l["tray_cap"] = acc_max
+            _why = f"Climb-itt accessory limit {acc_max} boxes per store"
+        if l["tray_cap"] is not None and trays > l["tray_cap"]:
+            l["trays_before_tray_cap"] = trays
+            trays = l["tray_cap"]
+            cap_note = ((cap_note or "") + " " + _why).strip()
         # approved scenario cap/floor (pre-bounded to pace at line creation; survives every
         # re-size). Floor runs BEFORE the §5 unreliable-inventory cap so data safety wins.
         if l.get("scn_cap_trays") is not None and trays > l["scn_cap_trays"]:
@@ -1294,6 +1362,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             stock_at_arrival=stock_at_arrival, inbound_later=inbound_later, lost_before_arrival=lost_before,
             old_projected=max(0.0, oh_adj + inbound - before_arrival),
             plannable=is_plannable, oh_conflict=oh_conflict,
+            fp_rate=(fp_rate.get((store_id, sku_id), 0.0) if fam in H2O_TERR_FAMILIES else None),
+            accessory=is_accessory(sku_id),
             stockout_recovery=(dict(_so[0], benchmark=round(_so[1][0], 2), period=_so[1][1]) if _so else None))
         # scenario floor/cap, computed ONCE here (value_numeric is SHELVES) and pre-bounded to
         # the store's selling pace — §17's 13-week window for H2O/Terrarium, the sell-through
@@ -1735,6 +1805,56 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 scn_fx[_a["adj_id"]]["lines"] += 1
                 scn_fx[_a["adj_id"]]["stores"].add(l["store_id"])
 
+    # DUAL-USE CONVERSION (Jason's Week 49 order, 11/25): Aster plant lines named
+    # "... Everyday/Ceramic" on the 9cm Ceramic SKU are the same 9cm plant the Littles program
+    # packs. When Littles are short of need and Ceramic has room, whole lines move to Littles
+    # until both are covered at the same share of their need (or the dual-use stock / the
+    # setting's maximum runs out). Whole lines only, so every Aster line stays under one HD SKU.
+    # Operations confirms the physical repack before release (decision dual_use_conversion).
+    dual = {"mode": str(S.get("dual_use_conversion", "auto") or "off").lower(), "from_sku": None,
+            "to_sku": None, "dual_use_units": 0, "target_units": 0, "converted_units": 0, "lines": []}
+    _prog = lambda p: [s_ for s_, i in sku_info.items() if (i.get("program") or "") == p and s_ in supply]
+    _f, _t = _prog("Littles Ceramic"), _prog("Littles")
+    if dual["mode"] == "auto" and len(_f) == 1 and len(_t) == 1:
+        _f, _t = _f[0], _t[0]
+        dual.update(from_sku=_f, to_sku=_t)
+        _want = lambda sk: sum(l["trays"] * l["upt"] for l in ship.values() if l["sku_id"] == sk)
+        wF, wT, sF, sT = _want(_f), _want(_t), supply.get(_f, 0), supply.get(_t, 0)
+        _dl = [[lid, av] for lid, av in aster_lines.get(_f, [])
+               if "everyday/ceramic" in (plant_name.get(line_plant.get(lid, ""), "") or "").lower() and av > 0]
+        dual["dual_use_units"] = sum(av for _l, av in _dl)
+        dual.update(need_from=wF, need_to=wT, supply_from=sF, supply_to=sT)
+        if wT > sT and _dl:
+            x = dual_use_target(sF, sT, wF, wT, dual["dual_use_units"],
+                                int(float(S.get("dual_use_max_units", 0) or 0)))
+            dual["target_units"] = x
+            for lid, av in sorted(_dl, key=lambda e: (-e[1], e[0])):
+                if dual["converted_units"] + av > x:
+                    continue
+                g = line_genus.get(lid, "")
+                aster_lines[_f] = [e for e in aster_lines[_f] if e[0] != lid]
+                aster_lines[_t].append([lid, av])
+                pools.rem[_f][g] -= av
+                pools.total[_f][g] -= av
+                pools.add(_t, g, av)
+                supply[_f] -= av
+                supply[_t] += av
+                dual["converted_units"] += av
+                dual["lines"].append({"line_id": lid, "plant": line_plant.get(lid),
+                                      "name": plant_name.get(line_plant.get(lid, ""), ""), "units": av})
+            aster_lines[_t].sort(key=lambda e: (-e[1], e[0]))
+        if dual["converted_units"]:
+            decide("dual_use_conversion",
+                   f"{dual['converted_units']:,} 9cm dual-use (Everyday/Ceramic) plants on "
+                   f"{len(dual['lines'])} Aster line(s) moved from {_f} Littles Ceramic to {_t} Littles: "
+                   f"Littles need {wT:,}u vs {sT:,}u supply, Ceramic need {wF:,}u vs {sF:,}u. Operations: "
+                   f"confirm these plants can be repacked as Littles before release.",
+                   sku_id=_t, severity="warning", units=dual["converted_units"],
+                   from_sku=_f, lines=dual["lines"])
+        log(f"Dual-use conversion: {dual['converted_units']:,}u of {dual['dual_use_units']:,}u dual-use "
+            f"ceramic moved to Littles (target {dual['target_units']:,}u; Littles need {wT:,}u / supply {sT:,}u, "
+            f"Ceramic need {wF:,}u / supply {sF:,}u)")
+
     by_sku = defaultdict(list)
     for k, l in ship.items():
         by_sku[l["sku_id"]].append(l)
@@ -1832,6 +1952,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             add = min(c["trays"] - c.get("gap_fill_trays", 0),           # selling-window guard
                       pools.left(c["sku_id"], gdeny) // c["upt"],
                       (fam_need - fam_alloc) // c["upt"])
+            if c.get("tray_cap") is not None:                             # per-line tray limit
+                add = min(add, c["tray_cap"] - c["alloc_trays"])
             if add <= 0:
                 continue
             u = add * c["upt"]
@@ -2081,6 +2203,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 have = got[l["sku_id"]]
                 ceiling = int((l["fc"] * w - max(0.0, l["projected"])) // l["upt"])
                 by_wos = max(l["trays"], ceiling) - have        # its own need always qualifies
+                if l.get("tray_cap") is not None:
+                    by_wos = min(by_wos, max(l["trays"], l["tray_cap"]) - have)   # per-line tray limit
                 by_supply = int(pools.left(l["sku_id"], deny) // l["upt"]) - have
                 return max(0, min(by_wos, by_supply)), w, by_wos, by_supply
 
@@ -2176,7 +2300,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                           grade=grade.get((st_id, _fam), ls[0].get("grade")), service="ELIGIBLE",
                           conversion=None, conv_conf="no history", reactivation=None,
                           sku_fit=0.0, priority=min(x.get("priority", 0) for x in ls),
-                          alloc_trays=0, alloc_units=0, test_item=True)
+                          alloc_trays=0, alloc_units=0, test_item=True,
+                          oh_conflict=None, stockout_recovery=None, fp_rate=None, accessory=False,
+                          tray_cap=None)
+                nl.pop("trays_before_tray_cap", None)
                 lines[(st_id, _sk)] = nl
                 ship[(st_id, _sk)] = nl
                 ls.append(nl)
@@ -2236,6 +2363,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # $180–$300 (default $240); normal wholesale value per cart is roughly $1,700–$3,000.
     cart_cost = float(S.get("cart_delivered_cost", 240) or 240)
     low_value_wh = float(S.get("cart_wholesale_low", 1700) or 1700)
+    cv_hard = str(S.get("cart_value_floor", "hard") or "off").lower() == "hard"
     consolidate = str(S.get("cart_consolidate", True)).lower() not in ("false", "0", "no")
     orders = {}
     for l in ship.values():
@@ -2436,6 +2564,62 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # that pass ship whole (a trailing partial cart rides on the same stop).
     returned = defaultdict(int)     # sku -> units handed back by held (pushed/deferred) orders
     held_orders = {}                 # store -> its held order (lines keep deferred_units), for the target step
+    # FULL CARTS ONLY (Jason's Week 49 order, 11/25: "all carts fully allocated"): a store with
+    # more than one cart drops a trailing cart filled below min_cart_fill — the lowest-value
+    # partial cart's trays go back to the pool (re-offered to other stores' open space; this
+    # store's need is recalculated next week). A cart holding a directed or named-variety line
+    # is never cut. Single-cart orders are judged by the minimum-order rule below.
+    trim = {"enabled": str(S.get("trim_partial_carts", True)).lower() not in ("false", "0", "no"),
+            "stores": 0, "carts": 0, "units": 0, "wholesale": 0.0}
+    if trim["enabled"]:
+        for store_id in sorted(orders):
+            if store_id in directed_stores or (stores.get(store_id) or {}).get("capacity_carts"):
+                continue
+            o = orders[store_id]
+            if any(l.get("alloc_in_pool") for l in o["lines"]):
+                continue                 # cart completion could not fill it: trays already pooled, pushed below
+            _deny_t = store_deny.get(store_id, NO_DENY)
+            _cut_u, _cut_c, _cut_w = 0, 0, 0.0
+            for _i in range(8):
+                cs = o["carts"]
+                if len(cs) <= 1:
+                    break
+                by_sku_t = {l["sku_id"]: l for l in o["lines"]}
+                part = [c for c in cs if c["tray_fill"] < min_cart_fill - 1e-9
+                        and not any((by_sku_t.get(x[1]) or {}).get("directed_trays")
+                                    or (by_sku_t.get(x[1]) or {}).get("variety_codes") for x in c["contents"])]
+                if not part:
+                    break
+                c = min(part, key=lambda c_: (c_["wholesale_value"], -c_["cart_number"]))
+                for (_pos, sk, tr, u, _k, _pid) in c["contents"]:
+                    l = by_sku_t.get(sk)
+                    if not l:
+                        continue
+                    tr_, u_ = min(tr, l["alloc_trays"]), min(u, l["alloc_units"])
+                    l["alloc_trays"] -= tr_
+                    l["alloc_units"] -= u_
+                    l["trimmed_units"] = l.get("trimmed_units", 0) + u_
+                    pools.give_back(sk, u_, _deny_t)
+                    returned[sk] += u_
+                    _cut_u += u_
+                _cut_c += 1
+                _cut_w += c["wholesale_value"]
+                _pack_store(store_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
+                o = orders[store_id]
+            if _cut_c:
+                alloc_units_total -= _cut_u
+                trim["stores"] += 1
+                trim["carts"] += _cut_c
+                trim["units"] += _cut_u
+                trim["wholesale"] += _cut_w
+                decide("partial_cart_trimmed",
+                       f"Trailing partial cart(s) removed so every cart ships full: {_cut_c} cart(s), "
+                       f"{_cut_u:,}u, ${_cut_w:,.0f} back to the pool; the store keeps "
+                       f"{len(o['carts'])} full cart(s) and its need is recalculated next week",
+                       store_id=store_id, severity="info", carts_cut=_cut_c, units_cut=_cut_u,
+                       wholesale_cut=round(_cut_w, 2))
+        log(f"Full carts only: {trim['stores']:,} stores trimmed ({trim['carts']:,} partial carts, "
+            f"{trim['units']:,}u, ${trim['wholesale']:,.0f} back to the pool)")
     pushed = {"stores": 0, "carts": 0, "units": 0, "wholesale": 0.0, "lost_one_week": 0.0,
               "repeat_stores": 0, "review_stores": 0}
     # Escalation (audit F2, 2026-11-20): a store pushed this many consecutive due cycles has its
@@ -2536,6 +2720,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             action = "release"               # an approved directed shipment is never deferred
         if min_full_carts > 0 and action == "defer":
             action = "release_min_cart"     # floor met: one full CC cart is the agreed minimum
+        # Cart value floor (Jason's Week 49 order, 11/25: "every routine cart exceeds $1,700"):
+        # hard = an order averaging under cart_wholesale_low per cart is held, whatever the
+        # min-cart / lost-sales / overdue releases say. Directed shipments still ship.
+        floor_hold = cv_hard and action != "pass" and store_id not in directed_stores
+        if floor_hold:
+            action = "defer"
+            econ["held_below_value_floor"] = econ.get("held_below_value_floor", 0) + 1
         if action == "pass":
             continue
         fp = (C / W) if W else None
@@ -2568,9 +2759,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             econ["released_low_value"] += n
             econ["stores_released_low_value"] += 1
             continue
-        decide("deferred_economics", f"Order DEFERRED: {nums} < delivered cost — waiting a week costs "
-                                     f"less than delivering now; deferred once, will ship next time due "
-                                     f"regardless; need recalculated then, never padded (§19.1, §23)", store_id=store_id, action="defer", **data)
+        decide("deferred_economics", (f"Order HELD: {nums} — below the ${low_value_wh:,.0f}-per-cart value floor "
+                                      f"(cart_value_floor = hard); its trays go back to the pool for other "
+                                      f"stores, need recalculated next week") if floor_hold else
+               (f"Order DEFERRED: {nums} < delivered cost — waiting a week costs "
+                f"less than delivering now; deferred once, will ship next time due "
+                f"regardless; need recalculated then, never padded (§19.1, §23)"),
+               store_id=store_id, action="defer", value_floor=bool(floor_hold), **data)
         econ["deferred_carts"] += n
         econ["deferred_units"] += data["units"]
         econ["deferred_wholesale"] += W
@@ -2636,7 +2831,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             _pack_store(st_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
             # no sparse carts (Josh 2026-11-24): a released order must still fill at least one cart
             # to the minimum fill (min_cart_fill_pct); otherwise it stays held and its trays go back
-            if min_full_carts > 0 and not any(c["phys_full"] for c in orders[st_id]["carts"]):
+            _rc = orders[st_id]["carts"]
+            if (min_full_carts > 0 and not any(c["phys_full"] for c in _rc)) or (
+                    cv_hard and _rc and sum(c["wholesale_value"] for c in _rc) / len(_rc) < low_value_wh):
                 for l in o["lines"]:
                     if l.get("target_released"):
                         pools.give_back(l["sku_id"], l["alloc_units"], deny)
@@ -2906,6 +3103,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                            "over the store's weeks of supply" if l.get("alloc_units", 0) + u > _m_ceiling(l) + 1e-9
                            # §17: H2O/Terrarium are sized rounding DOWN and never exceed their own
                            # need; a config match is not a reason to send more (Racine 11/24)
+                           else "over the product's tray limit" if (
+                               l.get("tray_cap") is not None and l.get("alloc_trays", 0) + d > l["tray_cap"])
                            else "H2O/Terrarium above its own need" if (
                                l["family"] in H2O_TERR_FAMILIES and l.get("alloc_trays", 0) + d > l.get("trays", 0))
                            else "different family or pot size" if (l["family"], pack[sk]["profile_id"]) not in rem_fp
@@ -3266,8 +3465,46 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"shipping ({so_summary['units']:,}u, ${so_summary['wholesale']:,.0f}) at {so_summary['stores']:,} stores · "
         f"shelf checks: {oc_summary['lines_shipped']:,} shipping lines at {oc_summary['stores']:,} stores "
         f"({oc_summary['units_capped_off']:,}u capped off)")
+    # Tray limits / dual-use conversion / cart value floor (Jason's Week 49 order, 11/25)
+    tl_summary = {"h2o_terrarium_max_trays": ht_max, "fullprice_share": ht_fp_share,
+                  "fullprice_weeks": round(fp_weeks, 1), "accessory_max_boxes": acc_max,
+                  "h2o_terrarium": {"lines_limited": 0, "trays_cut": 0, "lines_above_limit_fullprice": 0},
+                  "accessories": {"lines_limited": 0, "trays_cut": 0, "stores": 0, "boxes": 0}}
+    for l in lines.values():
+        if not l.get("plannable") or l.get("tray_cap") is None:
+            continue
+        _g = tl_summary["h2o_terrarium" if l["family"] in H2O_TERR_FAMILIES else "accessories"]
+        if l.get("trays_before_tray_cap"):
+            _g["lines_limited"] += 1
+            _g["trays_cut"] += l["trays_before_tray_cap"] - l["tray_cap"]
+        if l["family"] in H2O_TERR_FAMILIES and l["tray_cap"] > ht_max:
+            _g["lines_above_limit_fullprice"] += 1
+    _acc = [l for l in _shipped if l.get("accessory")]
+    tl_summary["accessories"].update(stores=len({l["store_id"] for l in _acc}),
+                                     boxes=sum(l["alloc_trays"] for l in _acc))
+    _lit = [l for l in _shipped if dual.get("to_sku") and l["sku_id"] == dual["to_sku"]]
+    dual.update(littles_stores=len({l["store_id"] for l in _lit}),
+                littles_units=sum(l["alloc_units"] for l in _lit),
+                littles_stores_with_need=len({l["store_id"] for l in lines.values()
+                                              if dual.get("to_sku") and l["sku_id"] == dual["to_sku"]
+                                              and l.get("trays", 0) > 0}))
+    _cpv = [c["wholesale_value"] for o in orders.values() for c in o["carts"]]
+    cv_summary = {"mode": "hard" if cv_hard else "off", "per_cart_floor": low_value_wh,
+                  "stores_held": econ.get("held_below_value_floor", 0),
+                  "carts_below_floor": sum(1 for v in _cpv if v < low_value_wh),
+                  "avg_wholesale_per_cart": round(sum(_cpv) / len(_cpv), 2) if _cpv else 0}
+    log(f"Tray limits: H2O/Terrarium {tl_summary['h2o_terrarium']['lines_limited']:,} lines limited "
+        f"({tl_summary['h2o_terrarium']['trays_cut']:,} trays) · accessories "
+        f"{tl_summary['accessories']['lines_limited']:,} lines limited, {tl_summary['accessories']['boxes']:,} boxes "
+        f"to {tl_summary['accessories']['stores']:,} stores · Littles to {dual['littles_stores']:,} stores "
+        f"({dual['littles_units']:,}u) · value floor {cv_summary['mode']}: {cv_summary['stores_held']:,} stores held, "
+        f"avg ${cv_summary['avg_wholesale_per_cart']:,.0f}/cart")
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
+        "tray_limits": tl_summary,
+        "dual_use_conversion": {k: v for k, v in dual.items() if k != "lines"} | {"lines": len(dual["lines"])},
+        "cart_value_floor": cv_summary,
+        "partial_cart_trim": {**trim, "wholesale": round(trim["wholesale"], 2)},
         "stockout_recovery": so_summary,
         "onhand_check": oc_summary,
         "demand_history": _dh_summary,

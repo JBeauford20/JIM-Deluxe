@@ -100,3 +100,25 @@ def test_overdue_store_is_released_not_deferred():
     assert is_overdue(None, arrival, 1) is True
     assert economic_action(500, 1, 50, 240, 1700, False, 0, 1, overdue=True) == "release_overdue"
     assert economic_action(500, 1, 50, 240, 1700, False, 0, 1, overdue=False) == "defer"
+
+
+# ── dual-use 9cm ceramic -> Littles conversion amount (Jason's Week 49 order, 11/25) ──
+from ipr_engine import dual_use_target  # noqa: E402
+
+
+def test_dual_use_balances_coverage_week_49_figures():
+    # Week 49 inputs: Littles need 79,188 vs 19,509; Ceramic need 31,968 vs 35,878
+    x = dual_use_target(35878, 19509, 31968, 79188, 24640)
+    assert 19000 < x < 20000
+    assert abs((19509 + x) / 79188 - (35878 - x) / 31968) < 0.001
+
+
+def test_dual_use_respects_dual_stock_cap_and_shortfall():
+    assert dual_use_target(35878, 19509, 31968, 79188, 5000) == 5000       # dual-use stock
+    assert dual_use_target(35878, 19509, 31968, 79188, 24640, 14232) == 14232  # setting cap
+    assert dual_use_target(50000, 1000, 0, 3000, 24640) == 2000            # Littles shortfall
+
+
+def test_dual_use_never_converts_when_littles_are_covered_or_ceramic_is_tighter():
+    assert dual_use_target(35878, 20000, 31968, 20000, 24640) == 0
+    assert dual_use_target(1000, 1000, 50000, 2000, 24640) == 0            # ceramic worse covered
