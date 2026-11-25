@@ -122,3 +122,25 @@ def test_dual_use_respects_dual_stock_cap_and_shortfall():
 def test_dual_use_never_converts_when_littles_are_covered_or_ceramic_is_tighter():
     assert dual_use_target(35878, 20000, 31968, 20000, 24640) == 0
     assert dual_use_target(1000, 1000, 50000, 2000, 24640) == 0            # ceramic worse covered
+
+
+# ── shelf splitting (Josh 2026-11-25: a shelf may hold two different products) ──
+from ipr_engine import pair_partial_shelves  # noqa: E402
+
+
+def _pp(shelves):
+    return pair_partial_shelves(shelves, lambda x: x[1], lambda x: x[2], lambda x: x[0],
+                                lambda a, b: (a[0] | b[0], a[1] + b[1], max(a[2], b[2])))
+
+
+def test_two_partial_shelves_of_different_products_share_one_shelf():
+    out = _pp([(frozenset({"littles"}), 0.5, 15), (frozenset({"cer9"}), 0.5, 15),
+               (frozenset({"euro12"}), 1.0, 21)])
+    assert len(out) == 2
+    assert any(x[0] == frozenset({"littles", "cer9"}) and abs(x[1] - 1.0) < 1e-9 for x in out)
+
+
+def test_split_never_overfills_or_exceeds_two_products():
+    out = _pp([(frozenset({"a"}), 0.7, 15), (frozenset({"b"}), 0.6, 15), (frozenset({"c"}), 0.2, 15)])
+    assert all(x[1] <= 1.0 + 1e-9 and len(x[0]) <= 2 for x in out)
+    assert len(out) == 2                      # a+c paired, b alone (a+b would overfill)

@@ -39,6 +39,19 @@ CATALOG = [
     dict(key="cart_wholesale_low", group="Minimum order and carts", label="Low-value cart threshold (wholesale)",
          kind="money", default=1700, min=100, max=10000,
          help="A cart below this wholesale value is flagged low-value (leadership range $1,700 to $3,000)."),
+    dict(key="accessory_round_up_min_share", group="Sell-through gates",
+         label="Climb-itt accessories: smallest need (share of a box) that earns a box", kind="pct",
+         default=0.5, min=0.0, max=1.0,
+         help="At 50% a store needing half a box or more gets whole boxes (up to the limit). Lower = more "
+              "stores get a box; on the Week 49 inputs 50% gave ~580 boxes vs Jason's 384, 25% ~990."),
+    dict(key="split_shelves", group="Minimum order and carts",
+         label="Two different products may share one shelf", kind="bool", default=True,
+         help="Josh 11/25. Two part-filled shelves of different products are combined onto one shelf when "
+              "they fit together (shelf height = the taller product). Never more than two products per shelf."),
+    dict(key="accessory_round_up", group="Sell-through gates",
+         label="Climb-itt accessories: round need up to a whole box", kind="bool", default=True,
+         help="Josh 11/25, agreeing with Jason: hard goods never expire, so a store that has sold the "
+              "accessory gets a whole box even when its need is less than one (still at most the box limit)."),
     dict(key="historical_lot_fill", group="Minimum order and carts",
          label="Fill carts up to the largest earlier restock the store sold through", kind="bool", default=True,
          help="Jason's Week 49 brief: before a store is pushed for not filling a cart, its products may be "
