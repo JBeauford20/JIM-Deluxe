@@ -36,14 +36,17 @@ def test_routing_feasibility_overall_and_by_region():
     stops = {1: (1, False), 2: (1, True), 3: (2, False), 4: (3, False), 5: (0, False)}
     region = {1: "West", 2: "West", 3: "East", 4: "East"}
     r = SR.routing_feasibility(stops, region, capacity=4, max_stops=1.5)
-    assert r["carts"] == 7 and r["stops"] == 4 and r["trucks"] == 2
-    assert r["stops_per_truck"] == 2.0 and not r["pass"]
+    assert r["carts"] == 7 and r["stops"] == 4 and r["trucks"] == 3      # East 2 + West 1
+    assert r["trucks_if_pooled"] == 2
+    assert r["stops_per_truck"] == 1.33 and not r["pass"]                 # West is over
     assert r["single_cart_stops"] == 2 and r["single_cart_stops_directed_only"] == 1
     assert r["carts_per_stop"] == 1.75
     assert r["by_region"]["East"] == {"carts": 5, "stops": 2, "trucks": 2, "stops_per_truck": 1.0,
                                       "carts_per_stop": 2.5, "single_cart_stops": 0,
                                       "single_cart_stops_directed_only": 0, "pass": True}
     assert r["by_region"]["West"]["trucks"] == 1 and not r["by_region"]["West"]["pass"]
+    ok = SR.routing_feasibility({1: (2, False), 2: (2, False)}, {1: "A", 2: "B"}, capacity=45, max_stops=20)
+    assert ok["trucks"] == 2 and ok["trucks_if_pooled"] == 1 and ok["pass"]
 
 
 def test_routing_feasibility_empty():
@@ -75,3 +78,9 @@ def test_scorecard():
     sc = SR.scorecard([c1, c2, c3])
     assert not sc["pass"] and sc["failing"] == ["stops_per_truck", "lost"]
     assert SR.scorecard([c1])["pass"]
+
+
+def test_informational_check_never_fails():
+    c = SR.check("single_cart_stops_not_directed", 12, 0, "==", "routing", informational=True)
+    assert c["pass"] and c["informational"] and not c["within_target"]
+    assert SR.scorecard([c])["pass"]

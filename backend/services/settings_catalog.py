@@ -92,8 +92,18 @@ CATALOG = [
          help="Jason 11/25: build carts iteratively. After trims, shelf cuts and pushes free stock, each due "
               "store without a routine cart gets a second build from its proven sellers (AA/A/B first); it "
               "ships only with a full cart, every shelf full, and the blended sell-through target met."),
+    dict(key="stop_rule", group="Minimum order and carts", label="Routing rule for delivery stops", kind="choice",
+         default="budget", choices=["budget", "minimum", "off"],
+         choice_labels={"budget": "Stop budget per region: stops <= trucks x most stops per truck (an average)",
+                        "minimum": "Every stop gets at least the minimum carts per stop",
+                        "off": "No routing rule (report only)"},
+         help="Routing 11/25: a truck carries about 45 carts and at most 20 stops. Budget (default): per region, "
+              "while stops exceed trucks x the stop cap, the lowest-ranked single-cart stop (D first, lowest "
+              "wholesale first) waits a week; the freed stock adds full, selling carts to the stops that stay, "
+              "and held stops come back best first when the budget has room. Directed / pre-built-only stops "
+              "always ship and always count."),
     dict(key="min_carts_per_stop", group="Minimum order and carts",
-         label="Minimum carts per delivery stop", kind="int", default=2, min=0, max=4,
+         label="Minimum carts per delivery stop (routing rule: minimum)", kind="int", default=2, min=0, max=4,
          help="Routing 11/25: a truck carries about 45 carts and at most 20 stops, so one-cart stops make "
               "the order unroutable. Every store must get at least this many carts (routine, directed and "
               "pre-built all count). A store under it is rebuilt from free stock, best stores first, with "

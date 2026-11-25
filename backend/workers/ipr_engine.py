@@ -1148,14 +1148,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if _pr:
         cur.execute("""SELECT run_id::text AS run_id, store_id, decision_type FROM run_decisions
                        WHERE run_id = ANY(%s::uuid[]) AND store_id IS NOT NULL
-                         AND decision_type IN ('pushed_min_cart', 'held_stop_minimum', 'not_due')""", (_pr,))
+                         AND decision_type IN ('pushed_min_cart', 'held_stop_minimum', 'held_stop_budget', 'not_due')""", (_pr,))
         _ph = defaultdict(lambda: [set() for _ in _pr])
         for r in cur.fetchall():
             _ph[r["store_id"]][_pr.index(r["run_id"])].add(r["decision_type"])
         for st_id, weeks in _ph.items():
             n = 0
             for kinds in weeks:
-                if "pushed_min_cart" in kinds or "held_stop_minimum" in kinds:
+                if kinds & {"pushed_min_cart", "held_stop_minimum", "held_stop_budget"}:
                     n += 1            # held under the stop minimum counts as a push (need grows)
                 elif "not_due" in kinds:
                     continue
@@ -3381,12 +3381,20 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             got = 0
             for l in o["lines"]:
                 want_t = int((l.get("deferred_units") or 0) // max(1, l["upt"]))
+                if l.get("alloc_in_pool") and l.get("alloc_trays", 0) > 0:
+                    # cart completion handed these trays back to the pool but left the figures on
+                    # the line: re-take them like any other held tray (store 1961, Week 49: 151u
+                    # of Climb-itt shipped without being taken from the pool, partial shelf)
+                    want_t = max(want_t, int(l["alloc_trays"]))
+                    l["alloc_trays"] = l["alloc_units"] = 0
+                    l.pop("alloc_in_pool", None)
                 t = min(want_t, int(pools.left(l["sku_id"], deny) // l["upt"]))
                 if t > 0:
                     pools.take(l["sku_id"], t * l["upt"], deny)
                     returned[l["sku_id"]] -= t * l["upt"]
                     l["alloc_trays"], l["alloc_units"] = t, t * l["upt"]
                     l["deferred_units"], l["target_released"] = 0, True
+                    l.pop("alloc_in_pool", None)    # taken now: a stale flag made later passes skip it
                     got += t * l["upt"]
             if not got:
                 continue
@@ -3914,9 +3922,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # that cannot reach the minimum gets no routine cart this week (its trays stay in the pool).
     second = {"enabled": str(S.get("second_chance_carts", True)).lower() not in ("false", "0", "no"),
               "stores_tried": 0, "stores": 0, "carts": 0, "units": 0, "wholesale": 0.0}
+    # STOP RULE (routing 11/25, second review): "budget" (default) keeps every region inside its
+    # truck stop budget — trucks = ceil(carts / truck_cart_capacity), budget = trucks x
+    # max_stops_per_truck — an AVERAGE, so a one-cart AA stop is fine on a truck that also carries
+    # multi-cart stops. "minimum" is the per-store rule (min_carts_per_stop). "off": neither.
+    stop_rule = str(S.get("stop_rule", "budget") or "budget").strip().lower()
+    if stop_rule not in ("budget", "minimum", "off"):
+        stop_rule = "budget"
+    truck_cap = int(S.get("truck_cart_capacity", 45) or 45)
+    max_spt = float(S.get("max_stops_per_truck", 20) or 20)
     _msv = S.get("min_carts_per_stop")
     min_stop = 2 if _msv is None else int(_msv or 0)
-    stopmin = {"min": min_stop, "enabled": min_stop >= 2, "stores_under": 0, "stores_rebuilt": 0,
+    stopmin = {"min": min_stop, "enabled": stop_rule == "minimum" and min_stop >= 2, "stores_under": 0, "stores_rebuilt": 0,
                "stores_held": 0, "units_held": 0, "wholesale_held": 0.0, "units_rebuilt": 0,
                "wholesale_rebuilt": 0.0, "held_by_reason": {}, "held_by_grade": {},
                "held_with_directed_cart": 0, "prebuilt_exceptions": 0, "capacity_exceptions": 0,
@@ -3925,6 +3942,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                "keep_original_order": str(S.get("stop_minimum_keep_original_order", False)).lower()
                in ("true", "1", "yes")}
     _builder_on = bool(completion.get("enabled")) and min_full_carts > 0
+    budget = {"enabled": stop_rule == "budget", "truck_cart_capacity": truck_cap, "max_stops_per_truck": max_spt,
+              "stops_held": 0, "units_held": 0, "wholesale_held": 0.0, "held_by_grade": {},
+              "held_wholesale_by_grade": {}, "stores_deepened": 0, "carts_added_by_deepening": 0,
+              "wholesale_added_by_deepening": 0.0, "readmitted": 0, "admitted_new": 0,
+              "carts_admitted": 0, "wholesale_admitted": 0.0, "rounds": 0, "exceptions": {}}
+    _held_by_rule = set()                         # stores held on purpose by the stop rule
 
     def _is_routine(l):
         return not (l.get("directed_trays") or l.get("variety_codes")
@@ -3943,10 +3966,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                    and SK.fits_shelf([(p, t) for p, t, _ in its])
                    and not SK.shelf_is_full([(p, t) for p, t, _ in its]))
 
-    if stopmin["enabled"] and not _builder_on:
-        stopmin["skipped"] = "needs cart_completion on and min_order_full_carts > 0"
-        log("Stop minimum skipped: it builds carts with the cart-completion estimator, which is off")
-    if _builder_on and (second["enabled"] or stopmin["enabled"]):
+    if (stopmin["enabled"] or budget["enabled"]) and not _builder_on:
+        stopmin["skipped"] = budget["skipped"] = "needs cart_completion on and min_order_full_carts > 0"
+        log("Stop rule skipped: it builds carts with the cart-completion estimator, which is off")
+    if _builder_on and (second["enabled"] or stopmin["enabled"] or budget["enabled"]):
         _sc_lines = defaultdict(list)
         for (st_, sk_), l in ship.items():
             if (_is_routine(l) and l.get("plannable") and sk_ in pack and l["fc"] > 0
@@ -3956,7 +3979,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if (st_, sk_) in ship or st_ not in _sc_lines or not l.get("cc_candidate"):
                 continue
             _sc_lines[st_].append(l)
-        _seed_lines, _seeds, _pack_miss = {}, {}, []                 # stop minimum: each store's handed-back order
+        _seed_lines, _seeds, _pack_miss, _last_why = {}, {}, [], {}                 # stop minimum: each store's handed-back order
         _ship_of = defaultdict(list)                 # store -> its ship lines (undo snapshots)
         for (st_, sk_), l in ship.items():
             _ship_of[st_].append(l)
@@ -4132,6 +4155,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             undone exactly. Returns (ok, info)."""
             nonlocal alloc_units_total
             ok_, plan_ = _plan_routine_carts(st_id, target, seed)
+            if not ok_:
+                _last_why[st_id] = plan_.get("why")
             if not ok_ or plan_.get("k", 1) <= 0:
                 return ok_, plan_
             ls, got = plan_["ls"], plan_["got"]
@@ -4202,6 +4227,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                         _full_shelves_pass(stage, only={st_id})
                     why, o_, rc, st_ = _verify()
             if why:
+                _last_why[st_id] = why
                 _real = ([round(c["tray_fill"], 3) for c in o_["carts"]] if o_ else [])
                 _restore(sn, st_id, ls)
                 if len(_pack_miss) < 12:
@@ -4212,6 +4238,35 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             return True, {"tried": True, "carts": len(rc), "units": sum(l.get("alloc_units", 0) for l in o_["lines"]
                                                                        if _is_routine(l)),
                           "wholesale": sum(c["wholesale_value"] for c in rc), "sellthrough": st_}
+
+        def _hand_back_routine(st_id):
+            """Every routine tray of the store back to the pool (directed / pre-built untouched);
+            remembers the order (_seeds) for a later rebuild; re-packs what is left or drops the
+            store from the order. Returns the units handed back."""
+            nonlocal alloc_units_total
+            o_ = orders[st_id]
+            deny = store_deny.get(st_id, NO_DENY)
+            hu = 0
+            _seed_lines[st_id], _seeds[st_id] = [], {}
+            for l in o_["lines"]:
+                if not _is_routine(l) or (l.get("alloc_trays", 0) <= 0 and not l.get("alloc_units")):
+                    continue
+                _seed_lines[st_id].append(l)
+                _seeds[st_id][id(l)] = int(l.get("alloc_trays", 0) or 0)
+                u = int(l.get("alloc_units", 0) or 0)
+                if not l.get("alloc_in_pool"):
+                    pools.give_back(l["sku_id"], u, deny)
+                l.pop("alloc_in_pool", None)
+                alloc_units_total -= u
+                hu += u
+                l["deferred_units"] = u
+                l["alloc_units"] = l["alloc_trays"] = 0
+            keep = [l for l in o_["lines"] if l.get("alloc_trays", 0) > 0]
+            if keep:
+                _pack_store(st_id, keep)
+            else:
+                del orders[st_id]
+            return hu
 
         def _protected_cart_count(st_):
             o_ = orders.get(st_)
@@ -4279,29 +4334,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             stopmin["stores_under"] = len(under)
             _held_u = {}
             for st_id in under:                   # 1) every under-minimum store's routine trays back
-                o_ = orders[st_id]
-                deny = store_deny.get(st_id, NO_DENY)
-                hu = 0
-                _seed_lines[st_id], _seeds[st_id] = [], {}
-                for l in o_["lines"]:
-                    if not _is_routine(l) or (l.get("alloc_trays", 0) <= 0 and not l.get("alloc_units")):
-                        continue
-                    _seed_lines[st_id].append(l)
-                    _seeds[st_id][id(l)] = int(l.get("alloc_trays", 0) or 0)
-                    u = int(l.get("alloc_units", 0) or 0)
-                    if not l.get("alloc_in_pool"):
-                        pools.give_back(l["sku_id"], u, deny)
-                    l.pop("alloc_in_pool", None)
-                    alloc_units_total -= u
-                    hu += u
-                    l["deferred_units"] = u
-                    l["alloc_units"] = l["alloc_trays"] = 0
-                _held_u[st_id] = hu
-                keep = [l for l in o_["lines"] if l.get("alloc_trays", 0) > 0]
-                if keep:
-                    _pack_store(st_id, keep)
-                else:
-                    del orders[st_id]
+                _held_u[st_id] = _hand_back_routine(st_id)
             # 2) rebuild to the minimum, AA/A/B first. Due stores with no routine cart (second
             # chance found too little stock earlier; directed-only stops) compete for the freed
             # stock in the same priority order: their build also aims for the stop minimum.
@@ -4343,6 +4376,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                            units=info["units"], carts_before=n0, carts_after=len(orders[st_id]["carts"]))
                     continue
                 _g = store_cadence(st_id)[0]
+                _held_by_rule.add(st_id)
                 stopmin["stores_held"] += 1
                 stopmin["units_held"] += _held_u[st_id]
                 stopmin["wholesale_held"] += wh0
@@ -4366,6 +4400,309 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 f"built from the freed stock · {stopmin['stores_held']:,} held "
                 f"({stopmin['units_held']:,}u, ${stopmin['wholesale_held']:,.0f}) · reasons {stopmin['held_by_reason']}")
 
+        # STOP BUDGET (default stop rule). Trucks run within a region (the network's trucks are the
+        # sum of the regions'). Per region: trucks = ceil(carts / truck_cart_capacity),
+        # stop budget = trucks x max_stops_per_truck; every stop counts, directed-only ones too
+        # (they ship regardless and are never touched). (a) While a region (or the network) is over
+        # budget, the lowest-ranked non-directed SINGLE-CART stop is held — grade D first, then C,
+        # B, A, AA, lowest wholesale first within a grade — its routine trays back to the pool. (A
+        # single cart always costs budget: +1 stop for 1/45 of a truck, i.e. 20/45 of a stop.)
+        # (b) The freed pool deepens the stops that stay, AA/A/B first: one more full routine cart
+        # at a time with the shared builder and the same qualification. More carts can mean more
+        # trucks and so more budget: (c) held stops are re-admitted best first (their own order as
+        # the starting point), then due stores without a cart, only while the budget has room.
+        # Repeat until nothing changes. A region over budget only because of directed-only stops
+        # is reported as an exception.
+        if budget["enabled"]:
+            _GR = {g: i for i, g in enumerate(["D", "C-", "C", "C+", "B", "A", "AA"])}
+
+            def _rg(st_):
+                return (stores.get(st_) or {}).get("region") or "?"
+
+            def _bud(c):
+                return math.ceil(c / truck_cap) * max_spt if c > 0 else 0
+
+            def _rstats():
+                out = defaultdict(lambda: [0, 0])
+                for st_, o_ in orders.items():
+                    if o_["carts"]:
+                        out[_rg(st_)][0] += 1
+                        out[_rg(st_)][1] += len(o_["carts"])
+                return out
+
+            def _routine_wh(st_):
+                o_ = orders.get(st_)
+                if not o_:
+                    return 0.0
+                by = {l["sku_id"]: l for l in o_["lines"]}
+                return sum(c["wholesale_value"] for c in o_["carts"] if _cart_has_routine(c, by))
+
+            def _single_routine(st_):
+                """A non-directed single-cart stop: one cart, every shipping line routine."""
+                o_ = orders.get(st_)
+                return (bool(o_) and len(o_["carts"]) == 1
+                        and all(_is_routine(l) for l in o_["lines"] if l.get("alloc_trays", 0) > 0))
+
+            _hold_order, _hold_info = [], {}
+
+            def _plan_keep(s0, c0, n):
+                """How many of a region's n single-cart stops to keep, the other stops fixed at s0
+                stops / c0 carts (a single-cart stop is +1 stop, +1 cart): the most that fit the
+                budget; if none fits (directed-only stops), the number giving the fewest stops per
+                truck (ties: keep more) — holding singles also drops carts and so trucks."""
+                feas = [j for j in range(n + 1) if s0 + j <= _bud(c0 + j)]
+                if feas:
+                    return max(feas), True
+                ratio = lambda j: (s0 + j) / max(1, math.ceil((c0 + j) / truck_cap))
+                return min(range(n + 1), key=lambda j: (ratio(j), -j)), False
+
+            def _region_ok(r, s_, c_, n):
+                """(fits, stops per truck) of a region at s_ stops / c_ carts with n single-cart
+                stops that may give way, after the hold pass would act."""
+                j, fits = _plan_keep(s_ - n, c_ - n, n)
+                s2, c2 = s_ - n + j, c_ - n + j
+                return fits, s2 / max(1, math.ceil(c2 / truck_cap)), n - j
+
+            def _hold_pass():
+                changed = False
+                rs = _rstats()
+                for r, (s_, c_) in sorted(rs.items(), key=lambda kv: str(kv[0])):
+                    if s_ <= _bud(c_):
+                        continue
+                    singles = sorted((st_ for st_ in orders if _single_routine(st_) and _rg(st_) == r),
+                                     key=lambda st_: (_GR.get(store_cadence(st_)[0], 0), _routine_wh(st_), st_))
+                    j, _fits = _plan_keep(s_ - len(singles), c_ - len(singles), len(singles))
+                    for st_id in singles[:len(singles) - j]:
+                        _g = store_cadence(st_id)[0]
+                        wh = _routine_wh(st_id)
+                        u = _hand_back_routine(st_id)
+                        _hold_order.append(st_id)
+                        _hold_info[st_id] = (u, wh, _g)
+                        _held_by_rule.add(st_id)
+                        decisions[:] = [d_ for d_ in decisions
+                                        if not (d_[0] in ("second_chance_cart", "stop_budget_admitted") and d_[1] == st_id)]
+                        decide("held_stop_budget",
+                               f"Routine order held this week ({u:,}u, ${wh:,.0f} wholesale, grade {_g}): region "
+                               f"{r} was over its stop budget ({max_spt:g} stops per {truck_cap}-cart truck) and "
+                               f"this was among its lowest-ranked single-cart stops. Trays back to the pool.",
+                               store_id=st_id, severity="info", units=u, wholesale=round(wh, 2), grade=_g, region=r)
+                        changed = True
+                return changed
+
+            def _room(st_, add_carts=1):
+                rs = _rstats()
+                r = _rg(st_)
+                s_, c_ = rs[r] if r in rs else (0, 0)
+                return s_ + 1 <= _bud(c_ + add_carts)
+
+            def _deepen_pass():
+                changed = False
+                for st_id in sorted([st_ for st_ in orders if orders[st_]["carts"]],
+                                    key=lambda st_: (-_store_prio(st_), st_)):
+                    if st_id not in _sc_lines or (stores.get(st_id) or {}).get("capacity_carts"):
+                        continue
+                    o_ = orders[st_id]
+                    # quick screen: the free stock this store could still add (demand-backed, within
+                    # each product's cap) must make at least one full cart of full shelves
+                    _dn = store_deny.get(st_id, NO_DENY)
+                    _xs = {id(l): max(0, min(_sc_cap(l) - l.get("alloc_trays", 0),
+                                             int(pools.left(l["sku_id"], _dn) // max(1, l["upt"]))))
+                           for l in _sc_lines[st_id]}
+                    if not SR.top_k_full(_cc_cart_fills(_cc_state(_sc_lines[st_id], lambda l: _xs[id(l)]), True),
+                                         1, min_cart_fill):
+                        continue
+                    n0, wh0 = len(o_["carts"]), _routine_wh(st_id)
+                    _ids0 = {id(l) for l in _sc_lines[st_id]}
+                    _ls0 = list(_sc_lines[st_id]) + [l for l in o_["lines"] if id(l) not in _ids0]
+                    outer = _snapshot(st_id, _ls0)
+                    has_r = any(_is_routine(l) and l.get("alloc_trays", 0) > 0 for l in o_["lines"])
+                    seed = None
+                    if has_r:
+                        _hand_back_routine(st_id)
+                        seed = _seeds.get(st_id)
+                    ok, info = _build_routine_carts(st_id, n0 + 1, "stop_budget", seed)
+                    o_ = orders.get(st_id)
+                    if not ok or not o_ or len(o_["carts"]) < n0 + 1:
+                        _restore(outer, st_id, _ls0)
+                        continue
+                    _add_c, _add_w = len(o_["carts"]) - n0, _routine_wh(st_id) - wh0
+                    budget["carts_added_by_deepening"] += _add_c
+                    budget["wholesale_added_by_deepening"] += _add_w
+                    _deep_st.add(st_id)
+                    decide("stop_budget_deepened",
+                           f"+{_add_c} full routine cart(s) ({n0} -> {len(o_['carts'])}) from stock freed by the "
+                           f"stop budget, +${_add_w:,.0f}; projected sell-through "
+                           f"{(info.get('sellthrough') or 0):.0%}", store_id=st_id, severity="info",
+                           carts_before=n0, carts_after=len(o_["carts"]))
+                    changed = True
+                return changed
+
+            # a store is retried only when its region changed since its last try (at most 3 times
+            # per kind), so the loop converges
+            _tried_multi, _tried_single = {}, {}
+            _tried_multi_n, _tried_single_n = defaultdict(list), defaultdict(list)
+            _sab = S.get("scorecard_min_aab_share")
+            _aab_floor = (0.75 if _sab is None else float(_sab)) + 0.01      # keep a margin
+
+            def _hold_key(x):
+                return (_GR.get(store_cadence(x)[0], 0), _routine_wh(x), x)
+
+            def _aab_share(excl=()):
+                tot = aab = 0.0
+                for x, o_ in orders.items():
+                    if x in excl:
+                        continue
+                    w = _routine_wh(x)
+                    tot += w
+                    if store_cadence(x)[0] in ("AA", "A", "B"):
+                        aab += w
+                return (aab / tot) if tot else 1.0
+
+            def _admit_try(st_id, target, seed, strict):
+                """Build `target` full carts for a stop not in the order, then judge the swap: the
+                region must fit its budget (or, where directed-only stops make that impossible,
+                not get worse) once the hold pass gives way with its lowest-ranked single-cart
+                stops (strict: only stops ranked below this store's grade), the swap
+                must ADD routine wholesale, and the AA/A/B share must stay above the scorecard
+                floor. Else the build is undone exactly."""
+                _ids = set()
+                _ls0 = [l for l in list(_sc_lines.get(st_id, [])) + list(_seed_lines.get(st_id, []))
+                        if not (id(l) in _ids or _ids.add(id(l)))]
+                outer = _snapshot(st_id, _ls0)
+                ok, info = _build_routine_carts(st_id, target, "stop_budget", seed)
+                if not ok or not info.get("carts"):
+                    return False, info
+                r = _rg(st_id)
+                s_, c_ = _rstats()[r]
+                g = _GR.get(store_cadence(st_id)[0], 0)
+                singles = sorted(_hold_key(x) for x in orders if x != st_id and _single_routine(x) and _rg(x) == r)
+                # the hold pass would hold the lowest-ranked singles. For a one-cart stop (strict)
+                # only stops ranked below it may give way; a multi-cart stop may replace any
+                # single-cart stops when it brings more wholesale (and the AA/A/B share holds)
+                may = [x for x in singles if x[0] < g or not strict]
+                n_all = len(singles)
+                # before: the region without this stop; after: with it
+                fb, rb, _hb = _region_ok(r, s_ - 1, c_ - len(orders[st_id]["carts"]), n_all)
+                fa, ra, ha = _region_ok(r, s_, c_, n_all)
+                out = singles[:ha]
+                good = (len(out) <= len(may) and (fa or (not fb and ra <= rb + 1e-9))
+                        and _routine_wh(st_id) > sum(w for _rk, w, _x in out)
+                        and (store_cadence(st_id)[0] in ("AA", "A", "B")
+                             or _aab_share({x for _rk, _w, x in out}) >= _aab_floor))
+                if not good:
+                    _restore(outer, st_id, _ls0)
+                    return False, {"why": "stop_budget_swap_not_better"}
+                return True, info
+
+            def _admit_pass():
+                """Held stops best first (their own order as the start), then due stores without a
+                cart. A 2-cart build is tried first (it brings trucks as well as a stop), then a
+                one-cart build; either may take the place of lower-ranked single-cart stops only
+                when that adds routine wholesale and keeps the AA/A/B share (see _admit_try)."""
+                changed = False
+                _new = sorted([st_ for st_ in _sc_lines if not (orders.get(st_) or {}).get("carts") and st_ not in _hold_info
+                               and not (stores.get(st_) or {}).get("capacity_carts")],
+                              key=lambda st_: (-_store_prio(st_), st_))
+                for st_id in [x for x in reversed(_hold_order) if not (orders.get(x) or {}).get("carts")] + _new:
+                    held = st_id in _hold_info
+                    seed = _seeds.get(st_id) if held else None
+                    ok, info = False, {}
+                    _rs = _rstats()
+                    _state = (tuple(_rs.get(_rg(st_id), (0, 0))), len(_deep_st))
+                    if _tried_multi.get(st_id) != _state and len(_tried_multi_n[st_id]) < 3:
+                        _tried_multi[st_id] = _state
+                        _tried_multi_n[st_id].append(1)
+                        ok, info = _admit_try(st_id, 2, seed, False)
+                    if not ok and _tried_single.get(st_id) != _state and len(_tried_single_n[st_id]) < 3:
+                        _tried_single[st_id] = _state
+                        _tried_single_n[st_id].append(1)
+                        ok, info = _admit_try(st_id, 1, seed, True)
+                    if not ok:
+                        continue
+                    if held:
+                        _hold_order.remove(st_id)
+                        _hold_info.pop(st_id)
+                        _held_by_rule.discard(st_id)
+                        decisions[:] = [d_ for d_ in decisions if not (d_[0] == "held_stop_budget" and d_[1] == st_id)]
+                    decide("stop_budget_admitted",
+                           f"{'Re-admitted' if held else 'Admitted'} under the stop budget: {info['carts']} full "
+                           f"routine cart(s), {info['units']:,}u, projected sell-through "
+                           f"{(info.get('sellthrough') or 0):.0%}", store_id=st_id, severity="info",
+                           units=info["units"], carts=info["carts"])
+                    _hold_pass()
+                    changed = True
+                return changed
+
+            _deep_st = set()
+            _hold_pass()
+            for _rnd in range(8):
+                budget["rounds"] += 1
+                ch = _deepen_pass()
+                ch = _admit_pass() or ch
+                if not ch:
+                    break
+            _hold_pass()                          # safety: never finish over budget if it can be fixed
+            # final sweep: a due store whose region has room and whose proven sellers the free
+            # stock can now fill (stock freed after its last try) gets its cart now
+            for _sw in range(3):
+                _swept = False
+                for st_id in sorted([st_ for st_ in _sc_lines if not (orders.get(st_) or {}).get("carts")
+                                     and not (stores.get(st_) or {}).get("capacity_carts")],
+                                    key=lambda st_: (-_store_prio(st_), st_)):
+                    if not _room(st_id):
+                        continue
+                    held = st_id in _hold_info
+                    seed = _seeds.get(st_id) if held else None
+                    if not _plan_routine_carts(st_id, 1, seed)[0]:
+                        continue
+                    ok, info = _admit_try(st_id, 1, seed, True)
+                    if not ok:
+                        continue
+                    if held:
+                        _hold_order.remove(st_id)
+                        _hold_info.pop(st_id)
+                        _held_by_rule.discard(st_id)
+                        decisions[:] = [d_ for d_ in decisions if not (d_[0] == "held_stop_budget" and d_[1] == st_id)]
+                    decide("stop_budget_admitted",
+                           f"{'Re-admitted' if held else 'Admitted'} under the stop budget (final sweep): "
+                           f"{info['carts']} full routine cart(s), {info['units']:,}u, projected sell-through "
+                           f"{(info.get('sellthrough') or 0):.0%}", store_id=st_id, severity="info",
+                           units=info["units"], carts=info["carts"])
+                    _swept = True
+                if not _swept:
+                    break
+            budget["stores_deepened"] = len(_deep_st)
+            _adm = [d_ for d_ in decisions if d_[0] == "stop_budget_admitted"]
+            budget["readmitted"] = sum(1 for d_ in _adm if d_[3].startswith("Re-admitted"))
+            budget["admitted_new"] = len(_adm) - budget["readmitted"]
+            budget["carts_admitted"] = sum(d_[4].get("carts", 0) for d_ in _adm)
+            budget["wholesale_admitted"] = sum(_routine_wh(d_[1]) for d_ in _adm)
+            budget["stops_held"] = len(_hold_info)
+            budget["units_held"] = sum(v[0] for v in _hold_info.values())
+            budget["wholesale_held"] = round(sum(v[1] for v in _hold_info.values()), 2)
+            _hg2, _hw2 = Counter(), Counter()
+            for u_, w_, g_ in _hold_info.values():
+                _hg2[g_] += 1
+                _hw2[g_] += w_
+            budget["held_by_grade"] = dict(_hg2)
+            budget["held_wholesale_by_grade"] = {g: round(v, 2) for g, v in _hw2.items()}
+            budget["wholesale_added_by_deepening"] = round(budget["wholesale_added_by_deepening"], 2)
+            budget["wholesale_admitted"] = round(budget["wholesale_admitted"], 2)
+            for r, (s_, c_) in _rstats().items():
+                if s_ > _bud(c_):
+                    _do = sum(1 for st_, o_ in orders.items() if o_["carts"] and _rg(st_) == r
+                              and not any(_cart_has_routine(c, {l["sku_id"]: l for l in o_["lines"]})
+                                          for c in o_["carts"]))
+                    _t = math.ceil(c_ / truck_cap)
+                    budget["exceptions"][r] = {"stops": s_, "carts": c_, "trucks": _t, "directed_only_stops": _do,
+                                               "stops_per_truck": round(s_ / _t, 2),
+                                               "stops_per_truck_without_directed_only": round((s_ - _do) / _t, 2)}
+            log(f"Stop budget: {budget['stops_held']:,} single-cart stops held (${budget['wholesale_held']:,.0f}, "
+                f"{budget['held_by_grade']}) · {budget['stores_deepened']:,} stops deepened "
+                f"(+{budget['carts_added_by_deepening']:,} carts, +${budget['wholesale_added_by_deepening']:,.0f}) · "
+                f"{budget['readmitted']:,} re-admitted, {budget['admitted_new']:,} new · exceptions "
+                f"{budget['exceptions']}")
+
         # DEMAND-CONVERSION AUDIT (Josh 11/25: "the audits should catch these"): every due store left
         # without a routine cart is tested against the stock still free at the END of the run. If its
         # proven sellers and that stock could have built its full carts (the stop minimum when on)
@@ -4373,9 +4710,18 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         # met — qualified demand was lost between forecasting, allocation and cart building: a
         # warning per store, counted by grade. Stores where free stock exists but no such plan does
         # are counted apart (stores_stock_but_no_qualified_plan), not flagged.
-        lost = {"stores": 0, "by_grade": Counter(), "units_possible": 0, "examples": [], "stock_only": 0}
+        # Stores the stop rule held on purpose, and (budget) due stores whose region has no stop
+        # budget left, are counted apart — not lost demand.
+        lost = {"stores": 0, "by_grade": Counter(), "units_possible": 0, "examples": [], "stock_only": 0,
+                "held_by_stop_rule": 0, "no_stop_budget_room": 0}
         for st_id in _sc_lines:
             if _has_routine_cart(st_id) or (stores.get(st_id) or {}).get("capacity_carts"):
+                continue
+            if st_id in _held_by_rule:
+                lost["held_by_stop_rule"] += 1
+                continue
+            if budget["enabled"] and not (orders.get(st_id) or {}).get("carts") and not _room(st_id):
+                lost["no_stop_budget_room"] += 1
                 continue
             _tgt = SR.routine_target(min_stop if stopmin["enabled"] else 0, _protected_cart_count(st_id))
             ok_, plan_ = _plan_routine_carts(st_id, _tgt)
@@ -4394,14 +4740,19 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             decide("demand_lost_audit", f"AUDIT: no routine cart, yet its proven sellers and the stock still "
                                         f"free could build {_k} full cart(s) ({_pu:,}u possible). Demand was "
                                         f"lost between allocation and cart building — investigate before release.",
-                   store_id=st_id, severity="warning", grade=_g, units_possible=_pu)
+                   store_id=st_id, severity="warning", grade=_g, units_possible=_pu,
+                   last_build_rejection=_last_why.get(st_id))
+            lost.setdefault("why", Counter())[_last_why.get(st_id) or "never_tried"] += 1
         plant_left = Counter()
         for sk_, info_ in sku_info.items():
             if sk_ in pools.total and not str(info_.get("ipr_family") or "").startswith(("Climb-ITT", "H2O")):
                 plant_left[info_.get("ipr_family") or "?"] += int(pools.left(sk_))
         second["demand_lost_audit"] = {"stores": lost["stores"], "by_grade": dict(lost["by_grade"]),
                                        "stores_stock_but_no_qualified_plan": lost["stock_only"],
+                                       "held_by_stop_rule_not_counted": lost["held_by_stop_rule"],
+                                       "no_stop_budget_room_not_counted": lost["no_stop_budget_room"],
                                        "units_possible": lost["units_possible"], "examples": lost["examples"],
+                                       "last_build_rejection": dict(lost.get("why") or {}),
                                        "plant_stock_left_by_family": dict(plant_left.most_common(8))}
         log(f"Demand-conversion audit: {lost['stores']:,} due stores without a routine cart COULD have had "
             f"their full carts from free stock ({dict(lost['by_grade'])})")
@@ -4811,8 +5162,6 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # ROUTING FEASIBILITY + RELEASE SCORECARD (11/25: four reviewers — demand / sell-through, pack
     # team, routing, cart fill — each audited a different thing and orders kept failing someone's
     # audit). One pass/fail list over the FINAL order, computed here so every number is final.
-    truck_cap = int(S.get("truck_cart_capacity", 45) or 45)
-    max_spt = float(S.get("max_stops_per_truck", 20) or 20)
     _sc_st = S.get("scorecard_min_sellthrough35")
     sc_min_st = 0.68 if _sc_st is None else float(_sc_st)
     _sc_fr = S.get("scorecard_max_freight_pct")
@@ -4850,6 +5199,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     routing = SR.routing_feasibility(_stop_info, {s_: (stores.get(s_) or {}).get("region") for s_ in _stop_info},
                                      truck_cap, max_spt)
     stopmin["single_cart_exceptions_directed"] = routing["single_cart_stops_directed_only"]
+    _worst_spt = max((v["stops_per_truck"] for v in routing["by_region"].values()), default=0.0)
+    routing["stop_rule"] = stop_rule
     _rw_tot = sum(_rw_grade.values())
     _aab = (sum(_rw_grade[g] for g in ("AA", "A", "B")) / _rw_tot) if _rw_tot else None
     _all_c = [c for o in orders.values() for c in o["carts"]]
@@ -4878,9 +5229,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                  prebuilt_companion_exceptions=_under_fill_exc),
         SR.check("stops_per_truck", routing["stops_per_truck"], max_spt, "<=", "routing",
                  trucks=routing["trucks"], stops=routing["stops"], carts=routing["carts"]),
+        SR.check("stops_per_truck_worst_region", _worst_spt, max_spt, "<=", "routing",
+                 regions_over=[r for r, v in routing["by_region"].items() if not v["pass"]]),
         SR.check("single_cart_stops_not_directed", routing["single_cart_stops"]
                  - routing["single_cart_stops_directed_only"], 0, "==", "routing",
+                 informational=stop_rule != "minimum", stop_rule=stop_rule,
                  directed_only_exceptions=routing["single_cart_stops_directed_only"]),
+        SR.check("directed_only_stops", sum(1 for v in _stop_info.values() if v[1]), 0, "==", "routing",
+                 informational=True, note="approved directed / pre-built-only stops: exceptions, never touched",
+                 single_cart=routing["single_cart_stops_directed_only"]),
         SR.check("freight_pct", round(_frt, 4) if _frt is not None else None, sc_max_fr, "<=", "cart economics",
                  cart_cost=cart_cost),
         SR.check("aa_a_b_share_of_routine_wholesale", round(_aab, 4) if _aab is not None else None, sc_min_aab,
@@ -4918,6 +5275,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "every_shelf_full": fullsh,
         "second_chance_carts": second,
         "stop_minimum": stopmin,
+        "stop_budget": budget,
         "routing_feasibility": routing,
         "release_scorecard": release_scorecard,
         "stockout_recovery": so_summary,

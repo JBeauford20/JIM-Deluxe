@@ -68,14 +68,21 @@ def routing_block(stops, capacity, max_stops):
 
 
 def routing_feasibility(stop_info, region_of, capacity=45, max_stops=20):
-    """stop_info: {store_id: (carts, directed_only)}; region_of: {store_id: region}.
-    Trucks = ceil(carts / capacity) — a lower bound (perfect consolidation within the region)."""
+    """stop_info: {store_id: (carts, directed_only)}; region_of: {store_id: region} (missing
+    region = its own group "?"). Trucks run within a region: per region ceil(carts / capacity)
+    (perfect consolidation inside the region); the network's trucks are the sum of the regions'
+    (trucks_if_pooled = ceil(all carts / capacity) is reported for reference)."""
     by = defaultdict(list)
     for st, v in stop_info.items():
         by[region_of.get(st) or "?"].append(v)
+    regions = {r: routing_block(v, capacity, max_stops) for r, v in sorted(by.items(), key=lambda kv: str(kv[0]))}
     out = routing_block(stop_info.values(), capacity, max_stops)
-    out.update(truck_cart_capacity=capacity, max_stops_per_truck=max_stops,
-               by_region={r: routing_block(v, capacity, max_stops) for r, v in sorted(by.items(), key=lambda kv: str(kv[0]))})
+    pooled = out["trucks"]
+    trucks = sum(v["trucks"] for v in regions.values())
+    spt = (out["stops"] / trucks) if trucks else 0.0
+    out.update(trucks=trucks, trucks_if_pooled=pooled, stops_per_truck=round(spt, 2),
+               **{"pass": spt <= max_stops + 1e-9 and all(v["pass"] for v in regions.values())},
+               truck_cart_capacity=capacity, max_stops_per_truck=max_stops, by_region=regions)
     return out
 
 
@@ -102,9 +109,13 @@ def cart_physical(contents, skip_fullness=False):
 _OPS = {"<=": lambda v, t: v <= t + 1e-9, ">=": lambda v, t: v >= t - 1e-9, "==": lambda v, t: v == t}
 
 
-def check(name, value, target, op, audience, **extra):
-    """One scorecard line. value None (not measurable) fails."""
+def check(name, value, target, op, audience, informational=False, **extra):
+    """One scorecard line. value None (not measurable) fails. informational: reported with
+    `within_target`, never fails the scorecard (e.g. approved exceptions)."""
     ok = value is not None and _OPS[op](value, target)
+    if informational:
+        return {"check": name, "value": value, "target": target, "op": op, "pass": True,
+                "informational": True, "within_target": bool(ok), "audience": audience, **extra}
     return {"check": name, "value": value, "target": target, "op": op, "pass": bool(ok),
             "audience": audience, **extra}
 
