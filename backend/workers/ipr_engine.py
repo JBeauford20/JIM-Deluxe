@@ -38,6 +38,7 @@ import store_lead
 import demand_forecast as DF
 import demand_recovery as DR
 import shelfkit as SK
+import stop_rules as SR
 import store_rules
 from db_conn import get_conn
 # Proven pieces carried over from the legacy engine (physical/packing truths, not policy)
@@ -1147,15 +1148,15 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     if _pr:
         cur.execute("""SELECT run_id::text AS run_id, store_id, decision_type FROM run_decisions
                        WHERE run_id = ANY(%s::uuid[]) AND store_id IS NOT NULL
-                         AND decision_type IN ('pushed_min_cart', 'not_due')""", (_pr,))
+                         AND decision_type IN ('pushed_min_cart', 'held_stop_minimum', 'not_due')""", (_pr,))
         _ph = defaultdict(lambda: [set() for _ in _pr])
         for r in cur.fetchall():
             _ph[r["store_id"]][_pr.index(r["run_id"])].add(r["decision_type"])
         for st_id, weeks in _ph.items():
             n = 0
             for kinds in weeks:
-                if "pushed_min_cart" in kinds:
-                    n += 1
+                if "pushed_min_cart" in kinds or "held_stop_minimum" in kinds:
+                    n += 1            # held under the stop minimum counts as a push (need grows)
                 elif "not_due" in kinds:
                     continue
                 else:
@@ -2288,6 +2289,12 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         def _cc_best_fill(state):
             """Fill of the fullest cart the §7 packer would build from {profile: [trays, cap,
             height, max shelves]} — the same shelf and cart rules, on tray counts alone."""
+            return max(_cc_cart_fills(state), default=0.0)
+
+        def _cc_cart_fills(state, full_only=False):
+            """Fill of EVERY cart the §7 packer would build from the state (see _cc_best_fill).
+            full_only: partial shelves left out — the carts as they stand once every partial shelf
+            is cut (the every-shelf-full rule), so a build judged on them survives that pass."""
             # (pids, fill by real width, height, {pid: max shelves}, [(pid, trays)]) — the same
             # ShelfKit width maths the packer uses, so the estimate and the real pack agree
             shelves = []
@@ -2302,6 +2309,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     lambda a, b: (a[0] | b[0], SK.shelf_fill(a[4] + b[4]), max(a[2], b[2]),
                                   {**a[3], **b[3]}, a[4] + b[4]),
                     fits=lambda a, b: SK.fits_shelf(a[4] + b[4]))
+            if full_only:
+                shelves = [x for x in shelves if SK.shelf_is_full(x[4])]
             _rk = lambda x: min(PROFILE_HEIGHT_RANK.get(p_, 3) for p_ in x[0])
             shelves.sort(key=lambda x: (_rk(x), sorted(x[0])))
             if _cc_consol:
@@ -2321,13 +2330,13 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 c["h"] += h
                 for p_ in pids:
                     c["pc"][p_] += 1
-            best = 0.0
+            fills = []
             for c in carts:
                 hit = c["h"] + MIN_SHELF_CLEAR_IN > CART_CEILING_IN
                 _mx = min(CART_SHELVES, SK.max_shelves(set(c["pc"])))
                 slots = len(c["sh"]) if (hit or len(c["sh"]) >= _mx) else _mx
-                best = max(best, sum(c["sh"]) / slots)
-            return best
+                fills.append(sum(c["sh"]) / slots)
+            return fills
 
         def _cc_prof(sku_id):
             pk = pack[sku_id]
@@ -3894,13 +3903,50 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
     # AA/A/B first: its proven sellers, best next pack first, each product up to the quantity that
     # still sells cart_min_sellthrough of itself in the window, the cart's blended projected sell-
     # through >= cart_min_sellthrough, every shelf full, the cart >= min fill. Else nothing changes.
+    #
+    # MINIMUM CARTS PER STOP (routing review 11/25: 247 of 326 stores got ONE cart, so a 45-cart
+    # truck needed ~33 stops against a cap of 20). Every stop (store in the order) must carry at
+    # least min_carts_per_stop carts, counting routine, directed and pre-built carts. A store whose
+    # only carts are directed / pre-built ships as approved (reported as an exception). Every other
+    # store under the minimum first hands its ROUTINE trays back to the pool (all of them first,
+    # so the stock single-cart stores held is free for everyone), then, AA/A/B first, is rebuilt
+    # to the minimum from that pool with the second-chance rules (shared builder below). A store
+    # that cannot reach the minimum gets no routine cart this week (its trays stay in the pool).
     second = {"enabled": str(S.get("second_chance_carts", True)).lower() not in ("false", "0", "no"),
               "stores_tried": 0, "stores": 0, "carts": 0, "units": 0, "wholesale": 0.0}
-    if second["enabled"] and completion.get("enabled") and min_full_carts > 0:
-        def _is_routine(l):
-            return not (l.get("directed_trays") or l.get("variety_codes")
-                        or (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart")
+    _msv = S.get("min_carts_per_stop")
+    min_stop = 2 if _msv is None else int(_msv or 0)
+    stopmin = {"min": min_stop, "enabled": min_stop >= 2, "stores_under": 0, "stores_rebuilt": 0,
+               "stores_held": 0, "units_held": 0, "wholesale_held": 0.0, "units_rebuilt": 0,
+               "wholesale_rebuilt": 0.0, "held_by_reason": {}, "held_by_grade": {},
+               "held_with_directed_cart": 0, "prebuilt_exceptions": 0, "capacity_exceptions": 0,
+               "single_cart_exceptions_directed": 0, "stores_added_after_handback": 0,
+               "carts_added_after_handback": 0, "wholesale_added_after_handback": 0.0,
+               "keep_original_order": str(S.get("stop_minimum_keep_original_order", False)).lower()
+               in ("true", "1", "yes")}
+    _builder_on = bool(completion.get("enabled")) and min_full_carts > 0
 
+    def _is_routine(l):
+        return not (l.get("directed_trays") or l.get("variety_codes")
+                    or (sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart")
+
+    def _cart_has_routine(c, by):
+        return any(_is_routine(by.get(x[1]) or {"sku_id": x[1]}) for x in c["contents"])
+
+    def _routine_shelves_not_full(c, by):
+        """Shelves of a cart holding only routine product that are not full (ShelfKit)."""
+        layers = defaultdict(list)
+        for (pos, sk, tr, _u, _k, pid) in c["contents"]:
+            layers[pos].append((pid, tr, sk))
+        return sum(1 for its in layers.values()
+                   if all(_is_routine(by.get(sk) or {"sku_id": sk}) for _, _, sk in its)
+                   and SK.fits_shelf([(p, t) for p, t, _ in its])
+                   and not SK.shelf_is_full([(p, t) for p, t, _ in its]))
+
+    if stopmin["enabled"] and not _builder_on:
+        stopmin["skipped"] = "needs cart_completion on and min_order_full_carts > 0"
+        log("Stop minimum skipped: it builds carts with the cart-completion estimator, which is off")
+    if _builder_on and (second["enabled"] or stopmin["enabled"]):
         _sc_lines = defaultdict(list)
         for (st_, sk_), l in ship.items():
             if (_is_routine(l) and l.get("plannable") and sk_ in pack and l["fc"] > 0
@@ -3910,14 +3956,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             if (st_, sk_) in ship or st_ not in _sc_lines or not l.get("cc_candidate"):
                 continue
             _sc_lines[st_].append(l)
+        _seed_lines, _seeds, _pack_miss = {}, {}, []                 # stop minimum: each store's handed-back order
+        _ship_of = defaultdict(list)                 # store -> its ship lines (undo snapshots)
+        for (st_, sk_), l in ship.items():
+            _ship_of[st_].append(l)
 
         def _has_routine_cart(st_):
             o_ = orders.get(st_)
             return bool(o_) and any(_is_routine(l) and l.get("alloc_trays", 0) > 0 for l in o_["lines"])
-
-        _sc_stores = [st_ for st_ in _sc_lines if not _has_routine_cart(st_)
-                      and not (stores.get(st_) or {}).get("capacity_carts")]
-        _sc_stores.sort(key=lambda st_: (-max(x.get("priority", 0) for x in _sc_lines[st_]), st_))
 
         def _sc_cap(l):
             """Most packs for a line: proven demand up to cart_min_sellthrough of itself, tray limits."""
@@ -3932,18 +3978,109 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 c_ = min(c_, l["tray_cap"])
             return max(0, c_)
 
-        for st_id in _sc_stores:
-            ls = _sc_lines[st_id]
+        def _store_prio(st_):
+            ls_ = _sc_lines.get(st_) or (orders.get(st_) or {}).get("lines") or []
+            return max((x.get("priority", 0) for x in ls_), default=0)
+
+        def _build_plan(st_id, target, seed=None):
+            """What a build for `target` carts in total starts from: (lines, caps, base estimator
+            state of the store's protected non-variety lines, k = carts the estimator must fill,
+            free-stock screen passed). seed {id(line): trays}: the store's own earlier routine
+            order, kept as the starting point (stop_minimum_keep_original_order)."""
+            seed = seed or {}
+            ls = list(_sc_lines.get(st_id) or [])
+            _ids = {id(l) for l in ls}
+            ls += [l for l in _seed_lines.get(st_id, []) if id(l) in seed and id(l) not in _ids]
             deny = store_deny.get(st_id, NO_DENY)
-            caps = {id(l): min(_sc_cap(l), int(pools.left(l["sku_id"], deny) // max(1, l["upt"]))) for l in ls}
-            # quick screen: could everything available reach a full cart at all?
-            if _cc_best_fill(_cc_state(ls, lambda l: caps[id(l)])) < min_cart_fill:
-                continue
-            second["stores_tried"] += 1
+            o_ = orders.get(st_id)
+            pl = [l for l in (o_["lines"] if o_ else []) if l.get("alloc_trays", 0) > 0]
+            by = {l["sku_id"]: l for l in pl}
+            # named-variety carts are packed on their own; everything else shares the estimator
+            n_ded = sum(1 for c in (o_["carts"] if o_ else []) if c["contents"]
+                        and all((by.get(x[1]) or {}).get("variety_codes") for x in c["contents"]))
+            base = _cc_state([l for l in pl if not _is_routine(l) and not l.get("variety_codes")],
+                             lambda l: l.get("alloc_trays", 0))
+            caps = {id(l): min(max(_sc_cap(l), seed.get(id(l), 0)),
+                               int(pools.left(l["sku_id"], deny) // max(1, l["upt"]))) for l in ls}
+            k = target - n_ded
+            allst = {p: list(v) for p, v in base.items()}
+            for p, v in _cc_state(ls, lambda l: caps[id(l)]).items():
+                allst.setdefault(p, [0] + list(v[1:]))[0] += v[0]
+            screen = bool(ls) and k > 0 and SR.top_k_full(_cc_cart_fills(allst, True), k, min_cart_fill)
+            return ls, caps, base, k, screen
+
+        def _snapshot(st_id, ls):
+            """Everything a build attempt can change, so a failed attempt is undone exactly
+            (lines, the pool for the store's SKUs, ship keys, the order, counters, decisions)."""
+            o_ = orders.get(st_id)
+            touched = {id(l): l for l in list(ls) + _ship_of.get(st_id, []) + (o_["lines"] if o_ else [])}
+            return {"lines": [(l, dict(l)) for l in touched.values()],
+                    "pool": {sk: dict(pools.rem[sk]) for sk in {l["sku_id"] for l in touched.values()}},
+                    "ship_keys": {(st_id, l["sku_id"]) for l in ls if (st_id, l["sku_id"]) in ship},
+                    "order": None if o_ is None else {"lines": list(o_["lines"]), "carts": o_["carts"]},
+                    "alloc_total": alloc_units_total, "fullsh": dict(fullsh),
+                    "n_dec": len(decisions), "n_pba": len(prebuilt_alone)}
+
+        def _restore(sn, st_id, ls):
+            nonlocal alloc_units_total
+            for l, d in sn["lines"]:
+                l.clear()
+                l.update(d)
+            for sk, d in sn["pool"].items():
+                r_ = pools.rem[sk]
+                r_.clear()
+                r_.update(d)
+            for l in ls:
+                if (st_id, l["sku_id"]) not in sn["ship_keys"]:
+                    ship.pop((st_id, l["sku_id"]), None)
+            if sn["order"] is None:
+                orders.pop(st_id, None)
+            else:
+                orders[st_id] = {"lines": list(sn["order"]["lines"]), "carts": sn["order"]["carts"]}
+            alloc_units_total = sn["alloc_total"]
+            fullsh.clear()
+            fullsh.update(sn["fullsh"])
+            del decisions[sn["n_dec"]:]
+            del prebuilt_alone[sn["n_pba"]:]
+
+        def _routine_sellthrough(o_):
+            num = den = 0.0
+            for l in o_["lines"]:
+                q = l.get("alloc_units", 0)
+                if q <= 0 or not _is_routine(l):
+                    continue
+                v = usd(l)
+                num += DF.sold_units(q, l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l),
+                                     mg_a, line_f(l)) * v
+                den += q * v
+            return (num / den) if den else None
+
+        def _plan_routine_carts(st_id, target, seed=None):
+            """The estimator half of the builder (no commit): proven sellers, best next pack
+            first, until the k fullest estimated carts reach min fill, then the blended
+            sell-through test. Returns (ok, info with ls / got / k / caps or why)."""
+            ls, caps, base, k, screen = _build_plan(st_id, target, seed)
+            if not ls:
+                return False, {"why": "no_proven_sellers", "tried": False}
+            if k <= 0:
+                return True, {"carts": 0, "units": 0, "wholesale": 0.0, "tried": False, "k": k}
+            if not screen:
+                return False, {"why": "free_stock_cannot_fill", "tried": False}
             got = defaultdict(int)
-            state, fill = {}, 0.0
-            for _k in range(400):
-                if fill >= min_cart_fill:
+            state = {p: list(v) for p, v in base.items()}
+            for l in ls:                          # the store's own earlier order first, if kept
+                n0 = min(int((seed or {}).get(id(l), 0)), caps[id(l)])
+                if n0 > 0:
+                    got[id(l)] = n0
+                    pid, cap, h, pmax = _cc_prof(l["sku_id"])
+                    state.setdefault(pid, [0, cap, h, pmax])[0] += n0
+            fills = _cc_cart_fills(state)
+            full_fills = _cc_cart_fills(state, True)
+            prog = SR.top_k_progress(fills, k)
+            for _k in range(400 * k):
+                # done when the k fullest carts are full on FULL shelves alone (partial shelves
+                # would be cut by the every-shelf-full pass and the cart fall under min fill)
+                if SR.top_k_full(full_fills, k, min_cart_fill):
                     break
                 best = None
                 for l in ls:
@@ -3955,20 +4092,22 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     if mu <= 1e-9:
                         continue
                     pid, cap, h, pmax = _cc_prof(l["sku_id"])
-                    trial = {k: list(v) for k, v in state.items()}
+                    trial = {p: list(v) for p, v in state.items()}
                     trial.setdefault(pid, [0, cap, h, pmax])[0] += 1
-                    f2 = _cc_best_fill(trial)
-                    if f2 <= fill + 1e-9:
+                    f2 = _cc_cart_fills(trial)
+                    p2 = SR.top_k_progress(f2, k)
+                    if p2 <= prog + 1e-9:
                         continue
                     key = (mu * usd(l), l.get("sku_fit", 0))
                     if best is None or key > best[0]:
-                        best = (key, l, trial, f2)
+                        best = (key, l, trial, f2, p2)
                 if not best:
                     break
                 got[id(best[1])] += 1
-                state, fill = best[2], best[3]
-            if fill < min_cart_fill:
-                continue
+                state, fills, prog = best[2], best[3], best[4]
+                full_fills = _cc_cart_fills(state, True)
+            if not SR.top_k_full(full_fills, k, min_cart_fill):
+                return False, {"why": "cannot_fill_carts", "tried": True}
             _num = _den = 0.0
             for l in ls:
                 q = got[id(l)] * l["upt"]
@@ -3978,95 +4117,305 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                                           mg_a, line_f(l)) * v
                     _den += q * v
             if cart_st_min > 0 and _den and _num / _den < cart_st_min:
-                continue
-            # commit, pack, complete shelves; keep only if a routine cart is full
+                return False, {"why": "sellthrough_below_target", "tried": True}
+            return True, {"tried": True, "ls": ls, "got": got, "k": k, "caps": caps,
+                          "est_fills": [round(f, 3) for f in sorted(full_fills, reverse=True)]}
+
+        def _build_routine_carts(st_id, target, stage, seed=None):
+            """Build full routine carts for one store from the FREE pool until it has `target`
+            carts in total (directed / pre-built carts it already has count; they never change).
+            Its proven sellers only (marginal units > 0), each product up to _sc_cap and supply,
+            best next-pack sales first; the estimator's `k` fullest carts must reach min fill, the
+            routine lines' blended projected sell-through >= cart_min_sellthrough, then the REAL
+            packer and the every-shelf-full pass must give >= target carts, every routine cart
+            >= min fill, every routine shelf full, sell-through still met. Else everything is
+            undone exactly. Returns (ok, info)."""
+            nonlocal alloc_units_total
+            ok_, plan_ = _plan_routine_carts(st_id, target, seed)
+            if not ok_ or plan_.get("k", 1) <= 0:
+                return ok_, plan_
+            ls, got = plan_["ls"], plan_["got"]
+            # commit, pack, complete shelves; verify with the real packer
+            deny = store_deny.get(st_id, NO_DENY)
+            sn = _snapshot(st_id, ls)
             o_prev = orders.get(st_id)
             prev_lines = list(o_prev["lines"]) if o_prev else []
-            prev_carts = o_prev["carts"] if o_prev else None
-            taken = []
+            taken, _u = [], 0
             for l in ls:
                 n = got[id(l)]
                 if n <= 0:
                     continue
                 u = n * l["upt"]
                 pools.take(l["sku_id"], u, deny)
-                taken.append((l, l.get("alloc_trays", 0), l.get("alloc_units", 0), (st_id, l["sku_id"]) in ship))
+                taken.append(l)
                 l["alloc_trays"], l["alloc_units"] = n, u
                 l.pop("alloc_in_pool", None)           # its stock is now properly taken from the pool
-                l["second_chance_trays"] = n
+                l["second_chance_trays" if stage == "second_chance" else "stop_minimum_trays"] = n
                 l["deferred_units"] = 0
                 ship[(st_id, l["sku_id"])] = l
-            new_lines = prev_lines + [l for l, *_ in taken if l not in prev_lines]
+                _u += u
+            alloc_units_total += _u
+            new_lines = prev_lines + [l for l in taken if l not in prev_lines]
             _pack_store(st_id, [l for l in new_lines if l.get("alloc_trays", 0) > 0])
             if fullsh["enabled"]:
-                _full_shelves_pass("second_chance", only={st_id})
-            o_ = orders.get(st_id)
-            ok = bool(o_) and any(c["tray_fill"] >= min_cart_fill - 1e-9 and any(
-                _is_routine(next((x for x in o_["lines"] if x["sku_id"] == it[1]), {"sku_id": it[1]}))
-                for it in c["contents"]) for c in o_["carts"])
-            if not ok:
-                for l, t0, u0, was in taken:          # put everything back as it was
-                    pools.give_back(l["sku_id"], l.get("alloc_units", 0), deny)
-                    l["alloc_trays"], l["alloc_units"] = t0, u0
-                    l.pop("second_chance_trays", None)
-                    if not was:
-                        ship.pop((st_id, l["sku_id"]), None)
-                if o_prev is not None:
-                    orders[st_id] = {"lines": prev_lines, "carts": prev_carts}
+                _full_shelves_pass(stage, only={st_id})
+
+            def _verify():
+                o_ = orders.get(st_id)
+                if not o_ or not o_["carts"]:
+                    return "no_cart_after_packing", o_, [], None
+                by = {l["sku_id"]: l for l in o_["lines"]}
+                rc = [c for c in o_["carts"] if _cart_has_routine(c, by)]
+                st_ = _routine_sellthrough(o_)
+                if not rc:
+                    return "no_routine_cart_after_packing", o_, rc, st_
+                if len(o_["carts"]) < target:
+                    return "real_pack_below_target_carts", o_, rc, st_
+                if any(c["tray_fill"] < min_cart_fill - 1e-9 for c in rc):
+                    return "real_pack_cart_under_fill", o_, rc, st_
+                if fullsh["enabled"] and any(_routine_shelves_not_full(c, by) for c in rc):
+                    return "shelf_not_full", o_, rc, st_
+                if cart_st_min > 0 and st_ is not None and st_ < cart_st_min:
+                    return "sellthrough_below_target", o_, rc, st_
+                return None, o_, rc, st_
+            why, o_, rc, st_ = _verify()
+            if why == "real_pack_cart_under_fill":
+                # the real packer laid the trays out as `target` full carts plus a short extra one:
+                # the short cart's routine trays go back to the pool, the store is re-packed and
+                # checked again (iterate rather than abandon the store)
+                by = {l["sku_id"]: l for l in o_["lines"]}
+                short = [c for c in rc if c["tray_fill"] < min_cart_fill - 1e-9]
+                if (len(o_["carts"]) - len(short) >= target
+                        and all(_is_routine(by.get(x[1]) or {"sku_id": x[1]}) for c in short for x in c["contents"])):
+                    for c in short:
+                        for (_pos, sk, tr, u, _kt, _pid) in c["contents"]:
+                            l = by.get(sk)
+                            if not l:
+                                continue
+                            tr_, u_ = min(tr, l.get("alloc_trays", 0)), min(u, l.get("alloc_units", 0))
+                            l["alloc_trays"] -= tr_
+                            l["alloc_units"] -= u_
+                            pools.give_back(sk, u_, deny)
+                            alloc_units_total -= u_
+                    _pack_store(st_id, [l for l in o_["lines"] if l.get("alloc_trays", 0) > 0])
+                    if fullsh["enabled"]:
+                        _full_shelves_pass(stage, only={st_id})
+                    why, o_, rc, st_ = _verify()
+            if why:
+                _real = ([round(c["tray_fill"], 3) for c in o_["carts"]] if o_ else [])
+                _restore(sn, st_id, ls)
+                if len(_pack_miss) < 12:
+                    _pack_miss.append({"store": st_id, "stage": stage, "why": why, "target": target,
+                                       "estimated_full_shelf_fills": plan_.get("est_fills"),
+                                       "real_fills": _real})
+                return False, {"why": why, "tried": True}
+            return True, {"tried": True, "carts": len(rc), "units": sum(l.get("alloc_units", 0) for l in o_["lines"]
+                                                                       if _is_routine(l)),
+                          "wholesale": sum(c["wholesale_value"] for c in rc), "sellthrough": st_}
+
+        def _protected_cart_count(st_):
+            o_ = orders.get(st_)
+            if not o_:
+                return 0
+            by = {l["sku_id"]: l for l in o_["lines"]}
+            return sum(1 for c in o_["carts"] if not _cart_has_routine(c, by))
+
+        # SECOND-CHANCE CART BUILD (see above). With a stop minimum of 2+, the build aims for the
+        # minimum, so it never creates a new single-cart stop.
+        if second["enabled"]:
+            _sc_stores = [st_ for st_ in _sc_lines if not _has_routine_cart(st_)
+                          and not (stores.get(st_) or {}).get("capacity_carts")]
+            _sc_stores.sort(key=lambda st_: (-max(x.get("priority", 0) for x in _sc_lines[st_]), st_))
+            _sfr = Counter()
+            for st_id in _sc_stores:
+                _tgt = SR.routine_target(min_stop if stopmin["enabled"] else 0, _protected_cart_count(st_id))
+                ok, info = _build_routine_carts(st_id, _tgt, "second_chance")
+                second["stores_tried"] += bool(info.get("tried"))
+                if not ok or not info.get("carts"):
+                    if info.get("tried"):
+                        _sfr[info.get("why") or "?"] += 1
+                    continue
+                second["stores"] += 1
+                second["carts"] += info["carts"]
+                second["units"] += info["units"]
+                second["wholesale"] += info["wholesale"]
+                decisions[:] = [d_ for d_ in decisions if not (d_[0] == "pushed_min_cart" and d_[1] == st_id)]
+                _sv = info.get("sellthrough")
+                decide("second_chance_cart",
+                       f"Second cart build from stock freed later in the run: {info['carts']} full routine "
+                       f"cart(s), {info['units']:,}u, projected blended sell-through {(_sv or 0):.0%} in the "
+                       f"selling window (Jason 11/25: iterate, do not abandon the store)", store_id=st_id,
+                       severity="info", units=info["units"], sellthrough=round(_sv, 4) if _sv is not None else None)
+            second["wholesale"] = round(second["wholesale"], 2)
+            second["failed_by_reason"] = dict(_sfr.most_common())
+            log(f"Second-chance carts: {second['stores']:,} of {second['stores_tried']:,} stores rebuilt "
+                f"({second['carts']:,} carts, {second['units']:,}u, ${second['wholesale']:,.0f})")
+
+        # MINIMUM CARTS PER STOP: hand back every under-minimum store's routine trays first, then
+        # rebuild best stores first. Stores at or above the minimum are never reduced.
+        if stopmin["enabled"]:
+            under, _before = [], {}
+            for st_id in sorted(orders):
+                o_ = orders[st_id]
+                n_c = len(o_["carts"])
+                if n_c == 0 or n_c >= min_stop:
+                    continue
+                by = {l["sku_id"]: l for l in o_["lines"]}
+                if not any(_is_routine(l) and l.get("alloc_trays", 0) > 0 for l in o_["lines"]):
+                    continue                     # directed / pre-built only: approved, ships as is
+                _prot = [l for l in o_["lines"] if not _is_routine(l) and l.get("alloc_trays", 0) > 0]
+                if _prot and all((sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart" for l in _prot):
+                    stopmin["prebuilt_exceptions"] += 1      # a pre-built cart cannot travel alone
+                    decide("stop_minimum_exception",
+                           f"{n_c} cart(s), under the {min_stop}-cart stop minimum, kept: its pre-built cart "
+                           f"only travels with a regular cart", store_id=st_id, severity="warning", carts=n_c)
+                    continue
+                _capc = (stores.get(st_id) or {}).get("capacity_carts")
+                if _capc and int(_capc) < min_stop:
+                    stopmin["capacity_exceptions"] += 1
+                    continue
+                under.append(st_id)
+                _before[st_id] = (n_c, sum(c["wholesale_value"] for c in o_["carts"] if _cart_has_routine(c, by)))
+            stopmin["stores_under"] = len(under)
+            _held_u = {}
+            for st_id in under:                   # 1) every under-minimum store's routine trays back
+                o_ = orders[st_id]
+                deny = store_deny.get(st_id, NO_DENY)
+                hu = 0
+                _seed_lines[st_id], _seeds[st_id] = [], {}
+                for l in o_["lines"]:
+                    if not _is_routine(l) or (l.get("alloc_trays", 0) <= 0 and not l.get("alloc_units")):
+                        continue
+                    _seed_lines[st_id].append(l)
+                    _seeds[st_id][id(l)] = int(l.get("alloc_trays", 0) or 0)
+                    u = int(l.get("alloc_units", 0) or 0)
+                    if not l.get("alloc_in_pool"):
+                        pools.give_back(l["sku_id"], u, deny)
+                    l.pop("alloc_in_pool", None)
+                    alloc_units_total -= u
+                    hu += u
+                    l["deferred_units"] = u
+                    l["alloc_units"] = l["alloc_trays"] = 0
+                _held_u[st_id] = hu
+                keep = [l for l in o_["lines"] if l.get("alloc_trays", 0) > 0]
+                if keep:
+                    _pack_store(st_id, keep)
                 else:
-                    orders.pop(st_id, None)
-                continue
-            _u = sum(l.get("alloc_units", 0) for l, *_ in taken)
-            alloc_units_total += _u
-            _rc = [c for c in o_["carts"] if any(
-                _is_routine(next((x for x in o_["lines"] if x["sku_id"] == it[1]), {"sku_id": it[1]}))
-                for it in c["contents"])]
-            second["stores"] += 1
-            second["carts"] += len(_rc)
-            second["units"] += _u
-            second["wholesale"] += sum(c["wholesale_value"] for c in _rc)
-            decisions[:] = [d_ for d_ in decisions if not (d_[0] == "pushed_min_cart" and d_[1] == st_id)]
-            decide("second_chance_cart",
-                   f"Second cart build from stock freed later in the run: {len(_rc)} full routine cart(s), "
-                   f"{_u:,}u, projected blended sell-through {(_num / _den if _den else 0):.0%} in the selling "
-                   f"window (Jason 11/25: iterate, do not abandon the store)", store_id=st_id, severity="info",
-                   units=_u, sellthrough=round(_num / _den, 4) if _den else None)
-        second["wholesale"] = round(second["wholesale"], 2)
+                    del orders[st_id]
+            # 2) rebuild to the minimum, AA/A/B first. Due stores with no routine cart (second
+            # chance found too little stock earlier; directed-only stops) compete for the freed
+            # stock in the same priority order: their build also aims for the stop minimum.
+            _under_set = set(under)
+            _extra = [st_ for st_ in _sc_lines if st_ not in _under_set and not _has_routine_cart(st_)
+                      and not (stores.get(st_) or {}).get("capacity_carts")]
+            _hr, _hg = Counter(), Counter()
+            for st_id in sorted(under + _extra, key=lambda st_: (-_store_prio(st_), st_)):
+                if st_id not in _under_set:
+                    _tgt = SR.routine_target(min_stop, _protected_cart_count(st_id))
+                    _n0 = len((orders.get(st_id) or {}).get("carts") or [])
+                    ok, info = _build_routine_carts(st_id, _tgt, "stop_minimum")
+                    if ok and info.get("carts"):
+                        stopmin["stores_added_after_handback"] += 1
+                        stopmin["carts_added_after_handback"] += info["carts"]
+                        stopmin["wholesale_added_after_handback"] += info["wholesale"]
+                        decisions[:] = [d_ for d_ in decisions
+                                        if not (d_[0] == "pushed_min_cart" and d_[1] == st_id)]
+                        decide("stop_minimum_rebuilt",
+                               f"Built from stock freed by the {min_stop}-cart stop minimum: {info['carts']} full "
+                               f"routine cart(s) ({_n0} directed / pre-built before), {info['units']:,}u, projected "
+                               f"sell-through {(info.get('sellthrough') or 0):.0%}", store_id=st_id,
+                               severity="info", units=info["units"], carts_before=_n0,
+                               carts_after=len(orders[st_id]["carts"]))
+                    continue
+                ok, info = _build_routine_carts(st_id, min_stop, "stop_minimum",
+                                                _seeds.get(st_id) if stopmin["keep_original_order"] else None)
+                n0, wh0 = _before[st_id]
+                if ok and info.get("carts"):
+                    stopmin["stores_rebuilt"] += 1
+                    stopmin["units_rebuilt"] += info["units"]
+                    stopmin["wholesale_rebuilt"] += info["wholesale"]
+                    decisions[:] = [d_ for d_ in decisions if not (d_[0] == "pushed_min_cart" and d_[1] == st_id)]
+                    decide("stop_minimum_rebuilt",
+                           f"Rebuilt from {n0} to {len(orders[st_id]['carts'])} carts to meet the {min_stop}-cart "
+                           f"stop minimum (routing: max {int(S.get('max_stops_per_truck', 20) or 20)} stops per "
+                           f"truck): {info['carts']} full routine cart(s), {info['units']:,}u, projected "
+                           f"sell-through {(info.get('sellthrough') or 0):.0%}", store_id=st_id, severity="info",
+                           units=info["units"], carts_before=n0, carts_after=len(orders[st_id]["carts"]))
+                    continue
+                _g = store_cadence(st_id)[0]
+                stopmin["stores_held"] += 1
+                stopmin["units_held"] += _held_u[st_id]
+                stopmin["wholesale_held"] += wh0
+                stopmin["held_with_directed_cart"] += st_id in orders
+                _hr[info.get("why") or "?"] += 1
+                _hg[_g] += 1
+                decide("held_stop_minimum",
+                       f"Routine order held this week ({_held_u[st_id]:,}u, ${wh0:,.0f} wholesale): it fills "
+                       f"{n0} cart(s) and the stock left could not build the {min_stop}-cart stop minimum with "
+                       f"demand-backed, full, selling-through carts ({info.get('why')}). Trays stay in the pool.",
+                       store_id=st_id, severity="info", units=_held_u[st_id], wholesale=round(wh0, 2),
+                       carts_before=n0, why=info.get("why"), grade=_g)
+            stopmin["held_by_reason"] = dict(_hr.most_common())
+            stopmin["real_pack_rejections_examples"] = _pack_miss
+            stopmin["held_by_grade"] = dict(_hg)
+            stopmin["wholesale_held"] = round(stopmin["wholesale_held"], 2)
+            stopmin["wholesale_rebuilt"] = round(stopmin["wholesale_rebuilt"], 2)
+            stopmin["wholesale_added_after_handback"] = round(stopmin["wholesale_added_after_handback"], 2)
+            log(f"Stop minimum ({min_stop} carts): {stopmin['stores_under']:,} stores under · "
+                f"{stopmin['stores_rebuilt']:,} rebuilt · {stopmin['stores_added_after_handback']:,} more stores "
+                f"built from the freed stock · {stopmin['stores_held']:,} held "
+                f"({stopmin['units_held']:,}u, ${stopmin['wholesale_held']:,.0f}) · reasons {stopmin['held_by_reason']}")
+
         # DEMAND-CONVERSION AUDIT (Josh 11/25: "the audits should catch these"): every due store left
         # without a routine cart is tested against the stock still free at the END of the run. If its
-        # proven sellers and that stock could have built a full cart, qualified demand was lost
-        # between forecasting, allocation and cart building: a warning per store, counted by grade.
-        lost = {"stores": 0, "by_grade": Counter(), "units_possible": 0, "examples": []}
+        # proven sellers and that stock could have built its full carts (the stop minimum when on)
+        # by the builder's own plan — demand-backed packs, full estimated carts, blended sell-through
+        # met — qualified demand was lost between forecasting, allocation and cart building: a
+        # warning per store, counted by grade. Stores where free stock exists but no such plan does
+        # are counted apart (stores_stock_but_no_qualified_plan), not flagged.
+        lost = {"stores": 0, "by_grade": Counter(), "units_possible": 0, "examples": [], "stock_only": 0}
         for st_id in _sc_lines:
             if _has_routine_cart(st_id) or (stores.get(st_id) or {}).get("capacity_carts"):
                 continue
-            ls = _sc_lines[st_id]
-            deny = store_deny.get(st_id, NO_DENY)
-            caps = {id(l): min(_sc_cap(l), int(pools.left(l["sku_id"], deny) // max(1, l["upt"]))) for l in ls}
-            if _cc_best_fill(_cc_state(ls, lambda l: caps[id(l)])) < min_cart_fill:
+            _tgt = SR.routine_target(min_stop if stopmin["enabled"] else 0, _protected_cart_count(st_id))
+            ok_, plan_ = _plan_routine_carts(st_id, _tgt)
+            if plan_.get("tried") and not ok_:
+                lost["stock_only"] += 1          # free stock was there, but no full selling cart plan
+            if not ok_ or plan_.get("k", 0) <= 0:
                 continue
+            ls, _k = plan_["ls"], plan_["k"]
             _g = store_cadence(st_id)[0]
-            _pu = sum(caps[id(l)] * l["upt"] for l in ls)
+            _pu = sum(plan_["got"][id(l)] * l["upt"] for l in ls)
             lost["stores"] += 1
             lost["by_grade"][_g] += 1
             lost["units_possible"] += _pu
             if len(lost["examples"]) < 15:
                 lost["examples"].append(st_id)
             decide("demand_lost_audit", f"AUDIT: no routine cart, yet its proven sellers and the stock still "
-                                        f"free could build a full cart ({_pu:,}u possible). Demand was lost "
-                                        f"between allocation and cart building — investigate before release.",
+                                        f"free could build {_k} full cart(s) ({_pu:,}u possible). Demand was "
+                                        f"lost between allocation and cart building — investigate before release.",
                    store_id=st_id, severity="warning", grade=_g, units_possible=_pu)
         plant_left = Counter()
         for sk_, info_ in sku_info.items():
             if sk_ in pools.total and not str(info_.get("ipr_family") or "").startswith(("Climb-ITT", "H2O")):
                 plant_left[info_.get("ipr_family") or "?"] += int(pools.left(sk_))
         second["demand_lost_audit"] = {"stores": lost["stores"], "by_grade": dict(lost["by_grade"]),
+                                       "stores_stock_but_no_qualified_plan": lost["stock_only"],
                                        "units_possible": lost["units_possible"], "examples": lost["examples"],
                                        "plant_stock_left_by_family": dict(plant_left.most_common(8))}
-        log(f"Demand-conversion audit: {lost['stores']:,} due stores without a routine cart COULD have had a full "
-            f"cart from free stock ({dict(lost['by_grade'])})")
-        log(f"Second-chance carts: {second['stores']:,} of {second['stores_tried']:,} stores rebuilt "
-            f"({second['carts']:,} carts, {second['units']:,}u, ${second['wholesale']:,.0f})")
+        log(f"Demand-conversion audit: {lost['stores']:,} due stores without a routine cart COULD have had "
+            f"their full carts from free stock ({dict(lost['by_grade'])})")
+
+    # SUPPLY INVARIANT, again after the second-chance / stop-minimum rebuilds
+    _alloc_by2 = defaultdict(int)
+    for o_ in orders.values():
+        for l in o_["lines"]:
+            _alloc_by2[l["sku_id"]] += int(l.get("alloc_units", 0) or 0)
+    _over2 = {sk: (u, sum(pools.total[sk].values())) for sk, u in _alloc_by2.items()
+              if sk in pools.total and sum(pools.total[sk].values()) and u > sum(pools.total[sk].values())}
+    if _over2:
+        raise ValueError(f"Allocation exceeds supply after the stop-minimum rebuild for {len(_over2)} SKU(s): "
+                         f"{dict(list(_over2.items())[:5])}")
 
     # Kit assignment (jute vs ceramic), balanced at NETWORK level per SKU. v2 orders are small
     # per store, so the legacy per-store split (determine_kit_type) put ~99% of 12cm/17cm into
@@ -4459,6 +4808,103 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"to {tl_summary['accessories']['stores']:,} stores · Littles to {dual['littles_stores']:,} stores "
         f"({dual['littles_units']:,}u) · value floor {cv_summary['mode']}: {cv_summary['stores_held']:,} stores held, "
         f"avg ${cv_summary['avg_wholesale_per_cart']:,.0f}/cart")
+    # ROUTING FEASIBILITY + RELEASE SCORECARD (11/25: four reviewers — demand / sell-through, pack
+    # team, routing, cart fill — each audited a different thing and orders kept failing someone's
+    # audit). One pass/fail list over the FINAL order, computed here so every number is final.
+    truck_cap = int(S.get("truck_cart_capacity", 45) or 45)
+    max_spt = float(S.get("max_stops_per_truck", 20) or 20)
+    _sc_st = S.get("scorecard_min_sellthrough35")
+    sc_min_st = 0.68 if _sc_st is None else float(_sc_st)
+    _sc_fr = S.get("scorecard_max_freight_pct")
+    sc_max_fr = 0.10 if _sc_fr is None else float(_sc_fr)
+    _sc_ab = S.get("scorecard_min_aab_share")
+    sc_min_aab = 0.75 if _sc_ab is None else float(_sc_ab)
+    _stop_info, _phys = {}, Counter()
+    _under_fill, _under_fill_exc, _rw_grade = 0, 0, Counter()
+    for st_id, o in orders.items():
+        if not o["carts"]:
+            continue
+        by = {l["sku_id"]: l for l in o["lines"]}
+        _rcs = [c for c in o["carts"] if _cart_has_routine(c, by)]
+        _rids = {id(c) for c in _rcs}
+        _stop_info[st_id] = (len(o["carts"]), not _rcs)
+        _pb = any((sku_info[l["sku_id"]].get("family") or "") == "Prebuilt Cart" and l.get("alloc_trays", 0) > 0
+                  for l in o["lines"])
+        _any_full = any(c["tray_fill"] >= min_cart_fill - 1e-9 for c in _rcs)
+        for c in o["carts"]:
+            ph = SR.cart_physical(c["contents"], skip_fullness=True)
+            _phys["shelves_too_wide"] += ph["shelves_too_wide"]
+            _phys["carts_over_95in"] += ph["over_height"]
+            _phys["carts_over_shelf_cap"] += ph["over_shelf_cap"]
+            if id(c) in _rids:
+                _phys["routine_shelves_not_full"] += _routine_shelves_not_full(c, by)
+                if c["tray_fill"] < min_cart_fill - 1e-9:
+                    if _pb and not _any_full:
+                        _under_fill_exc += 1     # kept only so a pre-built cart can travel
+                    else:
+                        _under_fill += 1
+        for l in o["lines"]:
+            if l.get("alloc_units", 0) > 0 and _is_routine(l):
+                _rw_grade[store_cadence(st_id)[0]] += l["alloc_units"] * float(
+                    (sku_info.get(l["sku_id"]) or {}).get("wholesale_price_whl") or 0)
+    routing = SR.routing_feasibility(_stop_info, {s_: (stores.get(s_) or {}).get("region") for s_ in _stop_info},
+                                     truck_cap, max_spt)
+    stopmin["single_cart_exceptions_directed"] = routing["single_cart_stops_directed_only"]
+    _rw_tot = sum(_rw_grade.values())
+    _aab = (sum(_rw_grade[g] for g in ("AA", "A", "B")) / _rw_tot) if _rw_tot else None
+    _all_c = [c for o in orders.values() for c in o["carts"]]
+    _twh = sum(c["wholesale_value"] for c in _all_c)
+    _frt = (cart_cost * len(_all_c) / _twh) if _twh else None
+    _sup_over = 0
+    _alloc_by3 = defaultdict(int)
+    for o in orders.values():
+        for l in o["lines"]:
+            _alloc_by3[l["sku_id"]] += int(l.get("alloc_units", 0) or 0)
+    for sk, u in _alloc_by3.items():
+        _tot_s = sum(pools.total[sk].values()) if sk in pools.total else 0
+        if _tot_s and u > _tot_s:
+            _sup_over += 1
+    _dl = (second.get("demand_lost_audit") or {}).get("stores")
+    _checks = [
+        SR.check("projected_35day_routine_sellthrough", forecast_summary["sellthrough35"], sc_min_st, ">=",
+                 "demand / sell-through"),
+        SR.check("stores_with_demand_lost_and_free_stock", _dl, 0, "==", "demand / sell-through",
+                 note=None if _dl is not None else "audit not run (second-chance and stop minimum off)"),
+        SR.check("shelves_too_wide", _phys["shelves_too_wide"], 0, "==", "pack team"),
+        SR.check("carts_over_95in_or_shelf_cap", _phys["carts_over_95in"] + _phys["carts_over_shelf_cap"], 0, "==",
+                 "pack team", over_95in=_phys["carts_over_95in"], over_shelf_cap=_phys["carts_over_shelf_cap"]),
+        SR.check("routine_shelves_not_full", _phys["routine_shelves_not_full"], 0, "==", "pack team"),
+        SR.check("routine_carts_under_min_fill", _under_fill, 0, "==", "cart fill", min_fill=min_cart_fill,
+                 prebuilt_companion_exceptions=_under_fill_exc),
+        SR.check("stops_per_truck", routing["stops_per_truck"], max_spt, "<=", "routing",
+                 trucks=routing["trucks"], stops=routing["stops"], carts=routing["carts"]),
+        SR.check("single_cart_stops_not_directed", routing["single_cart_stops"]
+                 - routing["single_cart_stops_directed_only"], 0, "==", "routing",
+                 directed_only_exceptions=routing["single_cart_stops_directed_only"]),
+        SR.check("freight_pct", round(_frt, 4) if _frt is not None else None, sc_max_fr, "<=", "cart economics",
+                 cart_cost=cart_cost),
+        SR.check("aa_a_b_share_of_routine_wholesale", round(_aab, 4) if _aab is not None else None, sc_min_aab,
+                 ">=", "demand / sell-through",
+                 by_grade={g: round(v, 2) for g, v in sorted(_rw_grade.items(), key=lambda kv: str(kv[0]))}),
+        SR.check("skus_over_supply", _sup_over, 0, "==", "supply"),
+    ]
+    release_scorecard = SR.scorecard(_checks)
+    log(f"Routing: {routing['carts']:,} carts / {routing['stops']:,} stops -> {routing['trucks']:,} trucks of "
+        f"{truck_cap} · {routing['stops_per_truck']:.1f} stops per truck (max {max_spt:g}) · "
+        f"{routing['single_cart_stops']:,} single-cart stops ({routing['single_cart_stops_directed_only']:,} "
+        f"directed-only)")
+    for c_ in _checks:
+        if not c_["pass"]:
+            log(f"RELEASE SCORECARD FAIL [{c_['audience']}] {c_['check']}: {c_['value']} (target {c_['op']} "
+                f"{c_['target']})")
+    log(f"Release scorecard: {'PASS' if release_scorecard['pass'] else 'FAIL'} "
+        f"({len(_checks) - len(release_scorecard['failing'])}/{len(_checks)} checks)")
+    if not release_scorecard["pass"]:
+        decide("release_scorecard",
+               "Release scorecard FAILED: " + "; ".join(
+                   f"{c_['check']} = {c_['value']} (target {c_['op']} {c_['target']}, {c_['audience']})"
+                   for c_ in _checks if not c_["pass"]),
+               severity="warning", failing=release_scorecard["failing"])
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
         "shipment_forecast": forecast_summary,
@@ -4471,6 +4917,9 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         "final_full_cart_guard": guard,
         "every_shelf_full": fullsh,
         "second_chance_carts": second,
+        "stop_minimum": stopmin,
+        "routing_feasibility": routing,
+        "release_scorecard": release_scorecard,
         "stockout_recovery": so_summary,
         "onhand_check": oc_summary,
         "demand_history": _dh_summary,

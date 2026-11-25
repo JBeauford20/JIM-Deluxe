@@ -92,6 +92,36 @@ CATALOG = [
          help="Jason 11/25: build carts iteratively. After trims, shelf cuts and pushes free stock, each due "
               "store without a routine cart gets a second build from its proven sellers (AA/A/B first); it "
               "ships only with a full cart, every shelf full, and the blended sell-through target met."),
+    dict(key="min_carts_per_stop", group="Minimum order and carts",
+         label="Minimum carts per delivery stop", kind="int", default=2, min=0, max=4,
+         help="Routing 11/25: a truck carries about 45 carts and at most 20 stops, so one-cart stops make "
+              "the order unroutable. Every store must get at least this many carts (routine, directed and "
+              "pre-built all count). A store under it is rebuilt from free stock, best stores first, with "
+              "full, demand-backed carts that meet the sell-through target; if it cannot reach the minimum "
+              "its routine order waits a week. Stores with only directed / pre-built carts ship as approved. "
+              "0 or 1 turns the rule off."),
+    dict(key="stop_minimum_keep_original_order", group="Minimum order and carts",
+         label="Stop minimum: rebuild starts from the store's own order", kind="bool", default=False,
+         help="Off (default): a store under the stop minimum is rebuilt only from demand-backed packs, each "
+              "product up to what still sells the cart sell-through target of itself. On: its own order as the "
+              "engine first built it is the starting point (as far as stock still allows) and the second cart "
+              "is added on top with the same rules; every cart must still be full and the blend sell through."),
+    dict(key="truck_cart_capacity", group="Minimum order and carts",
+         label="Carts per truck (routing check)", kind="int", default=45, min=1, max=100,
+         help="Used for the routing feasibility check and release scorecard: trucks = carts / this, rounded up."),
+    dict(key="max_stops_per_truck", group="Minimum order and carts",
+         label="Most stops per truck (routing check)", kind="int", default=20, min=1, max=60,
+         help="The release scorecard fails when stops per truck (stops / trucks) is above this."),
+    dict(key="scorecard_min_sellthrough35", group="Release scorecard",
+         label="Projected 35-day routine sell-through must be at least", kind="pct", default=0.68, min=0.0,
+         max=1.0, help="Release scorecard check (demand / sell-through reviewer). Reported, never blocks the run."),
+    dict(key="scorecard_max_freight_pct", group="Release scorecard",
+         label="Freight (cart cost / wholesale) must be at most", kind="pct", default=0.10, min=0.01, max=1.0,
+         help="Release scorecard check: carts x delivered cost per cart / wholesale of all shipped carts."),
+    dict(key="scorecard_min_aab_share", group="Release scorecard",
+         label="AA, A and B stores' share of routine wholesale must be at least", kind="pct", default=0.75,
+         min=0.0, max=1.0, help="Release scorecard check: routine wholesale going to AA/A/B stores (store grade "
+                                "from the delivery cadence) over all routine wholesale."),
     dict(key="split_shelves", group="Minimum order and carts",
          label="Two different products may share one shelf", kind="bool", default=True,
          help="Josh 11/25. Two part-filled shelves of different products are combined onto one shelf when "
