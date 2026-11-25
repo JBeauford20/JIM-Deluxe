@@ -35,6 +35,7 @@ import config_merge
 import demand_history
 import inbound_timing
 import store_lead
+import demand_forecast as DF
 import shelfkit as SK
 import store_rules
 from db_conn import get_conn
@@ -821,6 +822,32 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         _w = sell_down.get(store_cadence(l["store_id"])[0], 0.0)
         return min(_w, fresh_of.get(l["sku_id"], fresh_days) / 7.0) if _w else 0.0
 
+    # MARGINAL PACK VALUE (Jason's Week 49 agent direction 2026-11-25, section 4-5): a tray or
+    # box is only planned while it adds projected sales inside the selling window:
+    #   F(q,h) = min(q*f, max(0, h*a*r - s)); next pack adds F(q+p) - F(q).
+    # r = the line's stocked weekly pace (fc), s = projected sellable stock at receipt, h = 35
+    # days (D-store core plants / accessories 70), a = pace factor, f = sellable fraction
+    # (plants 0.83, hard goods 1.0). A pack is worth sending while it adds at least
+    # marginal_pack_min_share of its sellable units. Every sizing and top-up step is capped here.
+    mg_on = str(S.get("marginal_allocation", True)).lower() not in ("false", "0", "no")
+    mg_share = float(S.get("marginal_pack_min_share", 0.5) or 0.5)
+    mg_a = float(S.get("forecast_pace_factor", DF.BASE["a"]) or DF.BASE["a"])
+    mg_f = float(S.get("plant_sellable_fraction", DF.BASE["f_plant"]) or DF.BASE["f_plant"])
+
+    def line_horizon(l):
+        return DF.horizon_weeks(store_cadence(l["store_id"])[0], l["family"],
+                                d_weeks=int(sell_down.get("D", DF.D_HORIZON_WEEKS)) or DF.D_HORIZON_WEEKS)
+
+    def line_f(l):
+        return DF.BASE["f_hard"] if l.get("accessory") else mg_f
+
+    def pack_cap(l):
+        """Most trays/boxes worth sending to this line (None when marginal allocation is off)."""
+        if not mg_on or l.get("directed_trays"):
+            return None
+        return DF.ceiling_packs(l["fc"], max(0.0, l.get("projected", 0.0)), line_horizon(l),
+                                max(1, l["upt"]), mg_a, line_f(l), mg_share)
+
     # Josh 2026-11-25: a shelf may be split between two different products.
     split_shelves = str(S.get("split_shelves", True)).lower() not in ("false", "0", "no")
     # Josh 2026-11-25 (agrees with Jason): Climb-itt hard goods never expire, so a store that has
@@ -837,6 +864,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             t = max(t, int((_bl["units"] - max(0.0, l.get("projected", 0.0))) // max(1, l["upt"])))
         if l.get("tray_cap") is not None:
             t = min(t, max(l.get("trays", 0), l["tray_cap"]))
+        if l.get("mcap") is not None:
+            t = min(t, max(l.get("trays", 0), l["mcap"]))
         return t
 
     grade_boost = {**{"AA": 0.3, "A": 0.2, "B": 0.1},
@@ -1179,6 +1208,14 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             l["trays_before_tray_cap"] = trays
             trays = l["tray_cap"]
             cap_note = ((cap_note or "") + " " + _why).strip()
+        _mc = pack_cap(l) if l["plannable"] else None
+        l["mcap"] = _mc
+        l.pop("trays_before_marginal", None)
+        if _mc is not None and trays > _mc:
+            l["trays_before_marginal"] = trays
+            trays = _mc
+            cap_note = ((cap_note or "") + f" next pack would add under {mg_share:.0%} of its units in "
+                        f"{line_horizon(l):g} wks — sized to sellable demand").strip()
         # approved scenario cap/floor (pre-bounded to pace at line creation; survives every
         # re-size). Floor runs BEFORE the §5 unreliable-inventory cap so data safety wins.
         if l.get("scn_cap_trays") is not None and trays > l["scn_cap_trays"]:
@@ -2068,6 +2105,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                       (fam_need - fam_alloc) // c["upt"])
             if c.get("tray_cap") is not None:                             # per-line tray limit
                 add = min(add, c["tray_cap"] - c["alloc_trays"])
+            if c.get("mcap") is not None:                                 # next pack must add sales
+                add = min(add, c["mcap"] - c["alloc_trays"])
             if add <= 0:
                 continue
             u = add * c["upt"]
@@ -2334,6 +2373,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                     # Jason's Week 49 brief: a store may get back up to the largest earlier
                     # restock it sold through ("successful exact store/SKU delivery sell-down")
                     ceiling = max(ceiling, int((_bl["units"] - max(0.0, l["projected"])) // l["upt"]))
+                if l.get("mcap") is not None:
+                    ceiling = min(ceiling, l["mcap"])          # next pack must add sales
                 by_wos = max(l["trays"], ceiling) - have        # its own need always qualifies
                 if l.get("tray_cap") is not None:
                     by_wos = min(by_wos, max(l["trays"], l["tray_cap"]) - have)   # per-line tray limit
@@ -2344,6 +2385,11 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 if fill >= min_cart_fill:
                     break
                 pick = None
+                if mg_on:                      # the pack that adds the most projected sales first
+                    cands.sort(key=lambda x: (-(DF.marginal_units(got[x["sku_id"]] * x["upt"], x["upt"], x["fc"],
+                                                                  max(0.0, x.get("projected", 0.0)), line_horizon(x),
+                                                                  mg_a, line_f(x)) * usd(x)),
+                                              -x.get("sku_fit", 0), x["sku_id"]))
                 for l in cands:                # best product first; it must move the cart forward
                     if _room(l)[0] <= 0:
                         continue
@@ -2434,7 +2480,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                           sku_fit=0.0, priority=min(x.get("priority", 0) for x in ls),
                           alloc_trays=0, alloc_units=0, test_item=True,
                           oh_conflict=None, stockout_recovery=None, fp_rate=None, accessory=False,
-                          tray_cap=None)
+                          tray_cap=None, mcap=None)
                 nl.pop("trays_before_tray_cap", None)
                 lines[(st_id, _sk)] = nl
                 ship[(st_id, _sk)] = nl
@@ -2786,7 +2832,35 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         o = orders[store_id]
         n_full = sum(1 for c in o["carts"] if c["phys_full"])
         if n_full >= min_full_carts or store_id in directed_stores:
-            continue
+            # Cart completion judged this store short and handed its trays back to the pool
+            # (alloc_in_pool), but the real pack fills a cart, so it ships: take its trays back
+            # out of the pool. If another store drew some of them meanwhile, the line keeps only
+            # what is left and the store is re-packed (never ship stock counted as free).
+            _pooled = [l for l in o["lines"] if l.get("alloc_in_pool")]
+            if _pooled:
+                _deny_r = store_deny.get(store_id, NO_DENY)
+                _cut = False
+                for l in _pooled:
+                    want = int(l.get("alloc_units", 0) or 0)
+                    got_u = min(want, int(pools.left(l["sku_id"], _deny_r)))
+                    got_t = got_u // max(1, l["upt"])
+                    pools.take(l["sku_id"], got_t * l["upt"], _deny_r)
+                    if got_t * l["upt"] < want:
+                        _cut = True
+                        alloc_units_total -= want - got_t * l["upt"]
+                    l["alloc_trays"], l["alloc_units"] = got_t, got_t * l["upt"]
+                    l.pop("alloc_in_pool", None)
+                if _cut:
+                    _pack_store(store_id, [l for l in o["lines"] if l.get("alloc_trays", 0) > 0])
+                    o = orders[store_id]
+                    if not any(c["phys_full"] for c in o["carts"]) and store_id not in directed_stores:
+                        pass                 # falls through to the push below with its reduced order
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                continue
         W = sum(c["wholesale_value"] for c in o["carts"])
         units = sum(l["alloc_units"] for l in o["lines"])
         lost = sum(min(l["fc"], max(0.0, l["fc"] - l["projected"])) * usd(l) for l in o["lines"])
@@ -3172,6 +3246,8 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
             t = max(t, lot_trays(l), l.get("trays", 0))
             if l.get("tray_cap") is not None:
                 t = min(t, max(l.get("trays", 0), l["tray_cap"]))
+            if l.get("mcap") is not None:
+                t = min(t, max(l.get("trays", 0), l["mcap"]))
             return t
 
         _fp_by_store = defaultdict(list)
@@ -3292,7 +3368,10 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
                 w = min(w, 4.0)
             if l.get("oh_conflict"):
                 w = min(w, oh_check_wk)
-            return l["fc"] * w - max(0.0, l.get("projected", 0.0))
+            _u = l["fc"] * w - max(0.0, l.get("projected", 0.0))
+            if l.get("mcap") is not None:
+                _u = min(_u, max(l.get("trays", 0), l["mcap"]) * l["upt"])
+            return _u
 
         _mcarts, _rep = [], {}
         for st_id in sorted(orders):
@@ -3719,6 +3798,65 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"shipping ({so_summary['units']:,}u, ${so_summary['wholesale']:,.0f}) at {so_summary['stores']:,} stores · "
         f"shelf checks: {oc_summary['lines_shipped']:,} shipping lines at {oc_summary['stores']:,} stores "
         f"({oc_summary['units_capped_off']:,}u capped off)")
+    # SHIPMENT FORECAST (Jason's agent direction section 9): what THIS shipment is projected to sell,
+    # per store x SKU, F(q,h) at 35 days and at the grade horizon (D 70 days), base and slower
+    # case; routine only (directed programs reported apart); rates are ratios of sums by value.
+    fc_sum = {"routine_units": 0, "routine_wholesale": 0.0, "sold35_units": 0.0, "sold35_wholesale": 0.0,
+              "soldh_units": 0.0, "soldh_wholesale": 0.0, "slower_h_wholesale": 0.0,
+              "by_grade": defaultdict(lambda: {"stores": set(), "wholesale": 0.0, "sold35": 0.0, "soldh": 0.0}),
+              "lines_last_pack_low": 0}
+    for l in _shipped:
+        if l.get("directed_trays") or l.get("variety_codes"):
+            continue
+        q, r_, s_ = l["alloc_units"], l["fc"], max(0.0, l.get("projected", 0.0))
+        v = float((sku_info.get(l["sku_id"]) or {}).get("wholesale_price_whl") or 0)
+        f_ = line_f(l)
+        h_ = line_horizon(l)
+        u35 = DF.sold_units(q, r_, s_, DF.HORIZON_WEEKS, mg_a, f_)
+        uh = DF.sold_units(q, r_, s_, h_, mg_a, f_)
+        us = DF.sold_units(q, r_, s_, h_, DF.SLOWER["a"],
+                           DF.SLOWER["f_hard"] if l.get("accessory") else DF.SLOWER["f_plant"])
+        last = DF.marginal_units(max(0, q - l["upt"]), l["upt"], r_, s_, h_, mg_a, f_)
+        l["forecast"] = {"horizon_wks": h_, "sold35_units": round(u35, 2), "sold_h_units": round(uh, 2),
+                         "sold35_wholesale": round(u35 * v, 2), "sold_h_wholesale": round(uh * v, 2),
+                         "last_pack_units": round(last, 2), "rate": round(r_, 3), "stock_at_receipt": round(s_, 1)}
+        if last < mg_share * l["upt"] * f_:
+            fc_sum["lines_last_pack_low"] += 1
+        fc_sum["routine_units"] += q
+        fc_sum["routine_wholesale"] += q * v
+        fc_sum["sold35_units"] += u35
+        fc_sum["sold35_wholesale"] += u35 * v
+        fc_sum["soldh_units"] += uh
+        fc_sum["soldh_wholesale"] += uh * v
+        fc_sum["slower_h_wholesale"] += us * v
+        g_ = fc_sum["by_grade"][store_cadence(l["store_id"])[0]]
+        g_["stores"].add(l["store_id"])
+        g_["wholesale"] += q * v
+        g_["sold35"] += u35 * v
+        g_["soldh"] += uh * v
+    _rw = fc_sum["routine_wholesale"] or 1.0
+    forecast_summary = {
+        "assumptions": {"pace_factor": mg_a, "plant_sellable_fraction": mg_f, "hard_good_fraction": 1.0,
+                        "horizon_weeks": DF.HORIZON_WEEKS, "d_horizon_weeks": int(sell_down.get("D", 10)),
+                        "slower": DF.SLOWER, "marginal_pack_min_share": mg_share, "marginal_allocation": mg_on},
+        "routine_units": fc_sum["routine_units"], "routine_wholesale": round(fc_sum["routine_wholesale"], 2),
+        "sold35_wholesale": round(fc_sum["sold35_wholesale"], 2),
+        "sellthrough35": round(fc_sum["sold35_wholesale"] / _rw, 4),
+        "sold_grade_horizon_wholesale": round(fc_sum["soldh_wholesale"], 2),
+        "sellthrough_grade_horizon": round(fc_sum["soldh_wholesale"] / _rw, 4),
+        "sellthrough_grade_horizon_slower": round(fc_sum["slower_h_wholesale"] / _rw, 4),
+        "lines_last_pack_under_share": fc_sum["lines_last_pack_low"],
+        "by_dts_grade": {g: {"stores": len(x["stores"]), "wholesale": round(x["wholesale"], 2),
+                             "sellthrough35": round(x["sold35"] / x["wholesale"], 4) if x["wholesale"] else None,
+                             "sellthrough_grade_horizon": round(x["soldh"] / x["wholesale"], 4) if x["wholesale"] else None}
+                         for g, x in sorted(fc_sum["by_grade"].items(), key=lambda kv: str(kv[0]))},
+        "note": "Projected, not achieved: F(q,h) = min(q*f, max(0, h*a*r - s)) per store x SKU at its "
+                "shipped quantity; measure actual receipt cohorts at 14/28/35 days (D: 70).",
+    }
+    log(f"Shipment forecast: routine ${forecast_summary['routine_wholesale']:,.0f} → 35-day "
+        f"${forecast_summary['sold35_wholesale']:,.0f} ({forecast_summary['sellthrough35']:.1%}) · grade horizon "
+        f"{forecast_summary['sellthrough_grade_horizon']:.1%} (slower {forecast_summary['sellthrough_grade_horizon_slower']:.1%})")
+
     # Tray limits / dual-use conversion / cart value floor (Jason's Week 49 order, 11/25)
     tl_summary = {"h2o_terrarium_max_trays": ht_max, "fullprice_share": ht_fp_share,
                   "fullprice_weeks": round(fp_weeks, 1), "accessory_max_boxes": acc_max,
@@ -3755,6 +3893,7 @@ def _run(conn, batch_id, shipping_week, preview, verbose, what_if_unlimited=Fals
         f"avg ${cv_summary['avg_wholesale_per_cart']:,.0f}/cart")
     summary = {
         "engine": ENGINE_VERSION, "spec": "AI Replenishment master spec 2026-11-17",
+        "shipment_forecast": forecast_summary,
         "tray_limits": tl_summary,
         "dual_use_conversion": {k: v for k, v in dual.items() if k != "lines"} | {"lines": len(dual["lines"])},
         "cart_value_floor": cv_summary,

@@ -55,6 +55,21 @@ CATALOG = [
          help="Jason's Week 49 brief item 9: fill all shelf positions, not just a percentage of the cart. "
               "Empty positions on a store's carts are filled with products it has proven it sells, within "
               "weeks of supply, tray limits and supply. Never adds a cart; H2O/Terrarium are never filler."),
+    dict(key="marginal_allocation", group="Demand and goal",
+         label="Only send a tray or box while it adds projected sales", kind="bool", default=True,
+         help="Jason's Week 49 agent direction (11/25). Projected units sold = min(shipped x sellable share, "
+              "weeks x pace x stocked weekly rate - stock at receipt), over 35 days (D stores 70, never "
+              "H2O/Terrarium). Every sizing and top-up step stops when the next pack would add too little."),
+    dict(key="marginal_pack_min_share", group="Demand and goal",
+         label="Next pack must sell at least this share of its units in the window", kind="pct",
+         default=0.5, min=0.05, max=1.0,
+         help="50% = a tray is sent only if at least half of its sellable units are projected to sell "
+              "within the selling window."),
+    dict(key="forecast_pace_factor", group="Demand and goal", label="Forecast pace factor", kind="pct",
+         default=0.9, min=0.5, max=1.2, help="Share of the stocked weekly pace used in the shipment forecast."),
+    dict(key="plant_sellable_fraction", group="Demand and goal",
+         label="Sellable share of shipped plants (after loss / shelf allowance)", kind="pct",
+         default=0.83, min=0.5, max=1.0, help="0.83 = 17% plant loss / shelf allowance. Hard goods use 1.0."),
     dict(key="split_shelves", group="Minimum order and carts",
          label="Two different products may share one shelf", kind="bool", default=True,
          help="Josh 11/25. Two part-filled shelves of different products are combined onto one shelf when "
